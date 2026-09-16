@@ -34,6 +34,25 @@ Backend: `cd backend && python -m venv .venv && .venv/bin/pip install -r require
 
 Set `DATABASE_URL=sqlite:///./enterai.db` for a local no-Docker backend; Docker Compose uses PostgreSQL automatically.
 
+## CLI
+
+The dependency-free CLI covers the same API actions as the dashboard: authentication, dashboards, projects, tasks and subtasks, comments, attachments, teams, users, inbox, activity, search, risks, and confirmed AI actions.
+
+```bash
+python3 -m pip install -e ./cli
+enter-ai auth login --email admin@demo.enterai.local
+```
+
+Or run it directly:
+
+```bash
+python3 cli/enter_ai.py auth login --email admin@demo.enterai.local
+python3 cli/enter_ai.py dashboard
+python3 cli/enter_ai.py ai ask "What is at risk?"
+```
+
+Writes ask for confirmation. Append `--yes` for a deliberate non-interactive write or `--json` for automation. See [`cli/README.md`](cli/README.md) for the full reference.
+
 ## AI safety boundary
 
 `backend/app/services.py` defines `AIProvider`, the single seam for replacing the deterministic MVP provider with an LLM provider. The UI calls `/api/ai/plan`, which only reads workspace data and returns proposed tool calls. Writes go through `/api/ai/confirm`; every action is labelled and user-confirmed before the API mutates a task.

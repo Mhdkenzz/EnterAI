@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "enter-ai-cli"
+version = "0.1.0"
+description = "Command-line client for Enter AI"
+requires-python = ">=3.10"
+
+[project.scripts]
+enter-ai = "enter_ai:main"
+
+[tool.setuptools]
+py-modules = ["enter_ai"]
