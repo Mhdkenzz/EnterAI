@@ -1,6 +1,9 @@
 {
   "name": "enter-ai-web",
   "private": true,
+  "overrides": {
+    "postcss": "$postcss"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",

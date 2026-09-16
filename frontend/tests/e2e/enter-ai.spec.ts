@@ -5,11 +5,12 @@ test("core workspace flows stay interactive", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
   await page.locator("button[aria-label^='Complete']").first().click();
   await expect(page.locator("button[aria-label^='Reopen']").first()).toBeVisible();
+  const projectName = `Playwright ${test.info().project.name} ${Date.now()}`;
   await page.getByRole("button", { name: "New project" }).click();
-  await page.getByLabel("Project name").fill("Playwright project");
+  await page.getByLabel("Project name").fill(projectName);
   await page.getByLabel("Code").fill("PW");
   await page.getByRole("button", { name: "Create project" }).click();
-  await expect(page.getByRole("heading", { name: "Playwright project" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: projectName })).toBeVisible();
   await page.getByRole("button", { name: "New task" }).click();
   await page.getByLabel("Title").fill("Playwright task");
   await page.getByRole("button", { name: "Create task" }).click();

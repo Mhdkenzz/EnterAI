@@ -7,6 +7,8 @@
 - Backend tests: `4 passed` via `cd backend && PYTHONPATH=. /tmp/enterai-venv/bin/python -m pytest -q`.
 - Frontend type and lint gates: `npm run test` and `npm run lint` passed.
 - Frontend production build: `npm run build` passed.
+- Dependency audit: `npm audit --audit-level=high` passed after pinning the vulnerable transitive PostCSS dependency through the package override.
+- Secret-pattern scan across tracked source: clean.
 - API product-flow tests cover login, brief upload/drafting, XLSX extraction, project creation/editing, duplicate rejection, document association, team lookup, task completion timestamps, and dashboard retention.
 
 ## Included Runners
@@ -17,6 +19,7 @@
 - OWASP ZAP baseline: `./qa/run-zap.sh`
 - OWASP dependency scan: `./qa/run-dependency-check.sh`
 - Tryme smoke gate: `./qa/run-tryme.sh`
+- GitHub Actions workflow: `.github/workflows/ci.yml` runs backend, frontend, Playwright/axe, Schemathesis, K6, ZAP, Gitleaks, Trivy, and Dependency-Check on pushes and pull requests.
 
 ## Environment Limits During This Run
 
