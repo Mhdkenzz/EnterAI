@@ -6,7 +6,7 @@ test("core workspace flows stay interactive", async ({ page }) => {
   const projectName = `Playwright ${test.info().project.name} ${Date.now()}`;
   await page.getByRole("button", { name: "New project" }).click();
   await page.getByLabel("Project name").fill(projectName);
-  await page.getByLabel("Code").fill("PW");
+  await page.getByLabel("Code").fill(`PW${test.info().project.name === "mobile" ? "M" : "D"}`);
   await page.getByRole("button", { name: "Create project" }).click();
   await expect(page.getByRole("heading", { name: projectName })).toBeVisible({ timeout: 15000 });
   await page.getByRole("button", { name: "New task" }).click();
