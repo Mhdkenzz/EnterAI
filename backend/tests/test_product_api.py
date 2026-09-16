@@ -77,7 +77,7 @@ def test_copilot_reads_workspace_and_requires_a_signed_confirmation():
         direct_write = client.post("/api/ai/confirm", headers=headers, json={"tool": "create_task", "args": {}})
         assert direct_write.status_code == 422
         confirmed = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": action["confirmation_token"]})
-        assert confirmed.status_code == 201
+        assert confirmed.status_code == 200
         assert confirmed.json()["title"] == "Prepare Copilot review for AI Workspace"
 
         forged = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": action["confirmation_token"] + "forged"})
