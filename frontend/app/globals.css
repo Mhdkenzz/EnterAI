@@ -6,4 +6,4 @@ body { margin: 0; background: #09090b; color: #f6f6f7; font-family: Arial, Helve
 button, input { font: inherit; }
 ::selection { background: rgba(56,189,248,.35); }
 .grid-bg { background-image: linear-gradient(rgba(255,255,255,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.025) 1px,transparent 1px); background-size: 32px 32px; }
-.text-zinc-500, .text-zinc-600 { color: #a1a1aa; }
+.text-zinc-500, .text-zinc-600 { color: #a1a1aa !important; }
