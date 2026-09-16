@@ -56,7 +56,7 @@ jobs:
         working-directory: backend
         run: |
           pip install -r requirements.txt
-          DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
+          ENVIRONMENT=ci ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
       - uses: actions/setup-node@v4
         with:
@@ -91,17 +91,27 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install schemathesis==4.27.2 --upgrade pytest
-          DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
+          ENVIRONMENT=ci ENABLE_API_DOCS=true DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
+          echo $! > /tmp/enter-ai-api.pid
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
       - name: Schemathesis
         run: schemathesis run http://127.0.0.1:8000/openapi.json --checks all --exclude-checks allow_header_conformance,positive_data_acceptance --phases examples,coverage,fuzzing
       - uses: grafana/setup-k6-action@v1
       - name: K6 smoke
         run: k6 run qa/k6/smoke.js
+      - name: Restart API with production docs policy for ZAP
+        working-directory: backend
+        run: |
+          kill "$(cat /tmp/enter-ai-api.pid)"
+          for attempt in $(seq 1 30); do ! curl -sS http://127.0.0.1:8000/health >/dev/null 2>&1 && break || sleep 1; done
+          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
+          for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
       - uses: zaproxy/action-baseline@v0.14.0
         with:
-          target: http://127.0.0.1:8000/docs
+          target: http://127.0.0.1:8000/
+          cmd_options: -c /zap/wrk/qa/zap-rules.conf
           fail_action: true
+          allow_issue_writing: false
 
   security-scans:
     runs-on: ubuntu-latest

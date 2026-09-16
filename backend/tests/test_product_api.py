@@ -2,6 +2,19 @@ from fastapi.testclient import TestClient
 from app.main import app
 from uuid import uuid4
 
+
+def test_security_headers_and_development_docs():
+    with TestClient(app) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert response.headers["x-content-type-options"] == "nosniff"
+        assert response.headers["x-frame-options"] == "DENY"
+        assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+        assert response.headers["permissions-policy"] == "camera=(), microphone=(), geolocation=()"
+        assert response.headers["content-security-policy"].startswith("default-src 'none'")
+        assert response.headers["cache-control"] == "no-store, max-age=0"
+        assert client.get("/docs").status_code == 200
+
 def test_project_document_team_and_completed_task_flow():
     with TestClient(app) as client:
         login = client.post("/api/auth/login", json={"email": "admin@demo.enterai.com", "password": "enterai-demo"})

@@ -17,6 +17,8 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://enterai:enterai_dev_password@db:5432/enterai}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
     ports: ["8000:8000"]
     volumes: [./backend:/app, uploads:/app/uploads]
     depends_on:

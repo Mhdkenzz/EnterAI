@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta
 from typing import Literal
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
@@ -13,7 +13,56 @@ from .models import Activity, Attachment, Comment, Notification, Organization, P
 from .services import AIProvider, extract_document_text, log, seed
 from .storage import get_storage
 
-app = FastAPI(title="Enter AI API", version="0.1.0")
+environment = os.getenv("ENVIRONMENT", "development").strip().lower()
+docs_enabled = os.getenv("ENABLE_API_DOCS", "false" if environment == "production" else "true").strip().lower() in {"1", "true", "yes", "on"}
+
+app = FastAPI(
+    title="Enter AI API",
+    version="0.1.0",
+    docs_url="/docs" if docs_enabled else None,
+    redoc_url="/redoc" if docs_enabled else None,
+    openapi_url="/openapi.json" if docs_enabled else None,
+)
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    """Apply defensive browser headers to every API response.
+
+    The API serves JSON and upload responses, so a strict policy is safe here.
+    Swagger UI is development-only and gets a narrowly scoped policy because
+    FastAPI's generated page loads its CDN assets when docs are enabled.
+    """
+    response = await call_next(request)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+    response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("Cross-Origin-Embedder-Policy", "require-corp")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+
+    if request.url.path in {"/docs", "/redoc"} and docs_enabled:
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "img-src 'self' data: https://fastapi.tiangolo.com; connect-src 'self'",
+        )
+    else:
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; object-src 'none'",
+        )
+
+    # Authenticated API responses and uploaded document metadata must never be
+    # stored by an intermediary or browser cache.
+    response.headers.setdefault("Cache-Control", "no-store, max-age=0")
+    response.headers.setdefault("Pragma", "no-cache")
+    if request.url.scheme == "https" or environment == "production":
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+    return response
 
 
 def custom_openapi():
@@ -45,7 +94,13 @@ allowed_origins = [
     "http://localhost:6767",
     "http://127.0.0.1:6767",
 ]
-app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
+)
 
 @app.on_event("startup")
 def startup():

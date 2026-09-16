@@ -26,7 +26,7 @@ Use the seeded login:
 - Email: `admin@demo.enterai.com`
 - Password: `enterai-demo`
 
-The API docs are at `http://localhost:8000/docs`.
+The API docs are available for local development at `http://localhost:8000/docs`. The Compose configuration disables `/docs`, `/redoc`, and `/openapi.json` by default; enable them explicitly with `ENABLE_API_DOCS=true` only in a trusted development or CI environment.
 
 ## Development
 
