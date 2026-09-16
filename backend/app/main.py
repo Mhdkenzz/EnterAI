@@ -14,7 +14,13 @@ from .models import Activity, Attachment, Comment, Notification, Organization, P
 from .services import AIProvider, log, seed
 
 app = FastAPI(title="Enter AI API", version="0.1.0")
-app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+allowed_origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+    "http://localhost:6767",
+    "http://127.0.0.1:6767",
+]
+app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 @app.on_event("startup")
 def startup():
