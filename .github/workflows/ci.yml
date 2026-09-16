@@ -89,7 +89,7 @@ jobs:
       - name: Start API
         working-directory: backend
         run: |
-          pip install -r requirements.txt schemathesis
+          pip install -r requirements.txt schemathesis==4.27.2
           DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
       - name: Schemathesis
