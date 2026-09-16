@@ -19,12 +19,21 @@ test("core workspace flows stay interactive", async ({ page }) => {
   await complete.click();
   await expect(page.locator("button[aria-label='Reopen Playwright task']")).toBeVisible({ timeout: 15000 });
 });
-test("mobile navigation opens", async ({ page }) => {
+test("responsive navigation opens Copilot and closes on mobile", async ({ page, isMobile }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
-  await page.locator('header button[aria-label="Open menu"]').click({ force: true });
-  await expect(page.getByRole("button", { name: "Teams" })).toBeVisible();
+  const navigation = page.getByRole("complementary");
+  if (isMobile) {
+    await expect(navigation).toBeHidden();
+    await expect(page.getByRole("button", { name: "Ask Enter AI", exact: true })).toHaveCount(1);
+    await page.getByRole("button", { name: "Open menu", exact: true }).click();
+  }
+  await expect(navigation).toBeVisible();
+  await expect(navigation.getByRole("button", { name: "Teams", exact: true })).toBeVisible();
+  await navigation.getByRole("button", { name: "Ask Enter AI", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Enter AI Copilot" })).toBeVisible();
+  if (isMobile) await expect(navigation).toBeHidden();
 });
 test("project brief upload drafts editable fields", async ({ page }) => {
   await page.goto("/");
@@ -40,7 +49,7 @@ test("project brief upload drafts editable fields", async ({ page }) => {
 test("Copilot answers workspace questions and shows a confirmation before writing", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.getByRole("button", { name: "Ask Enter AI" }).first().click();
+  await page.getByRole("main").getByRole("button", { name: "Ask Enter AI", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Enter AI Copilot" })).toBeVisible();
   await page.getByPlaceholder("Ask about work or propose a task").fill("What should I work on today?");
   await page.getByRole("button", { name: "Send message" }).click();

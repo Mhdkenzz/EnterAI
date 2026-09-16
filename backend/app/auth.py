@@ -11,7 +11,20 @@ from .models import User
 
 password_hash = PasswordHash.recommended()
 bearer = HTTPBearer(auto_error=False)
-SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
+
+def _get_jwt_secret() -> str:
+    """Resolve JWT_SECRET securely: production must have it set, dev has fallback."""
+    secret = os.getenv("JWT_SECRET")
+    environment = os.getenv("ENVIRONMENT", "development").strip().lower()
+    if environment == "production" and (not secret or not secret.strip()):
+        raise RuntimeError(
+            "JWT_SECRET must be set in production environment."
+            " Set JWT_SECRET in your environment or .env file."
+        )
+    return secret or "dev-secret-change-me"
+
+SECRET = _get_jwt_secret()
+
 
 def hash_password(value: str): return password_hash.hash(value)
 def verify_password(value: str, hashed: str): return password_hash.verify(value, hashed)

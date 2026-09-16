@@ -17,6 +17,7 @@ import jwt
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .auth import SECRET
 from .models import Project, Task, User
 
 
@@ -194,18 +195,16 @@ def _provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 
 def create_confirmation(user: User, tool: str, args: dict[str, Any]) -> str:
-    secret = os.getenv("JWT_SECRET", "dev-secret-change-me")
     return jwt.encode(
         {"kind": "copilot_confirmation", "sub": user.id, "org": user.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
-        secret,
+        SECRET,
         algorithm="HS256",
     )
 
 
 def read_confirmation(token: str, user: User) -> tuple[str, dict[str, Any]]:
-    secret = os.getenv("JWT_SECRET", "dev-secret-change-me")
     try:
-        claim = jwt.decode(token, secret, algorithms=["HS256"])
+        claim = jwt.decode(token, SECRET, algorithms=["HS256"])
     except jwt.PyJWTError as exc:
         raise ValueError("This Copilot confirmation has expired or is invalid. Ask again to create a new proposal.") from exc
     if claim.get("kind") != "copilot_confirmation" or claim.get("sub") != user.id or claim.get("org") != user.organization_id:
