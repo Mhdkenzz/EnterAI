@@ -1,4 +1,11 @@
+.env
 .env.github
+__pycache__/
+.pytest_cache/
+node_modules/
+.next/
 uploads/
 upload/
 *.db
+*.tar.gz
+*.tsbuildinfo
