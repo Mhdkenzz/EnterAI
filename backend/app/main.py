@@ -80,6 +80,9 @@ def ensure_project(db, user, project_id):
 @app.get("/health")
 def health(): return {"ok":True}
 
+@app.get("/")
+def root(): return {"service": "Enter AI API", "status": "ok"}
+
 @app.post("/api/auth/register")
 def register(data: Register, db: Session = Depends(get_db)):
     if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"Email already exists")
