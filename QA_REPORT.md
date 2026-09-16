@@ -46,6 +46,14 @@ The latest pre-hardening hosted run (`35092278419`) recorded: backend ✅, front
 
 This workspace does not have a usable Docker daemon, Chromium installation, K6, ZAP, Tryme, or a locally installable backend dependency set (package downloads are blocked). Those checks are therefore run by GitHub Actions rather than represented as local passes. The exact commands remain available in `qa/` and the workflow.
 
+## Copilot milestone validation
+
+- The Copilot replaces the former single deterministic planner with scoped backend read tools for projects, workspace tasks, and assigned-priority summaries. Providers receive a minimised data snapshot, never a database session.
+- A write proposal now contains a short-lived signed confirmation token bound to the signed-in user and organisation. `/api/ai/confirm` rejects raw `tool`/`args` input and validates the signed proposal through the existing task API schema before writing.
+- In an isolated temporary checkout, backend source and tests compiled successfully. A direct Copilot logic check passed for priority ranking and signed confirmation decoding.
+- In an isolated temporary frontend checkout, `npm ci`, `npm run test`, `npm run lint`, and `npm run build` passed; `npm ci` reported 0 vulnerabilities.
+- This desktop sandbox cannot run FastAPI's in-process `TestClient` lifecycle (a minimal one-route FastAPI app blocks before startup) or make loopback requests between isolated command processes. The full backend API, Playwright/axe, Schemathesis, K6, and ZAP gates therefore remain enforced by GitHub Actions after the milestone push; they are not represented here as local passes.
+
 ## Known limitations
 
 - Swagger UI remains available only when explicitly enabled in a trusted development/CI environment; its generated page uses FastAPI's CDN assets and is intentionally not exposed in production.

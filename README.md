@@ -8,7 +8,7 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 - Users, roles (`admin`, `manager`, `member`) and teams
 - Projects, list and Kanban views, tasks, subtasks, comments and file attachments
 - Activity history, notifications, My Work, Inbox, portfolio dashboard and global search
-- AI workspace and command bar with a provider boundary and explicit confirmation required before any write
+- Copilot chat with organization-scoped read tools and signed, explicit confirmation required before any write
 - New-project brief ingestion for PDF, DOC, DOCX, TXT, XLSX, CSV, and JSON with editable AI-drafted metadata and suggested tasks
 - Local storage adapter for uploads with a stable interface for a future cloud backend
 - Seeded demo workspace (three projects, users, teams, tasks and notifications)
@@ -57,6 +57,8 @@ Writes ask for confirmation. Append `--yes` for a deliberate non-interactive wri
 
 ## AI safety boundary
 
-`backend/app/services.py` defines `AIProvider`, the single seam for replacing the deterministic MVP provider with an LLM provider. The UI calls `/api/ai/plan`, which only reads workspace data and returns proposed tool calls. Writes go through `/api/ai/confirm`; every action is labelled and user-confirmed before the API mutates a task.
+`backend/app/copilot.py` defines the Copilot boundary. The API creates an organization-scoped workspace snapshot through backend read functions; the provider receives only that minimised data, never a database session or application credentials. `AI_PROVIDER=deterministic` is the offline default. Set `AI_PROVIDER=lmstudio` or `openai_compatible`, plus `AI_BASE_URL`, `AI_MODEL`, and (when needed) `AI_API_KEY`, to use LM Studio or a hosted OpenAI-compatible endpoint.
+
+The UI calls `/api/ai/plan`, which only reads workspace data and returns proposed writes with a short-lived signed confirmation token. `/api/ai/confirm` validates the token against the signed-in user and organization, validates the action through the existing API schemas, then performs the mutation. The client never supplies raw tool arguments for a Copilot write.
 
 For production, add provider credentials through environment variables, make the role policy more granular, persist AI tool audit records, add object storage for attachments, and use a managed Postgres service.

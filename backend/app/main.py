@@ -1,6 +1,5 @@
 import os
 from datetime import datetime, timedelta
-from typing import Literal
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +9,8 @@ from sqlalchemy.orm import Session
 from .auth import create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
 from .models import Activity, Attachment, Comment, Notification, Organization, Project, ProjectDocument, Task, Team, User
-from .services import AIProvider, extract_document_text, log, seed
+from .copilot import CopilotProviderError, CopilotService, WorkspaceTools, read_confirmation
+from .services import ProjectDraftProvider, extract_document_text, log, seed
 from .storage import get_storage
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
@@ -115,8 +115,8 @@ class TaskIn(BaseModel): project_id: str; title: str; description: str | None = 
 class TaskUpdate(BaseModel): title: str | None = None; description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
 class CommentIn(BaseModel): body: str = Field(min_length=1)
 class TeamIn(BaseModel): name: str; description: str | None = None
-class AIRequest(BaseModel): message: str
-class ConfirmAction(BaseModel): tool: Literal["create_task", "update_task"]; args: dict
+class AIRequest(BaseModel): message: str = Field(min_length=1, max_length=4000)
+class ConfirmAction(BaseModel): confirmation_token: str = Field(min_length=20, max_length=10000)
 
 def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"title":user.title,"avatar":user.avatar}
 def project_out(p: Project, db: Session):
@@ -207,7 +207,7 @@ async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(cu
     if not extracted.strip(): raise HTTPException(422,"No readable text was found in this document")
     stored = get_storage().save("project-documents", file.filename or "document", raw)
     document=ProjectDocument(organization_id=user.organization_id,uploaded_by=user.id,file_name=file.filename or "document",path=str(stored),content_type=file.content_type,extracted_text=extracted[:50000]); db.add(document); db.flush()
-    draft=AIProvider().project_draft(document.file_name,document.extracted_text); db.commit()
+    draft=ProjectDraftProvider().project_draft(document.file_name,document.extracted_text); db.commit()
     return {"document":{"id":document.id,"file_name":document.file_name},"draft":draft}
 
 @app.get("/api/projects/{project_id}/documents")
@@ -285,10 +285,18 @@ def risks(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id,Project.health=="at_risk")).all()]
 @app.post("/api/ai/plan")
 def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    ps=db.scalars(select(Project).where(Project.organization_id==user.organization_id)).all(); return AIProvider().plan(data.message,ps)
+    try:
+        return CopilotService().plan(data.message, WorkspaceTools(db, user))
+    except CopilotProviderError as error:
+        raise HTTPException(503, str(error)) from error
 @app.post("/api/ai/confirm")
 def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    if data.tool=="create_task": return create_task(TaskIn(**data.args),user,db)
-    if data.tool=="update_task":
-        args=dict(data.args); tid=args.pop("task_id"); return update_task(tid,TaskUpdate(**args),user,db)
+    try:
+        tool, args = read_confirmation(data.confirmation_token, user)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    log(db, user.organization_id, user.id, "copilot", user.id, "confirmed", tool=tool)
+    if tool=="create_task": return create_task(TaskIn(**args),user,db)
+    if tool=="update_task":
+        args=dict(args); tid=args.pop("task_id"); return update_task(tid,TaskUpdate(**args),user,db)
     raise HTTPException(400,"Unsupported action")

@@ -51,3 +51,34 @@ def test_xlsx_extraction_drafts_content():
         archive.writestr("xl/sharedStrings.xml", "<sst><si><t>Launch plan</t></si><si><t>Owner review</t></si></sst>")
         archive.writestr("xl/worksheets/sheet1.xml", "<worksheet><sheetData><row><c t='s'><v>0</v></c><c t='s'><v>1</v></c></row></sheetData></worksheet>")
     assert "Launch plan" in __import__("app.services", fromlist=["extract_document_text"]).extract_document_text("brief.xlsx", stream.getvalue())
+
+
+def test_copilot_reads_workspace_and_requires_a_signed_confirmation():
+    with TestClient(app) as client:
+        login = client.post("/api/auth/login", json={"email": "admin@demo.enterai.com", "password": "enterai-demo"})
+        headers = {"Authorization": "Bearer " + login.json()["token"]}
+
+        priorities = client.post("/api/ai/plan", headers=headers, json={"message": "What should I work on today?"})
+        assert priorities.status_code == 200
+        assert "Today, focus" in priorities.json()["reply"]
+        assert priorities.json()["actions"] == []
+        assert priorities.json()["read_tools"] == ["get_projects", "get_tasks", "summarize_priorities"]
+
+        summary = client.post("/api/ai/plan", headers=headers, json={"message": "Summarize AI Workspace"})
+        assert summary.status_code == 200
+        assert "AI Workspace" in summary.json()["reply"]
+
+        proposal = client.post("/api/ai/plan", headers=headers, json={"message": "Create task prepare Copilot review for AI Workspace"})
+        assert proposal.status_code == 200
+        action = proposal.json()["actions"][0]
+        assert action["requires_confirmation"] is True
+        assert "args" not in action and "tool" not in action
+
+        direct_write = client.post("/api/ai/confirm", headers=headers, json={"tool": "create_task", "args": {}})
+        assert direct_write.status_code == 422
+        confirmed = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": action["confirmation_token"]})
+        assert confirmed.status_code == 201
+        assert confirmed.json()["title"] == "Prepare Copilot review for AI Workspace"
+
+        forged = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": action["confirmation_token"] + "forged"})
+        assert forged.status_code == 400

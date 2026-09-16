@@ -36,3 +36,16 @@ test("project brief upload drafts editable fields", async ({ page }) => {
   await expect(page.getByText("AI suggestions")).toBeVisible();
   await expect(page.getByLabel("Project name")).not.toHaveValue("");
 });
+
+test("Copilot answers workspace questions and shows a confirmation before writing", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "Ask Enter AI" }).first().click();
+  await expect(page.getByRole("heading", { name: "Enter AI Copilot" })).toBeVisible();
+  await page.getByPlaceholder("Ask about work or propose a task").fill("What should I work on today?");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByText("Today, focus on", { exact: false })).toBeVisible();
+  await page.getByPlaceholder("Ask about work or propose a task").fill("Create task prepare Copilot review for AI Workspace");
+  await page.getByRole("button", { name: "Send message" }).click();
+  await expect(page.getByRole("button", { name: "Confirm and run" })).toBeVisible();
+});

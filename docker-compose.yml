@@ -19,8 +19,14 @@ services:
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       ENVIRONMENT: ${ENVIRONMENT:-production}
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
+      AI_PROVIDER: ${AI_PROVIDER:-deterministic}
+      AI_BASE_URL: ${AI_BASE_URL:-http://host.docker.internal:1234/v1}
+      AI_MODEL: ${AI_MODEL:-local-model}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-20}
     ports: ["8000:8000"]
     volumes: [./backend:/app, uploads:/app/uploads]
+    extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       db: {condition: service_healthy}
   web:

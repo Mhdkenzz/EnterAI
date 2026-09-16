@@ -52,16 +52,8 @@ def seed(db: Session):
     log(db, org.id, users[0].id, "project", projects[0].id, "created", name=projects[0].name)
     db.commit()
 
-class AIProvider:
-    """Provider boundary: replace DeterministicProvider with OpenAI/Anthropic/local implementation."""
-    def plan(self, message: str, projects: list[Project]) -> dict:
-        target = next((p for p in projects if p.name.lower() in message.lower()), projects[0] if projects else None)
-        if any(x in message.lower() for x in ["create", "add", "make a task"]):
-            title = message.replace("create", "").replace("add", "").strip().capitalize()[:140] or "New task"
-            return {"reply": f"I can create **{title}** in {target.name if target else 'your workspace'}. Review it before I write anything.", "actions": [{"tool":"create_task", "label":f"Create task: {title}", "args":{"project_id":target.id if target else None,"title":title,"priority":"medium"}, "requires_confirmation":True}]}
-        risks = [p.name for p in projects if p.health == "at_risk"]
-        return {"reply": f"I found {len(risks)} project risk{'s' if len(risks)!=1 else ''}: {', '.join(risks) or 'none'}. Ask me to create a task, update work, or dig into a project.", "actions": []}
-
+class ProjectDraftProvider:
+    """Dependency-free document-to-draft helper; Copilot providers live in copilot.py."""
     def project_draft(self, filename: str, content: str) -> dict:
         """Turn a user document into an editable project draft without creating data."""
         text = re.sub(r"\s+", " ", content).strip()
