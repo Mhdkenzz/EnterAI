@@ -3,8 +3,10 @@ test("core workspace flows stay interactive", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
-  await page.locator("button[aria-label^='Complete']").first().click();
-  await expect(page.locator("button[aria-label^='Reopen']").first()).toBeVisible();
+  const complete = page.locator("button[aria-label^='Complete']").first();
+  await expect(complete).toBeVisible();
+  await complete.click();
+  await expect(page.locator("button[aria-label^='Reopen']").first()).toBeVisible({ timeout: 15000 });
   const projectName = `Playwright ${test.info().project.name} ${Date.now()}`;
   await page.getByRole("button", { name: "New project" }).click();
   await page.getByLabel("Project name").fill(projectName);
@@ -19,12 +21,14 @@ test("core workspace flows stay interactive", async ({ page }) => {
 test("mobile navigation opens", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
   await page.getByRole("button", { name: "Open menu" }).click();
   await expect(page.getByRole("button", { name: "Teams" })).toBeVisible();
 });
 test("project brief upload drafts editable fields", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
   await page.getByRole("button", { name: "New project" }).click();
   await page.locator('input[type="file"]').setInputFiles({ name: "brief.txt", mimeType: "text/plain", buffer: Buffer.from("Urgent launch\nPrepare rollout checklist") });
   await expect(page.getByText("Document read.")).toBeVisible();

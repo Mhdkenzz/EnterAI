@@ -2,6 +2,7 @@ import os
 from datetime import datetime, timedelta
 from typing import Literal
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import or_, select
@@ -13,6 +14,31 @@ from .services import AIProvider, extract_document_text, log, seed
 from .storage import get_storage
 
 app = FastAPI(title="Enter AI API", version="0.1.0")
+
+
+def custom_openapi():
+    """Advertise the auth and domain errors returned by every API operation."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    schema = get_openapi(title=app.title, version=app.version, routes=app.routes)
+    error_responses = {
+        "400": "Bad request",
+        "401": "Authentication required",
+        "403": "Forbidden",
+        "404": "Not found",
+        "409": "Conflict",
+    }
+    for path in schema.get("paths", {}).values():
+        for operation in path.values():
+            if not isinstance(operation, dict) or "responses" not in operation:
+                continue
+            for status, description in error_responses.items():
+                operation["responses"].setdefault(status, {"description": description})
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = custom_openapi
 allowed_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
