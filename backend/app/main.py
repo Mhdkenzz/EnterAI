@@ -83,7 +83,9 @@ def health(): return {"ok":True}
 @app.post("/api/auth/register")
 def register(data: Register, db: Session = Depends(get_db)):
     if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"Email already exists")
-    org = Organization(name=data.organization_name, slug=data.organization_name.lower().replace(" ","-")[:70]); db.add(org); db.flush()
+    slug = data.organization_name.lower().replace(" ","-")[:70]
+    if db.scalar(select(Organization).where(Organization.slug == slug)): raise HTTPException(409,"Organization already exists")
+    org = Organization(name=data.organization_name, slug=slug); db.add(org); db.flush()
     user = User(organization_id=org.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user); db.commit()
     return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 
