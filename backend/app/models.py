@@ -49,6 +49,18 @@ class Project(Base):
     due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
+class ProjectDocument(Base):
+    __tablename__ = "project_documents"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    uploaded_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    file_name: Mapped[str] = mapped_column(String(255))
+    path: Mapped[str] = mapped_column(String(500))
+    content_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    extracted_text: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
 class Task(Base):
     __tablename__ = "tasks"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)

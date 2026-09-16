@@ -21,7 +21,7 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 
 Use the seeded login:
 
-- Email: `admin@demo.enterai.local`
+- Email: `admin@demo.enterai.com`
 - Password: `enterai-demo`
 
 The API docs are at `http://localhost:8000/docs`.
@@ -40,13 +40,13 @@ The dependency-free CLI covers the same API actions as the dashboard: authentica
 
 ```bash
 python3 -m pip install -e ./cli
-enter-ai auth login --email admin@demo.enterai.local
+enter-ai auth login --email admin@demo.enterai.com
 ```
 
 Or run it directly:
 
 ```bash
-python3 cli/enter_ai.py auth login --email admin@demo.enterai.local
+python3 cli/enter_ai.py auth login --email admin@demo.enterai.com
 python3 cli/enter_ai.py dashboard
 python3 cli/enter_ai.py ai ask "What is at risk?"
 ```

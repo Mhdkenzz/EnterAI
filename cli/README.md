@@ -8,13 +8,13 @@ Start the backend, then from the repository root. For an installable `enter-ai` 
 
 ```bash
 python3 -m pip install -e ./cli
-enter-ai auth login --email admin@demo.enterai.local
+enter-ai auth login --email admin@demo.enterai.com
 ```
 
 Or run it directly without installing anything:
 
 ```bash
-python3 cli/enter_ai.py auth login --email admin@demo.enterai.local
+python3 cli/enter_ai.py auth login --email admin@demo.enterai.com
 python3 cli/enter_ai.py dashboard
 ```
 

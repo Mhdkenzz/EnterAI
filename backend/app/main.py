@@ -10,8 +10,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 from .auth import create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
-from .models import Activity, Attachment, Comment, Notification, Organization, Project, Task, Team, User
-from .services import AIProvider, log, seed
+from .models import Activity, Attachment, Comment, Notification, Organization, Project, ProjectDocument, Task, Team, User
+from .services import AIProvider, extract_document_text, log, seed
 
 app = FastAPI(title="Enter AI API", version="0.1.0")
 allowed_origins = [
@@ -27,9 +27,9 @@ def startup():
     Base.metadata.create_all(engine)
     with next(get_db()) as db: seed(db)
 
-class SignIn(BaseModel): email: EmailStr; password: str
+class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str
 class Register(BaseModel): organization_name: str = Field(min_length=2); name: str; email: EmailStr; password: str = Field(min_length=8)
-class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#8b5cf6"; due_date: datetime | None = None
+class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
 class TaskIn(BaseModel): project_id: str; title: str; description: str | None = None; parent_id: str | None = None; status: str = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []
 class TaskUpdate(BaseModel): title: str | None = None; description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
 class CommentIn(BaseModel): body: str = Field(min_length=1)
@@ -41,7 +41,8 @@ def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.ema
 def project_out(p: Project, db: Session):
     total = db.query(Task).filter(Task.project_id == p.id, Task.parent_id.is_(None)).count(); done = db.query(Task).filter(Task.project_id == p.id, Task.status == "done", Task.parent_id.is_(None)).count()
     owner = db.get(User,p.owner_id) if p.owner_id else None; team = db.get(Team,p.team_id) if p.team_id else None
-    return {"id":p.id,"name":p.name,"code":p.code,"description":p.description,"status":p.status,"health":p.health,"color":p.color,"due_date":p.due_date,"owner":user_out(owner) if owner else None,"team":team.name if team else None,"progress":round(done/total*100) if total else 0,"task_count":total}
+    documents = db.scalars(select(ProjectDocument).where(ProjectDocument.project_id == p.id)).all()
+    return {"id":p.id,"name":p.name,"code":p.code,"description":p.description,"status":p.status,"health":p.health,"color":p.color,"due_date":p.due_date,"owner":user_out(owner) if owner else None,"team":team.name if team else None,"progress":round(done/total*100) if total else 0,"task_count":total,"documents":[{"id":d.id,"file_name":d.file_name,"created_at":d.created_at} for d in documents]}
 def task_out(t: Task, db: Session):
     assignee = db.get(User,t.assignee_id) if t.assignee_id else None
     return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"title":t.title,"description":t.description,"status":t.status,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"due_date":t.due_date,"labels":t.labels,"created_at":t.created_at,"updated_at":t.updated_at}
@@ -72,19 +73,55 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)): retur
 @app.get("/api/dashboard")
 def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db)):
     projects=db.scalars(select(Project).where(Project.organization_id==user.organization_id).order_by(Project.created_at.desc())).all()
-    tasks=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id, Task.assignee_id==user.id, Task.status != "done").order_by(Task.due_date)).all()
-    return {"projects":[project_out(p,db) for p in projects],"my_tasks":[task_out(t,db) for t in tasks],"stats":{"active_projects":len([p for p in projects if p.status=="active"]),"at_risk":len([p for p in projects if p.health=="at_risk"]),"my_open_tasks":len(tasks),"completed_this_week":db.query(Task).filter(Task.assignee_id==user.id,Task.status=="done").count()}}
+    assigned=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id, Task.assignee_id==user.id).order_by(Task.due_date)).all()
+    tasks=sorted(assigned,key=lambda task: task.status=="done")
+    return {"projects":[project_out(p,db) for p in projects],"my_tasks":[task_out(t,db) for t in tasks],"stats":{"active_projects":len([p for p in projects if p.status=="active"]),"at_risk":len([p for p in projects if p.health=="at_risk"]),"my_open_tasks":len([task for task in assigned if task.status!="done"]),"completed_this_week":len([task for task in assigned if task.status=="done"])}}
 
 @app.get("/api/projects")
 def projects(user: User = Depends(current_user), db: Session = Depends(get_db)): return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id)).all()]
 @app.post("/api/projects", status_code=201)
 def create_project(data: ProjectIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    p=Project(**data.model_dump(),organization_id=user.organization_id,owner_id=user.id); db.add(p); db.flush(); log(db,user.organization_id,user.id,"project",p.id,"created",name=p.name); db.commit(); return project_out(p,db)
+    values=data.model_dump(exclude={"source_document_ids"})
+    p=Project(**values,organization_id=user.organization_id,owner_id=user.id); db.add(p); db.flush()
+    if data.source_document_ids:
+        docs=db.scalars(select(ProjectDocument).where(ProjectDocument.id.in_(data.source_document_ids),ProjectDocument.organization_id==user.organization_id,ProjectDocument.project_id.is_(None))).all()
+        for document in docs: document.project_id=p.id
+    log(db,user.organization_id,user.id,"project",p.id,"created",name=p.name); db.commit(); return project_out(p,db)
 @app.get("/api/projects/{project_id}")
 def project(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)): return project_out(ensure_project(db,user,project_id),db)
 @app.get("/api/projects/{project_id}/tasks")
 def project_tasks(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)):
     ensure_project(db,user,project_id); return [task_out(t,db) for t in db.scalars(select(Task).where(Task.project_id==project_id).order_by(Task.position)).all()]
+
+@app.post("/api/project-drafts/assist", status_code=201)
+async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(current_user), db: Session=Depends(get_db)):
+    raw=await file.read()
+    if len(raw) > 5 * 1024 * 1024: raise HTTPException(413,"Documents must be 5 MB or smaller")
+    try: extracted=extract_document_text(file.filename or "document.txt",raw)
+    except ValueError as error: raise HTTPException(415,str(error)) from error
+    if not extracted.strip(): raise HTTPException(422,"No readable text was found in this document")
+    upload_dir=Path("uploads") / "project-documents"; upload_dir.mkdir(parents=True,exist_ok=True)
+    stored=upload_dir / f"{uuid4()}-{Path(file.filename or 'document').name}"; stored.write_bytes(raw)
+    document=ProjectDocument(organization_id=user.organization_id,uploaded_by=user.id,file_name=file.filename or "document",path=str(stored),content_type=file.content_type,extracted_text=extracted[:50000]); db.add(document); db.flush()
+    draft=AIProvider().project_draft(document.file_name,document.extracted_text); db.commit()
+    return {"document":{"id":document.id,"file_name":document.file_name},"draft":draft}
+
+@app.get("/api/projects/{project_id}/documents")
+def project_documents(project_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    ensure_project(db,user,project_id)
+    return [{"id":d.id,"file_name":d.file_name,"content_type":d.content_type,"created_at":d.created_at} for d in db.scalars(select(ProjectDocument).where(ProjectDocument.project_id==project_id)).all()]
+
+@app.post("/api/projects/{project_id}/documents",status_code=201)
+async def add_project_document(project_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
+    ensure_project(db,user,project_id)
+    raw=await file.read()
+    if len(raw) > 5 * 1024 * 1024: raise HTTPException(413,"Documents must be 5 MB or smaller")
+    try: extracted=extract_document_text(file.filename or "document.txt",raw)
+    except ValueError as error: raise HTTPException(415,str(error)) from error
+    upload_dir=Path("uploads") / "project-documents"; upload_dir.mkdir(parents=True,exist_ok=True)
+    stored=upload_dir / f"{uuid4()}-{Path(file.filename or 'document').name}"; stored.write_bytes(raw)
+    document=ProjectDocument(organization_id=user.organization_id,project_id=project_id,uploaded_by=user.id,file_name=file.filename or "document",path=str(stored),content_type=file.content_type,extracted_text=extracted[:50000]); db.add(document); log(db,user.organization_id,user.id,"project",project_id,"document_uploaded",file_name=document.file_name); db.commit()
+    return {"id":document.id,"file_name":document.file_name}
 
 @app.post("/api/tasks",status_code=201)
 def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -115,6 +152,11 @@ async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends
 @app.get("/api/teams")
 def teams(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [{"id":t.id,"name":t.name,"description":t.description,"projects":db.query(Project).filter(Project.team_id==t.id).count()} for t in db.scalars(select(Team).where(Team.organization_id==user.organization_id)).all()]
+@app.get("/api/teams/{team_id}/projects")
+def team_projects(team_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    team=db.get(Team,team_id)
+    if not team or team.organization_id!=user.organization_id: raise HTTPException(404,"Team not found")
+    return [project_out(p,db) for p in db.scalars(select(Project).where(Project.team_id==team_id)).all()]
 @app.post("/api/teams",status_code=201)
 def create_team(data:TeamIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=Team(organization_id=user.organization_id,**data.model_dump()); db.add(t); db.commit(); return {"id":t.id,"name":t.name,"description":t.description}
