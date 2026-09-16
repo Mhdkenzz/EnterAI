@@ -112,9 +112,9 @@ class DeterministicCopilotProvider:
                 None,
             )
             if match:
-                task_count = len([task for task in snapshot["tasks"] if task["project_id"] == match["id"] and task["status"] != "done"])
+                task_count = len([task for task in snapshot["tasks"] if task["project_name"] == match["name"] and task["status"] != "done"])
                 description = match["description"] or "No project description has been added."
-                return f"{match['name']} is {match['status'].replace('_', ' ')} and {match['health'].replace('_', ' ')}. {description} You have {task_count} open assigned task{'s' if task_count != 1 else ''} in it."
+                return f"{match['name']} is {match['status'].replace('_', ' ')} and {match['health'].replace('_', ' ')}. {description} It has {task_count} open task{'s' if task_count != 1 else ''}."
         at_risk = [project["name"] for project in projects if project["health"] == "at_risk"]
         if "risk" in normalized:
             return f"At-risk projects: {', '.join(at_risk) if at_risk else 'none'}. Ask me to summarize a project or plan a confirmed task."
