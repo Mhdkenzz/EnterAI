@@ -6,3 +6,4 @@ node_modules/
 uploads/
 *.db
 *.tar.gz
+*.tsbuildinfo
