@@ -1,0 +1,32 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-enterai}
+      POSTGRES_USER: ${POSTGRES_USER:-enterai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-enterai_dev_password}
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  api:
+    build: ./backend
+    env_file: .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://enterai:enterai_dev_password@db:5432/enterai}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    ports: ["8000:8000"]
+    volumes: [./backend:/app, uploads:/app/uploads]
+    depends_on:
+      db: {condition: service_healthy}
+  web:
+    build: ./frontend
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api}
+    ports: ["3000:3000"]
+    depends_on: [api]
+volumes:
+  postgres_data:
+  uploads:

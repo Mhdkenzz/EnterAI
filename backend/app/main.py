@@ -1,0 +1,141 @@
+import os
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+from uuid import uuid4
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, EmailStr, Field
+from sqlalchemy import or_, select
+from sqlalchemy.orm import Session
+from .auth import create_token, current_user, hash_password, verify_password
+from .database import Base, engine, get_db
+from .models import Activity, Attachment, Comment, Notification, Organization, Project, Task, Team, User
+from .services import AIProvider, log, seed
+
+app = FastAPI(title="Enter AI API", version="0.1.0")
+app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:3000"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+
+@app.on_event("startup")
+def startup():
+    Base.metadata.create_all(engine)
+    with next(get_db()) as db: seed(db)
+
+class SignIn(BaseModel): email: EmailStr; password: str
+class Register(BaseModel): organization_name: str = Field(min_length=2); name: str; email: EmailStr; password: str = Field(min_length=8)
+class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#8b5cf6"; due_date: datetime | None = None
+class TaskIn(BaseModel): project_id: str; title: str; description: str | None = None; parent_id: str | None = None; status: str = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []
+class TaskUpdate(BaseModel): title: str | None = None; description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
+class CommentIn(BaseModel): body: str = Field(min_length=1)
+class TeamIn(BaseModel): name: str; description: str | None = None
+class AIRequest(BaseModel): message: str
+class ConfirmAction(BaseModel): tool: Literal["create_task", "update_task"]; args: dict
+
+def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"title":user.title,"avatar":user.avatar}
+def project_out(p: Project, db: Session):
+    total = db.query(Task).filter(Task.project_id == p.id, Task.parent_id.is_(None)).count(); done = db.query(Task).filter(Task.project_id == p.id, Task.status == "done", Task.parent_id.is_(None)).count()
+    owner = db.get(User,p.owner_id) if p.owner_id else None; team = db.get(Team,p.team_id) if p.team_id else None
+    return {"id":p.id,"name":p.name,"code":p.code,"description":p.description,"status":p.status,"health":p.health,"color":p.color,"due_date":p.due_date,"owner":user_out(owner) if owner else None,"team":team.name if team else None,"progress":round(done/total*100) if total else 0,"task_count":total}
+def task_out(t: Task, db: Session):
+    assignee = db.get(User,t.assignee_id) if t.assignee_id else None
+    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"title":t.title,"description":t.description,"status":t.status,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"due_date":t.due_date,"labels":t.labels,"created_at":t.created_at,"updated_at":t.updated_at}
+def ensure_project(db, user, project_id):
+    project = db.get(Project, project_id)
+    if not project or project.organization_id != user.organization_id: raise HTTPException(404,"Project not found")
+    return project
+
+@app.get("/health")
+def health(): return {"ok":True}
+
+@app.post("/api/auth/register")
+def register(data: Register, db: Session = Depends(get_db)):
+    if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"Email already exists")
+    org = Organization(name=data.organization_name, slug=data.organization_name.lower().replace(" ","-")[:70]); db.add(org); db.flush()
+    user = User(organization_id=org.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user); db.commit()
+    return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
+
+@app.post("/api/auth/login")
+def login(data: SignIn, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.email==data.email))
+    if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"Incorrect email or password")
+    org=db.get(Organization,user.organization_id); return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
+
+@app.get("/api/me")
+def me(user: User = Depends(current_user), db: Session = Depends(get_db)): return {"user":user_out(user),"organization":{"id":user.organization_id,"name":db.get(Organization,user.organization_id).name}}
+
+@app.get("/api/dashboard")
+def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    projects=db.scalars(select(Project).where(Project.organization_id==user.organization_id).order_by(Project.created_at.desc())).all()
+    tasks=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id, Task.assignee_id==user.id, Task.status != "done").order_by(Task.due_date)).all()
+    return {"projects":[project_out(p,db) for p in projects],"my_tasks":[task_out(t,db) for t in tasks],"stats":{"active_projects":len([p for p in projects if p.status=="active"]),"at_risk":len([p for p in projects if p.health=="at_risk"]),"my_open_tasks":len(tasks),"completed_this_week":db.query(Task).filter(Task.assignee_id==user.id,Task.status=="done").count()}}
+
+@app.get("/api/projects")
+def projects(user: User = Depends(current_user), db: Session = Depends(get_db)): return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id)).all()]
+@app.post("/api/projects", status_code=201)
+def create_project(data: ProjectIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    p=Project(**data.model_dump(),organization_id=user.organization_id,owner_id=user.id); db.add(p); db.flush(); log(db,user.organization_id,user.id,"project",p.id,"created",name=p.name); db.commit(); return project_out(p,db)
+@app.get("/api/projects/{project_id}")
+def project(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)): return project_out(ensure_project(db,user,project_id),db)
+@app.get("/api/projects/{project_id}/tasks")
+def project_tasks(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)):
+    ensure_project(db,user,project_id); return [task_out(t,db) for t in db.scalars(select(Task).where(Task.project_id==project_id).order_by(Task.position)).all()]
+
+@app.post("/api/tasks",status_code=201)
+def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    p=ensure_project(db,user,data.project_id); t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title); db.commit(); return task_out(t,db)
+@app.patch("/api/tasks/{task_id}")
+def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
+    before=t.status
+    for key,value in data.model_dump(exclude_unset=True).items(): setattr(t,key,value)
+    log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status); db.commit(); return task_out(t,db)
+@app.delete("/api/tasks/{task_id}",status_code=204)
+def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    t=db.get(Task,task_id)
+    if not t: raise HTTPException(404,"Task not found")
+    ensure_project(db,user,t.project_id); db.delete(t); db.commit()
+
+@app.get("/api/tasks/{task_id}/comments")
+def comments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
+    return [{"id":c.id,"body":c.body,"created_at":c.created_at,"author":user_out(db.get(User,c.author_id))} for c in db.scalars(select(Comment).where(Comment.task_id==task_id)).all()]
+@app.post("/api/tasks/{task_id}/comments",status_code=201)
+def add_comment(task_id:str,data:CommentIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found")); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented"); db.commit(); return {"id":c.id,"body":c.body}
+@app.post("/api/tasks/{task_id}/attachments",status_code=201)
+async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
+    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found")); Path("uploads").mkdir(exist_ok=True); name=f"{uuid4()}-{file.filename}"; path=Path("uploads")/name; path.write_bytes(await file.read()); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename,path=str(path),content_type=file.content_type); db.add(a); db.commit(); return {"id":a.id,"file_name":a.file_name}
+
+@app.get("/api/teams")
+def teams(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    return [{"id":t.id,"name":t.name,"description":t.description,"projects":db.query(Project).filter(Project.team_id==t.id).count()} for t in db.scalars(select(Team).where(Team.organization_id==user.organization_id)).all()]
+@app.post("/api/teams",status_code=201)
+def create_team(data:TeamIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    t=Team(organization_id=user.organization_id,**data.model_dump()); db.add(t); db.commit(); return {"id":t.id,"name":t.name,"description":t.description}
+@app.get("/api/users")
+def users(user:User=Depends(current_user),db:Session=Depends(get_db)): return [user_out(u) for u in db.scalars(select(User).where(User.organization_id==user.organization_id)).all()]
+@app.get("/api/notifications")
+def notifications(user:User=Depends(current_user),db:Session=Depends(get_db)): return [{"id":n.id,"title":n.title,"body":n.body,"href":n.href,"read":n.read,"created_at":n.created_at} for n in db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc())).all()]
+@app.patch("/api/notifications/{notification_id}/read")
+def read_notification(notification_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    n=db.get(Notification,notification_id)
+    if not n or n.user_id!=user.id: raise HTTPException(404,"Notification not found")
+    n.read=True; db.commit(); return {"ok":True}
+@app.get("/api/activity")
+def activity(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    return [{"id":a.id,"action":a.action,"entity_type":a.entity_type,"detail":a.detail,"created_at":a.created_at,"actor":user_out(db.get(User,a.actor_id)) if a.actor_id else None} for a in db.scalars(select(Activity).where(Activity.organization_id==user.organization_id).order_by(Activity.created_at.desc()).limit(50)).all()]
+@app.get("/api/search")
+def search(q:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    term=f"%{q}%"; ps=db.scalars(select(Project).where(Project.organization_id==user.organization_id,or_(Project.name.ilike(term),Project.code.ilike(term)))).all(); ts=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id,Task.title.ilike(term))).all(); return {"projects":[project_out(p,db) for p in ps],"tasks":[task_out(t,db) for t in ts]}
+@app.get("/api/risks")
+def risks(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id,Project.health=="at_risk")).all()]
+@app.post("/api/ai/plan")
+def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    ps=db.scalars(select(Project).where(Project.organization_id==user.organization_id)).all(); return AIProvider().plan(data.message,ps)
+@app.post("/api/ai/confirm")
+def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if data.tool=="create_task": return create_task(TaskIn(**data.args),user,db)
+    if data.tool=="update_task":
+        args=dict(data.args); tid=args.pop("task_id"); return update_task(tid,TaskUpdate(**args),user,db)
+    raise HTTPException(400,"Unsupported action")
