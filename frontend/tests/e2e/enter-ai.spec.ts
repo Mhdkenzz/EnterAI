@@ -21,3 +21,12 @@ test("mobile navigation opens", async ({ page }) => {
   await page.getByRole("button", { name: "Open menu" }).click();
   await expect(page.getByRole("button", { name: "Teams" })).toBeVisible();
 });
+test("project brief upload drafts editable fields", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.getByRole("button", { name: "New project" }).click();
+  await page.locator('input[type="file"]').setInputFiles({ name: "brief.txt", mimeType: "text/plain", buffer: Buffer.from("Urgent launch\nPrepare rollout checklist") });
+  await expect(page.getByText("Document read.")).toBeVisible();
+  await expect(page.getByText("AI suggestions")).toBeVisible();
+  await expect(page.getByLabel("Project name")).not.toHaveValue("");
+});

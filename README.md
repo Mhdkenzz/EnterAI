@@ -9,6 +9,8 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 - Projects, list and Kanban views, tasks, subtasks, comments and file attachments
 - Activity history, notifications, My Work, Inbox, portfolio dashboard and global search
 - AI workspace and command bar with a provider boundary and explicit confirmation required before any write
+- New-project brief ingestion for PDF, DOC, DOCX, TXT, XLSX, CSV, and JSON with editable AI-drafted metadata and suggested tasks
+- Local storage adapter for uploads with a stable interface for a future cloud backend
 - Seeded demo workspace (three projects, users, teams, tasks and notifications)
 - Alembic migration, smoke tests, Docker Compose, and environment configuration
 

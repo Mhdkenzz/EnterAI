@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 import json
 import re
+import html
+from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 from sqlalchemy import func, select
@@ -14,13 +16,12 @@ def log(db: Session, org_id: str, actor_id: str | None, entity_type: str, entity
 def seed(db: Session):
     existing = db.scalar(select(Organization))
     if existing:
-        if existing.name in {"Demo Workspace", "North Star Labs"}:
-            existing.name = "Enter AI"
+        legacy_seed = existing.slug != "enter-ai"
+        if legacy_seed:
+            existing.name, existing.slug = "Enter AI", "enter-ai"
         for user in db.scalars(select(User).where(User.organization_id == existing.id)).all():
-            if user.name in {"Alex Morgan", "Workspace Admin", "Engineering Lead", "Product Designer"}:
-                user.name, user.title, user.avatar = "Enter AI Admin", "Administrator", "EA"
-            if user.email == "admin@demo.enterai.local":
-                user.email = "admin@demo.enterai.com"
+            if legacy_seed and user.role == "admin":
+                user.name, user.title, user.avatar, user.email = "Enter AI Admin", "Administrator", "EA", "admin@demo.enterai.com"
         db.commit()
         return
     org = Organization(name="Enter AI", slug="enter-ai")
@@ -68,11 +69,21 @@ class AIProvider:
         name = re.sub(r"^(project|brief|proposal|plan)\s*[:\-]?\s*", "", first_line, flags=re.I)[:80] or "New project"
         code = "".join(part[0] for part in re.findall(r"[A-Za-z0-9]+", name)[:5]).upper() or "PRJ"
         summary = text[:900]
+        lower = text.lower()
+        priority = "high" if any(word in lower for word in ("urgent", "launch", "deadline", "risk", "critical")) else "medium"
+        suggested_team = "Operations" if any(word in lower for word in ("migration", "support", "rollout", "process")) else "Product"
+        candidates = [re.sub(r"^[\-*\d.\s]+", "", line).strip() for line in content.splitlines()]
+        suggested_tasks = [{"title": line[:140], "priority": priority} for line in candidates if len(line) > 8][:5]
+        if not suggested_tasks:
+            suggested_tasks = [{"title": "Review project brief", "priority": "medium"}, {"title": "Confirm milestones and owners", "priority": "medium"}]
         return {
             "name": name.title() if name.islower() else name,
             "code": code[:16],
             "description": summary or f"Project context imported from {filename}.",
             "health": "on_track",
+            "priority": priority,
+            "suggested_team": suggested_team,
+            "suggested_tasks": suggested_tasks,
             "summary": f"Read {filename}. Review the editable project details before creating it.",
         }
 
@@ -85,8 +96,25 @@ def extract_document_text(filename: str, content: bytes) -> str:
         with ZipFile(__import__("io").BytesIO(content)) as archive:
             xml = archive.read("word/document.xml").decode("utf-8", errors="replace")
         return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", xml)).strip()
+    if suffix == ".doc":
+        printable = content.decode("latin-1", errors="ignore")
+        return " ".join(re.findall(r"[A-Za-z][A-Za-z0-9 ,.;:()/'-]{8,}", printable))
     if suffix == ".pdf":
         # Optional dependency-free fallback keeps uploads safe even without a PDF parser.
         printable = content.decode("latin-1", errors="ignore")
         return " ".join(re.findall(r"[A-Za-z][A-Za-z0-9 ,.;:()/'-]{8,}", printable))
-    raise ValueError("Supported documents are PDF, DOCX, TXT, MD, CSV, and JSON.")
+    if suffix == ".xlsx":
+        with ZipFile(BytesIO(content)) as archive:
+            shared = ""
+            if "xl/sharedStrings.xml" in archive.namelist():
+                shared_xml = archive.read("xl/sharedStrings.xml").decode("utf-8", errors="replace")
+                values = []
+                for item in re.findall(r"<si>(.*?)</si>", shared_xml, flags=re.S):
+                    values.append(html.unescape(re.sub(r"<[^>]+>", " ", item)).strip())
+                shared = "\n".join(values)
+            sheets = []
+            for name in sorted(n for n in archive.namelist() if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")):
+                xml = archive.read(name).decode("utf-8", errors="replace")
+                sheets.append(html.unescape(re.sub(r"<[^>]+>", " ", xml)))
+            return "\n".join(x for x in [shared, *sheets] if x).strip()
+    raise ValueError("Supported documents are PDF, DOC, DOCX, TXT, MD, XLSX, CSV, and JSON.")

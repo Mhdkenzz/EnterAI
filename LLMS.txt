@@ -1,0 +1,27 @@
+# Enter AI
+
+Enter AI is a dark, AI-native enterprise project management MVP.
+
+## Structure
+
+- `frontend/`: Next.js, TypeScript, Tailwind UI.
+- `backend/`: FastAPI modular monolith, SQLAlchemy, Alembic.
+- `qa/`: Playwright, Schemathesis, K6, OWASP ZAP, dependency-check runners.
+
+## Local commands
+
+```sh
+docker compose up --build
+cd frontend && npm run dev -- -p 6767
+cd backend && uvicorn app.main:app --reload --port 8000
+```
+
+The demo account is `admin@demo.enterai.com` / `enterai-demo`.
+
+## AI safety
+
+AI reads workspace data and proposes writes. Task creation and updates require explicit confirmation through `/api/ai/confirm`.
+
+## Uploads
+
+Project briefs accept PDF, DOC, DOCX, TXT, MD, XLSX, CSV, and JSON. Files are stored through `backend/app/storage.py`; local disk is the default and a cloud adapter can be added behind the same boundary.

@@ -1,6 +1,6 @@
 """add project document ingestion"""
 from alembic import op
-from sqlalchemy import Column, DateTime, ForeignKey, String, Text
+from sqlalchemy import Column, DateTime, ForeignKey, String, Text, inspect
 
 revision = "0002_project_documents"
 down_revision = "0001_initial"
@@ -8,6 +8,8 @@ branch_labels = None
 depends_on = None
 
 def upgrade():
+    if "project_documents" in inspect(op.get_bind()).get_table_names():
+        return
     op.create_table(
         "project_documents",
         Column("id", String(), primary_key=True),

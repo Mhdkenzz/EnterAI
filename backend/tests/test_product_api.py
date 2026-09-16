@@ -1,5 +1,6 @@
 from fastapi.testclient import TestClient
 from app.main import app
+from uuid import uuid4
 
 def test_project_document_team_and_completed_task_flow():
     with TestClient(app) as client:
@@ -9,9 +10,10 @@ def test_project_document_team_and_completed_task_flow():
         user_id = client.get("/api/me", headers=headers).json()["user"]["id"]
         draft = client.post("/api/project-drafts/assist", headers=headers, files={"file": ("launch-brief.txt", b"Launch readiness\nPrepare the customer launch and final QA.", "text/plain")})
         assert draft.status_code == 201
-        team = client.post("/api/teams", headers=headers, json={"name": "QA Test Team", "description": "Temporary test team"})
+        suffix = uuid4().hex[:8]
+        team = client.post("/api/teams", headers=headers, json={"name": "QA Test Team " + suffix, "description": "Temporary test team"})
         assert team.status_code == 201
-        project = client.post("/api/projects", headers=headers, json={"name": "QA Test Project", "code": "QATP", "team_id": team.json()["id"], "source_document_ids": [draft.json()["document"]["id"]]})
+        project = client.post("/api/projects", headers=headers, json={"name": "QA Test Project " + suffix, "code": "QA" + suffix[:4].upper(), "team_id": team.json()["id"], "source_document_ids": [draft.json()["document"]["id"]]})
         assert project.status_code == 201
         project_id = project.json()["id"]
         assert project.json()["documents"][0]["id"] == draft.json()["document"]["id"]
@@ -21,3 +23,18 @@ def test_project_document_team_and_completed_task_flow():
         assert client.patch("/api/tasks/" + task.json()["id"], headers=headers, json={"status": "done"}).status_code == 200
         dashboard = client.get("/api/dashboard", headers=headers).json()
         assert any(item["id"] == task.json()["id"] and item["status"] == "done" for item in dashboard["my_tasks"])
+        assert dashboard["stats"]["completed_this_week"] >= 1
+        duplicate = client.post("/api/projects", headers=headers, json={"name": project.json()["name"], "code": "DIFF"})
+        assert duplicate.status_code == 409
+        edited = client.patch("/api/projects/" + project_id, headers=headers, json={"description": "Edited from API"})
+        assert edited.status_code == 200 and edited.json()["description"] == "Edited from API"
+
+
+def test_xlsx_extraction_drafts_content():
+    from io import BytesIO
+    from zipfile import ZIP_DEFLATED, ZipFile
+    stream = BytesIO()
+    with ZipFile(stream, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("xl/sharedStrings.xml", "<sst><si><t>Launch plan</t></si><si><t>Owner review</t></si></sst>")
+        archive.writestr("xl/worksheets/sheet1.xml", "<worksheet><sheetData><row><c t='s'><v>0</v></c><c t='s'><v>1</v></c></row></sheetData></worksheet>")
+    assert "Launch plan" in __import__("app.services", fromlist=["extract_document_text"]).extract_document_text("brief.xlsx", stream.getvalue())
