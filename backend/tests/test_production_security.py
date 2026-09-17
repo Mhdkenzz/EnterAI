@@ -6,13 +6,21 @@ suite runs without that variable set, so none of this can regress local/CI defau
 import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
 
 def _run_startup(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
-    env = {**os.environ, "DATABASE_URL": "sqlite://", "JWT_SECRET": "a" * 32, **env_overrides}
+    # Startup no longer creates schema (Alembic is the sole schema path), so the
+    # boot harness migrates first -- on a file-backed database, because in-memory
+    # SQLite is per-thread and would not share the migrated schema with startup.
+    boot_db = Path(tempfile.mkdtemp()) / "boot.db"
+    env = {**os.environ, "DATABASE_URL": f"sqlite:///{boot_db}", "JWT_SECRET": "a" * 32, **env_overrides}
     script = (
+        "import alembic.config, alembic.command\n"
+        "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"
         "from fastapi.testclient import TestClient\n"
         "from app.main import app\n"
         "with TestClient(app):\n"

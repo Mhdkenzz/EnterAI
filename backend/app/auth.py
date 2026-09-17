@@ -1,3 +1,4 @@
+import hashlib
 import os
 from datetime import datetime, timedelta, timezone
 import jwt
@@ -46,15 +47,33 @@ def _get_jwt_secret() -> str:
 
 SECRET = _get_jwt_secret()
 
+# Session tokens and Copilot confirmation tokens are two different token families that
+# happen to be handed to the same browser. They MUST NOT be interchangeable: a
+# confirmation token is returned to any org member who chats with an agent, and its
+# `sub` is the *agent's* id -- so if it also authenticated, any member could replay it
+# as a bearer token and act as an admin-role agent identity.
+#
+# Two independent defences, both required:
+#   1. A distinct signing key, derived from JWT_SECRET so it rotates with it (no extra
+#      operator configuration, and a runtime env change can never rotate only one of
+#      the two families).
+#   2. An explicit `kind` claim that each verifier pins.
+SESSION_TOKEN_KIND = "session"
+CONFIRMATION_SECRET = hashlib.sha256(f"enterai:copilot-confirmation:v1:{SECRET}".encode()).hexdigest()
+
 
 def hash_password(value: str): return password_hash.hash(value)
 def verify_password(value: str, hashed: str): return password_hash.verify(value, hashed)
 def create_token(user: User):
-    return jwt.encode({"sub": user.id, "exp": datetime.now(timezone.utc)+timedelta(days=7)}, SECRET, algorithm="HS256")
+    return jwt.encode({"kind": SESSION_TOKEN_KIND, "sub": user.id, "exp": datetime.now(timezone.utc)+timedelta(days=7)}, SECRET, algorithm="HS256")
 def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db: Session = Depends(get_db)):
     if not credentials: raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in required")
     try: payload = jwt.decode(credentials.credentials, SECRET, algorithms=["HS256"])
     except jwt.PyJWTError: raise HTTPException(status_code=401, detail="Invalid session")
+    if payload.get("kind") != SESSION_TOKEN_KIND: raise HTTPException(status_code=401, detail="Invalid session")
     user = db.scalar(select(User).where(User.id == payload.get("sub")))
     if not user or not user.active: raise HTTPException(status_code=401, detail="User unavailable")
+    # Agents authenticate with session tokens too (their writes are still gated by
+    # per-route role checks); only confirmation tokens are barred above via the
+    # pinned `kind` claim and the separate confirmation signing key.
     return user

@@ -13,3 +13,5 @@ upload/
 frontend/test-results/
 frontend/playwright-report/
 .schemathesis/
+# Local credential file: never stage or publish.
+/git push token

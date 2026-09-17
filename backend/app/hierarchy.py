@@ -6,9 +6,16 @@ Managers under *each* Director, workers_per_manager Workers under *each* Senior
 Manager. Reconciliation is incremental (existing agents are kept where possible,
 identified by creation order) rather than wipe-and-rebuild, so routine count tweaks
 don't discard an agent's identity, current work, or conversation history.
+
+Shrinking never deletes a surplus agent: it retires it (see `retire_agent`). Retired
+agents keep their row, tasks, messages, and audit trail forever, but stop counting
+towards a level's quota, stop appearing as active agents, and can never again be
+assigned work, execute, or be re-enabled -- see `execution_allowed` (observability.py),
+`assign_task_to_agent` and `send_agent_message` (main.py).
 """
 from __future__ import annotations
 
+from datetime import datetime
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -16,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from .auth import hash_password
 from .observability import audit
-from .models import AgentMessage, HierarchyConfig, Task, User
+from .models import HierarchyConfig, Task, User
 
 LEVEL_TITLES = {
     "ceo": "Chief Executive Officer",
@@ -52,16 +59,31 @@ def _create_agent(db: Session, org_id: str, level: str, parent_id: str | None, n
     return agent
 
 
-def _delete_agent_and_descendants(db: Session, agent: User) -> None:
-    for child in db.scalars(select(User).where(User.parent_agent_id == agent.id)).all():
-        _delete_agent_and_descendants(db, child)
-    for task in db.scalars(select(Task).where(Task.assignee_id == agent.id)).all():
-        task.assignee_id = None
-    for message in db.scalars(select(AgentMessage).where(AgentMessage.agent_id == agent.id)).all():
-        db.delete(message)
-    audit(db, agent.organization_id, None, "agent", agent.id, "deleted")
-    db.delete(agent)
+def retire_agent(db: Session, agent: User, actor_id: str | None = None) -> None:
+    """Retire a single agent in place. Its row, its AgentMessage history, and every
+    Task it was ever the assignee of (including completed ones -- assignee_id is the
+    durable historical record, see sync_agent_task_pointers) are left untouched.
+    The only thing cleared is a live in-progress assignment, since a retired agent
+    can no longer be the one doing that work."""
+    if agent.retired_at is not None:
+        return
+    if agent.current_task_id:
+        current = db.get(Task, agent.current_task_id)
+        if current:
+            current.assignee_id = None
+        agent.current_task_id = None
+    agent.retired_at = datetime.utcnow()
+    agent.execution_enabled = False
+    audit(db, agent.organization_id, actor_id, "agent", agent.id, "retired")
     db.flush()
+
+
+def _retire_with_descendants(db: Session, agent: User) -> None:
+    """A hierarchy shrink removes a whole reporting slot at once, so descendants of
+    the removed role have nowhere left to report and retire along with it."""
+    for child in db.scalars(select(User).where(User.parent_agent_id == agent.id, User.retired_at.is_(None))).all():
+        _retire_with_descendants(db, child)
+    retire_agent(db, agent)
 
 
 def _sync_level(db: Session, org_id: str, level: str, parents: list[User | None], per_parent: int) -> list[User]:
@@ -73,12 +95,13 @@ def _sync_level(db: Session, org_id: str, level: str, parents: list[User | None]
         parent_id = parent.id if parent else None
         existing = db.scalars(
             select(User)
-            .where(User.organization_id == org_id, User.kind == "agent", User.hierarchy_level == level, User.parent_agent_id == parent_id)
+            .where(User.organization_id == org_id, User.kind == "agent", User.hierarchy_level == level,
+                   User.parent_agent_id == parent_id, User.retired_at.is_(None))
             .order_by(User.created_at)
         ).all()
         if len(existing) > per_parent:
             for extra in existing[per_parent:]:
-                _delete_agent_and_descendants(db, extra)
+                _retire_with_descendants(db, extra)
             existing = list(existing[:per_parent])
         while len(existing) < per_parent:
             index = len(existing) + 1

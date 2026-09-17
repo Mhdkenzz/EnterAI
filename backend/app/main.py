@@ -21,6 +21,7 @@ from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_doc
 from .storage import get_storage
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
+demo_seed_enabled = os.getenv("ENABLE_DEMO_SEED", "false" if environment == "production" else "true").strip().lower() in {"1", "true", "yes", "on"}
 docs_enabled = os.getenv("ENABLE_API_DOCS", "false" if environment == "production" else "true").strip().lower() in {"1", "true", "yes", "on"}
 
 app = FastAPI(
@@ -116,8 +117,7 @@ app.add_middleware(
 @app.on_event("startup")
 def startup():
     configure_logging()
-    Base.metadata.create_all(engine)
-    with next(get_db()) as db: seed(db)
+    with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
     execution.start_background_loop()
 
 @app.on_event("shutdown")
@@ -155,6 +155,40 @@ def ensure_project(db, user, project_id):
     project = db.get(Project, project_id)
     if not project or project.organization_id != user.organization_id: raise HTTPException(404,"Project not found")
     return project
+
+def ensure_org_team(db, user, team_id):
+    if team_id is None: return None
+    team = db.get(Team, team_id)
+    if not team or team.organization_id != user.organization_id:
+        raise HTTPException(422, "Team not found")
+    return team
+
+
+def ensure_org_assignee(db, user, assignee_id):
+    """Tasks carry no organization_id of their own -- tenancy is inherited from the
+    project. That makes assignee_id a hole: without this check a caller can point a
+    task at ANY user id in the system, and task_out will then render that foreign
+    user's name, email and role straight back to them. Validate it explicitly."""
+    if not assignee_id: return None
+    assignee = db.get(User, assignee_id)
+    if not assignee or assignee.organization_id != user.organization_id:
+        raise HTTPException(422, "Assignee not found in this workspace")
+    if assignee.kind == "agent":
+        human_admin(user)
+        if assignee.retired_at is not None:
+            raise HTTPException(409, "This agent has been retired and cannot be assigned new work")
+    return assignee
+
+def ensure_task_parent(db, project, parent_id):
+    """A subtask must live in the same project as its parent; otherwise the task tree
+    can be stitched across projects -- and across organizations."""
+    if not parent_id: return None
+    parent = db.get(Task, parent_id)
+    if not parent or parent.project_id != project.id:
+        raise HTTPException(422, "Parent task not found in this project")
+    return parent
+
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
 @app.get("/health")
 def health(): return {"ok":True}
@@ -194,6 +228,7 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
 def projects(user: User = Depends(current_user), db: Session = Depends(get_db)): return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id)).all()]
 @app.post("/api/projects", status_code=201)
 def create_project(data: ProjectIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    ensure_org_team(db, user, data.team_id)
     name, code = data.name.strip(), data.code.strip().upper()
     if not name or not code: raise HTTPException(422, "Project name and code are required")
     duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, or_(Project.name.ilike(name), Project.code.ilike(code))))
@@ -213,9 +248,7 @@ def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(cu
     if "name" in values: values["name"] = values["name"].strip()
     if "code" in values: values["code"] = values["code"].strip().upper()
     if values.get("name") == "" or values.get("code") == "": raise HTTPException(422, "Project name and code cannot be empty")
-    if "team_id" in values and values["team_id"]:
-        team = db.get(Team, values["team_id"])
-        if not team or team.organization_id != user.organization_id: raise HTTPException(422, "Team not found")
+    if "team_id" in values: ensure_org_team(db, user, values["team_id"])
     duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, Project.id != p.id, or_(Project.name.ilike(values.get("name", p.name)), Project.code.ilike(values.get("code", p.code)))))
     if duplicate: raise HTTPException(409, "A project with this name or code already exists")
     for key, value in values.items(): setattr(p, key, value)
@@ -227,7 +260,7 @@ def project_tasks(project_id: str,user: User=Depends(current_user),db:Session=De
 @app.post("/api/project-drafts/assist", status_code=201)
 async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(current_user), db: Session=Depends(get_db)):
     raw=await file.read()
-    if len(raw) > 5 * 1024 * 1024: raise HTTPException(413,"Documents must be 5 MB or smaller")
+    if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Documents must be 5 MB or smaller")
     try: extracted=extract_document_text(file.filename or "document.txt",raw)
     except ValueError as error: raise HTTPException(415,str(error)) from error
     if not extracted.strip(): raise HTTPException(422,"No readable text was found in this document")
@@ -251,7 +284,7 @@ def project_documents(project_id:str,user:User=Depends(current_user),db:Session=
 async def add_project_document(project_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
     ensure_project(db,user,project_id)
     raw=await file.read()
-    if len(raw) > 5 * 1024 * 1024: raise HTTPException(413,"Documents must be 5 MB or smaller")
+    if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Documents must be 5 MB or smaller")
     try: extracted=extract_document_text(file.filename or "document.txt",raw)
     except ValueError as error: raise HTTPException(415,str(error)) from error
     stored = get_storage().save("project-documents", file.filename or "document", raw)
@@ -260,10 +293,18 @@ async def add_project_document(project_id:str,file:UploadFile=File(...),user:Use
 
 @app.post("/api/tasks",status_code=201)
 def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    p=ensure_project(db,user,data.project_id); t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title); db.commit(); return task_out(t,db)
+    p=ensure_project(db,user,data.project_id)
+    ensure_org_assignee(db,user,data.assignee_id); ensure_task_parent(db,p,data.parent_id)
+    t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title); db.commit(); return task_out(t,db)
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
+    t=db.get(Task,task_id); p=ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
+    if "assignee_id" in data.model_fields_set:
+        ensure_org_assignee(db, user, data.assignee_id)
+        if t.assignee_id and t.assignee_id != data.assignee_id:
+            previous_assignee = db.get(User, t.assignee_id)
+            if previous_assignee and previous_assignee.kind == "agent":
+                human_admin(user)
     before, before_assignee_id = t.status, t.assignee_id
     for key,value in data.model_dump(exclude_unset=True).items(): setattr(t,key,value)
     if "status" in data.model_fields_set and data.status != before:
@@ -285,18 +326,21 @@ def add_comment(task_id:str,data:CommentIn,user:User=Depends(current_user),db:Se
     t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found")); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented"); db.commit(); return {"id":c.id,"body":c.body}
 @app.post("/api/tasks/{task_id}/attachments",status_code=201)
 async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found")); path=get_storage().save("task-attachments", file.filename or "attachment", await file.read()); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename or "attachment",path=path,content_type=file.content_type); db.add(a); log(db,user.organization_id,user.id,"task",task_id,"attachment_uploaded"); db.commit(); return {"id":a.id,"file_name":a.file_name}
+    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
+    raw=await file.read()
+    if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Attachments must be 5 MB or smaller")
+    path=get_storage().save("task-attachments", file.filename or "attachment", raw); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename or "attachment",path=path,content_type=file.content_type); db.add(a); log(db,user.organization_id,user.id,"task",task_id,"attachment_uploaded"); db.commit(); return {"id":a.id,"file_name":a.file_name}
 
 @app.get("/api/teams")
 def teams(user:User=Depends(current_user),db:Session=Depends(get_db)):
-    return [{"id":t.id,"name":t.name,"description":t.description,"projects":db.query(Project).filter(Project.team_id==t.id).count()} for t in db.scalars(select(Team).where(Team.organization_id==user.organization_id)).all()]
+    return [{"id":t.id,"name":t.name,"description":t.description,"projects":db.query(Project).filter(Project.team_id==t.id, Project.organization_id==user.organization_id).count()} for t in db.scalars(select(Team).where(Team.organization_id==user.organization_id)).all()]
 @app.get("/api/teams/{team_id}/projects")
 def team_projects(team_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     team=db.get(Team,team_id)
     if not team or team.organization_id!=user.organization_id: raise HTTPException(404,"Team not found")
-    return [project_out(p,db) for p in db.scalars(select(Project).where(Project.team_id==team_id)).all()]
+    return [project_out(p,db) for p in db.scalars(select(Project).where(Project.team_id==team_id, Project.organization_id==user.organization_id)).all()]
 @app.post("/api/teams",status_code=201)
-def create_team(data:TeamIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+def create_team(data:TeamIn,user:User=Depends(human_admin),db:Session=Depends(get_db)):
     t=Team(organization_id=user.organization_id,**data.model_dump()); db.add(t); db.flush(); log(db,user.organization_id,user.id,"team",t.id,"created"); db.commit(); return {"id":t.id,"name":t.name,"description":t.description}
 @app.get("/api/users")
 def users(user:User=Depends(current_user),db:Session=Depends(get_db)): return [user_out(u) for u in db.scalars(select(User).where(User.organization_id==user.organization_id,User.kind=="human")).all()]
@@ -313,11 +357,15 @@ def agent_out(a: User, db: Session) -> dict:
         "is_working": a.current_task_id is not None and not blocked,
         "is_blocked": blocked,
         "last_execution_at": a.last_execution_at,
+        "retired": a.retired_at is not None,
+        "retired_at": a.retired_at,
     }
 
 @app.get("/api/agents")
-def agents(user:User=Depends(current_user),db:Session=Depends(get_db)):
-    rows = db.scalars(select(User).where(User.organization_id==user.organization_id,User.kind=="agent")).all()
+def agents(include_retired: bool = False, user:User=Depends(current_user),db:Session=Depends(get_db)):
+    stmt = select(User).where(User.organization_id==user.organization_id,User.kind=="agent")
+    if not include_retired: stmt = stmt.where(User.retired_at.is_(None))
+    rows = db.scalars(stmt).all()
     return [agent_out(a, db) for a in rows]
 
 def _hierarchy_config_out(cfg: HierarchyConfig) -> dict:
@@ -344,12 +392,15 @@ def update_hierarchy_config(data: HierarchyConfigUpdate, user:User=Depends(human
     return _hierarchy_config_out(cfg)
 
 def assign_task_to_agent(task_id: str, data: AssignAgent, user: User, db: Session):
+    human_admin(user)
     t = db.get(Task, task_id)
     if not t: raise HTTPException(404, "Task not found")
     ensure_project(db, user, t.project_id)
     agent = db.get(User, data.agent_id)
     if not agent or agent.kind != "agent" or agent.organization_id != user.organization_id:
         raise HTTPException(404, "Agent not found")
+    if agent.retired_at is not None:
+        raise HTTPException(409, "This agent has been retired and cannot be assigned new work")
     before_assignee_id = t.assignee_id
     t.assignee_id = agent.id
     sync_agent_task_pointers(db, t, before_assignee_id)
@@ -359,7 +410,7 @@ def assign_task_to_agent(task_id: str, data: AssignAgent, user: User, db: Sessio
     return task_out(t, db)
 
 @app.post("/api/tasks/{task_id}/assign-agent")
-def assign_agent_route(task_id: str, data: AssignAgent, user:User=Depends(current_user), db:Session=Depends(get_db)):
+def assign_agent_route(task_id: str, data: AssignAgent, user:User=Depends(human_admin), db:Session=Depends(get_db)):
     return assign_task_to_agent(task_id, data, user, db)
 
 def _get_org_agent(db: Session, user: User, agent_id: str) -> User:
@@ -382,6 +433,8 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
     if not AI_PLAN_RATE_LIMITER.allow(user.id):
         raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
     agent = _get_org_agent(db, user, agent_id)
+    if agent.retired_at is not None:
+        raise HTTPException(409, "This agent has been retired and can no longer be messaged")
     if not execution_allowed(db, agent):
         raise HTTPException(403, "Agent execution is disabled")
     agent.consecutive_task_failures = 0  # a human reaching out is an intervention -- give the agent a clean start
@@ -477,6 +530,8 @@ def _consume_confirmation_once(token: str) -> bool:
 
 @app.post("/api/ai/confirm")
 def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must confirm this action")
     proposer_agent_id: str | None = None
     try:
         tool, args = read_confirmation(data.confirmation_token, user)

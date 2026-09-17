@@ -22,7 +22,7 @@ import jwt
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from .auth import SECRET
+from .auth import CONFIRMATION_SECRET
 from .models import Activity, Comment, Notification, Project, Task, Team, User
 from .services import log, sync_agent_task_pointers
 from .observability import legacy_detail, provider_call, require_execution, execution_run, audit, audit_context, tool_audit
@@ -228,11 +228,11 @@ WRITE_TOOL_NAMES = {spec["name"] for spec in WRITE_TOOL_SPECS}
 # (the actual safety boundary -- a token minted before a role change must still be
 # re-checked at execution time).
 TOOL_ROLES: dict[str, frozenset[str]] = {
-    "create_task": frozenset({"admin", "member"}),
-    "update_task": frozenset({"admin", "member"}),
-    "add_comment": frozenset({"admin", "member"}),
-    "create_project": frozenset({"admin", "member"}),
-    "update_project": frozenset({"admin", "member"}),
+    "create_task": frozenset({"admin", "manager", "member"}),
+    "update_task": frozenset({"admin", "manager", "member"}),
+    "add_comment": frozenset({"admin", "manager", "member"}),
+    "create_project": frozenset({"admin", "manager", "member"}),
+    "update_project": frozenset({"admin", "manager", "member"}),
     "create_team": frozenset({"admin"}),
     # Only admin-equivalent identities may re-delegate work -- for agents, that's the
     # ceo/vp levels (see hierarchy.SENIOR_LEVELS), matching real reporting authority.
@@ -659,14 +659,14 @@ def _provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 def create_confirmation(user: User, tool: str, args: dict[str, Any]) -> str:
     return jwt.encode(
         {"kind": "copilot_confirmation", "sub": user.id, "org": user.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
-        SECRET,
+        CONFIRMATION_SECRET,
         algorithm="HS256",
     )
 
 
 def read_confirmation(token: str, user: User) -> tuple[str, dict[str, Any]]:
     try:
-        claim = jwt.decode(token, SECRET, algorithms=["HS256"])
+        claim = jwt.decode(token, CONFIRMATION_SECRET, algorithms=["HS256"])
     except jwt.PyJWTError as exc:
         raise ValueError("This Copilot confirmation has expired or is invalid. Ask again to create a new proposal.") from exc
     if claim.get("kind") != "copilot_confirmation" or claim.get("sub") != user.id or claim.get("org") != user.organization_id:
@@ -683,7 +683,7 @@ def create_agent_confirmation(agent: User, tool: str, args: dict[str, Any]) -> s
     confused, since an agent can't click "confirm" for itself; a human in its org must."""
     return jwt.encode(
         {"kind": "agent_copilot_confirmation", "sub": agent.id, "org": agent.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
-        SECRET,
+        CONFIRMATION_SECRET,
         algorithm="HS256",
     )
 
@@ -692,8 +692,10 @@ def read_agent_confirmation(token: str, confirming_user: User, db: Session) -> t
     """Redeem an agent-proposed confirmation on the agent's behalf. Any human in the
     same organisation as the proposing agent may confirm it -- role permission for the
     tool itself is still checked by the caller against the *confirming human's* role."""
+    if confirming_user.kind != "human" or not confirming_user.active:
+        raise ValueError("An active human must confirm this action")
     try:
-        claim = jwt.decode(token, SECRET, algorithms=["HS256"])
+        claim = jwt.decode(token, CONFIRMATION_SECRET, algorithms=["HS256"])
     except jwt.PyJWTError as exc:
         raise ValueError("This Copilot confirmation has expired or is invalid. Ask again to create a new proposal.") from exc
     if claim.get("kind") != "agent_copilot_confirmation" or claim.get("org") != confirming_user.organization_id:

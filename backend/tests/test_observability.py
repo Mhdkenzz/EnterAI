@@ -143,7 +143,7 @@ def test_migration_upgrades_legacy_schema_and_preserves_agent_audit(tmp_path):
         conn.execute(text("INSERT INTO users VALUES ('old')"))
         with Operations.context(MigrationContext.configure(conn)):
             module.upgrade()
-            module.upgrade()  # create_all startup compatibility
+            module.upgrade()  # idempotent, for legacy databases upgraded without Alembic bookkeeping
         assert {'audit_events', 'provider_calls', 'execution_runs'} <= set(inspect(conn).get_table_names())
         assert conn.scalar(text('SELECT execution_enabled FROM organizations')) == 1
         assert conn.scalar(text('SELECT execution_enabled FROM users')) == 1
@@ -166,9 +166,13 @@ def test_provider_reads_and_hierarchy_changes_are_audited_without_reenabling():
         rows = c.get('/api/admin/audit', headers=h, params={'action': 'get_users'}).json()['items']
         assert len(rows) == 1 and rows[0]['source'] == 'copilot'
         c.patch('/api/hierarchy-config', headers=h, json={'vp_count': 0})
-        rows = c.get('/api/admin/audit', headers=h, params={'entity_type': 'agent', 'action': 'deleted'}).json()['items']
+        rows = c.get('/api/admin/audit', headers=h, params={'entity_type': 'agent', 'action': 'retired'}).json()['items']
         assert any(r['entity_id'] == agent['id'] for r in rows)
         assert all(r['initiator_id'] == data['user']['id'] for r in rows)
+        with SessionLocal() as db:
+            retired = db.get(User, agent['id'])
+            # Retirement must never delete the row or quietly flip execution back on.
+            assert retired is not None and retired.retired_at is not None and retired.execution_enabled is False
 
 
 def test_document_draft_usage_and_unexpected_provider_errors_are_safe(monkeypatch):
@@ -254,7 +258,7 @@ def test_role_governance_and_agent_execution_setting():
         agent, _ = identity(org, 'admin', 'agent')
         foreign, _ = workspace(c)
         assert c.patch(f'/api/admin/users/{member}/role', headers=h, json={'role': 'manager'}).json()['role'] == 'manager'
-        assert c.patch(f'/api/admin/users/{data['user']['id']}/role', headers=h, json={'role': 'member'}).status_code == 409
+        assert c.patch(f'/api/admin/users/{data["user"]["id"]}/role', headers=h, json={'role': 'member'}).status_code == 409
         assert c.patch(f'/api/admin/users/{agent}/role', headers=h, json={'role': 'member'}).status_code == 404
         assert c.patch(f'/api/admin/users/{member}/role', headers=foreign, json={'role': 'admin'}).status_code == 404
         assert c.patch(f'/api/admin/users/{member}/role', headers=h, json={'role': 'owner'}).status_code == 422

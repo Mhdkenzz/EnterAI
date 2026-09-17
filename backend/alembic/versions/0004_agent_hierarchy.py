@@ -53,8 +53,11 @@ def downgrade():
     op.drop_table("hierarchy_configs")
     op.drop_index("ix_agent_messages_agent_id", table_name="agent_messages")
     op.drop_table("agent_messages")
-    op.drop_column("users", "last_completed_task_id")
-    op.drop_column("users", "current_task_id")
-    op.drop_column("users", "parent_agent_id")
-    op.drop_column("users", "hierarchy_level")
-    op.drop_column("users", "kind")
+    # SQLite must rebuild the table when removing columns referenced by FKs.
+    # Other dialects retain native ALTER TABLE behavior inside this context.
+    with op.batch_alter_table("users") as batch:
+        batch.drop_column("last_completed_task_id")
+        batch.drop_column("current_task_id")
+        batch.drop_column("parent_agent_id")
+        batch.drop_column("hierarchy_level")
+        batch.drop_column("kind")

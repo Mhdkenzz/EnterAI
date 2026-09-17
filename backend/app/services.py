@@ -74,17 +74,10 @@ def sync_agent_task_pointers(db: Session, task: Task, before_assignee_id: str | 
             assignee.last_completed_task_id = task.id
             assignee.current_task_id = None
 
-def seed(db: Session):
+def seed(db: Session, *, demo_content: bool = True):
     existing = db.scalar(select(Organization))
     if existing:
-        legacy_seed = existing.slug != "enter-ai"
-        if legacy_seed:
-            existing.name, existing.slug = "Enter AI", "enter-ai"
-        for user in db.scalars(select(User).where(User.organization_id == existing.id)).all():
-            if legacy_seed and user.role == "admin":
-                user.name, user.title, user.avatar, user.email = "Enter AI Admin", "Administrator", "EA", "admin@demo.enterai.com"
-        ensure_hierarchy_config(db, existing.id)
-        db.commit()
+        # Bootstrap must never rename a customer's workspace or administrator.
         return
     admin_email, admin_password = _seed_admin_credentials()
     org = Organization(name="Enter AI", slug="enter-ai")
@@ -94,6 +87,9 @@ def seed(db: Session):
         User(organization_id=org.id, name="Enter AI Admin", email=admin_email, password_hash=hash_password(admin_password), role="admin", title="Administrator", avatar="EA"),
     ]
     db.add_all(users); db.flush()
+    if not demo_content:
+        db.commit()
+        return
     product, platform = Team(organization_id=org.id, name="Product", description="Product direction and delivery"), Team(organization_id=org.id, name="Operations", description="Planning and delivery support")
     db.add_all([product, platform]); db.flush()
     projects = [

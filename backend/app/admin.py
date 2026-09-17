@@ -7,6 +7,7 @@ from pydantic import BaseModel, StrictBool
 from sqlalchemy.orm import Session
 from .auth import current_user
 from .database import get_db
+from .hierarchy import retire_agent
 from .models import AuditEvent, Organization, ProviderCall, ExecutionRun, User
 from .services import log
 
@@ -74,8 +75,8 @@ def usage(agent_id: str | None = None, start: datetime | None = None, end: datet
     agents = []
     for a in db.scalars(agents_stmt.order_by(User.created_at, User.id)):
         own = [c for c in calls if c.agent_id == a.id]
-        status = 'disabled' if not enabled or not a.execution_enabled else 'blocked' if a.consecutive_task_failures >= MAX_CONSECUTIVE_FAILURES else 'working' if a.current_task_id else 'idle'
-        agents.append({'id': a.id, 'name': a.name, 'execution_enabled': a.execution_enabled,
+        status = 'retired' if a.retired_at else 'disabled' if not enabled or not a.execution_enabled else 'blocked' if a.consecutive_task_failures >= MAX_CONSECUTIVE_FAILURES else 'working' if a.current_task_id else 'idle'
+        agents.append({'id': a.id, 'name': a.name, 'execution_enabled': a.execution_enabled, 'retired_at': a.retired_at,
             'status': status, 'last_execution_at': a.last_execution_at, 'consecutive_task_failures': a.consecutive_task_failures,
             'calls': len(own), 'failures': sum(c.failed for c in own), 'executions': sum(r.agent_id == a.id for r in runs), 'execution_failures': sum(r.failed and r.agent_id == a.id for r in runs)})
     return {'totals': totals, 'agents': agents, 'provider_mode': CopilotService().mode}
@@ -131,10 +132,28 @@ def update_agent_execution(agent_id: str, data: ExecutionSetting, user: User = D
     target = db.get(User, agent_id)
     if not target or target.organization_id != user.organization_id or target.kind != 'agent':
         raise HTTPException(404, 'Agent not found')
+    if target.retired_at is not None and data.execution_enabled:
+        raise HTTPException(409, 'Retired agents cannot be re-enabled for execution')
     target.execution_enabled = data.execution_enabled
     log(db, user.organization_id, user.id, 'agent', target.id, 'execution_updated', execution_enabled=data.execution_enabled)
     db.commit()
     return {'id': target.id, 'execution_enabled': target.execution_enabled}
+
+
+@router.post('/agents/{agent_id}/retire')
+def retire_agent_route(agent_id: str, user: User = Depends(human_admin), db: Session = Depends(get_db)):
+    """Retire an agent: it keeps its identity and all historical tasks, messages,
+    comments, and audit rows, but can never again receive new work, execute, or
+    show up as active. See hierarchy.retire_agent for what this does and does not
+    touch."""
+    target = db.get(User, agent_id)
+    if not target or target.organization_id != user.organization_id or target.kind != 'agent':
+        raise HTTPException(404, 'Agent not found')
+    if target.retired_at is not None:
+        raise HTTPException(409, 'Agent is already retired')
+    retire_agent(db, target, actor_id=user.id)
+    db.commit()
+    return {'id': target.id, 'retired': True, 'retired_at': target.retired_at}
 
 
 @router.get('/settings')

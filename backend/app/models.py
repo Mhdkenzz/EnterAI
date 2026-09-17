@@ -37,14 +37,21 @@ class User(Base):
     kind: Mapped[str] = mapped_column(String(10), default="human")
     hierarchy_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     parent_agent_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    current_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
-    last_completed_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
+    current_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", name="fk_users_current_task_id_tasks", use_alter=True), nullable=True)
+    last_completed_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", name="fk_users_last_completed_task_id_tasks", use_alter=True), nullable=True)
     # Autonomous execution (Phase 6): consecutive_task_failures is a circuit breaker --
     # an agent stops being polled for its current task once this hits the configured
     # threshold, until a human intervenes (message, reassignment). last_execution_at
     # drives the "agent is working" status shown in the hierarchy tree/inspector.
     consecutive_task_failures: Mapped[int] = mapped_column(Integer, default=0)
     last_execution_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Retention: retiring an agent (headcount shrink or an explicit admin decision)
+    # never deletes it -- identity and all historical tasks/messages/comments/audit
+    # rows must survive. `retired_at` is agent-only and orthogonal to `active`
+    # (human account disable) and `execution_enabled` (scheduler on/off switch);
+    # a retired agent is additionally forced execution_enabled=False, but the two
+    # columns answer different questions and both are checked independently.
+    retired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 class Team(Base):
     __tablename__ = "teams"
@@ -63,7 +70,7 @@ class Project(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="active")
     health: Mapped[str] = mapped_column(String(20), default="on_track")
-    owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", name="fk_projects_owner_id_users", use_alter=True), nullable=True)
     color: Mapped[str] = mapped_column(String(20), default="#7c3aed")
     due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
@@ -83,7 +90,7 @@ class ProjectDocument(Base):
 class Task(Base):
     __tablename__ = "tasks"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
-    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", name="fk_tasks_project_id_projects"), index=True)
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
     title: Mapped[str] = mapped_column(String(240))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

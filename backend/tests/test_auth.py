@@ -70,11 +70,19 @@ assert jwt.decode(session, expected, algorithms=["HS256"])["sub"] == user.id
 assert auth.current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=session), Database()) is user
 args = {"title": "Review"}
 confirmation = copilot.create_confirmation(user, "create_task", args)
-assert jwt.decode(confirmation, expected, algorithms=["HS256"])["kind"] == "copilot_confirmation"
+# The confirmation family is signed with a key derived from (but distinct to) the
+# session secret; the raw session secret must never verify a confirmation token.
+try:
+    jwt.decode(confirmation, expected, algorithms=["HS256"])
+except jwt.InvalidSignatureError:
+    pass
+else:
+    raise AssertionError("confirmation token verified with the raw session secret")
+assert jwt.decode(confirmation, auth.CONFIRMATION_SECRET, algorithms=["HS256"])["kind"] == "copilot_confirmation"
 # Runtime environment changes must not rotate only one token family.
 os.environ["JWT_SECRET"] = secrets.token_hex(32)
 assert copilot.read_confirmation(confirmation, user) == ("create_task", args)
-assert jwt.decode(copilot.create_confirmation(user, "create_task", args), expected, algorithms=["HS256"])["sub"] == user.id
+assert jwt.decode(copilot.create_confirmation(user, "create_task", args), auth.CONFIRMATION_SECRET, algorithms=["HS256"])["sub"] == user.id
 assert auth.current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=session), Database()) is user
 '''
     result = subprocess.run(

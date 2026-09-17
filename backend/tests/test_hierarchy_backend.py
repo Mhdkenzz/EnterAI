@@ -264,7 +264,14 @@ def test_delegate_task_tool_end_to_end_agent_proposes_human_confirms():
         ])
         result = _service_with(provider).plan("Delegate this to my VP", tools)
         token = result["actions"][0]["confirmation_token"]
-        tool, args, proposer_agent_id = read_agent_confirmation(token, ceo_row, db)
+        import pytest
+        with pytest.raises(ValueError, match="active human"):
+            read_agent_confirmation(token, ceo_row, db)
+        human = db.scalar(select(User).where(
+            User.organization_id == org.id, User.email == "admin@demo.enterai.com",
+            User.kind == "human", User.active.is_(True)))
+        assert human is not None
+        tool, args, proposer_agent_id = read_agent_confirmation(token, human, db)
         assert tool == "delegate_task" and proposer_agent_id == ceo["id"]
 
         with TestClient(app) as client:
