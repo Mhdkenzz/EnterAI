@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .auth import hash_password
+from .observability import audit
 from .models import AgentMessage, HierarchyConfig, Task, User
 
 LEVEL_TITLES = {
@@ -47,6 +48,7 @@ def _create_agent(db: Session, org_id: str, level: str, parent_id: str | None, n
     )
     db.add(agent)
     db.flush()
+    audit(db, org_id, None, "agent", agent.id, "created")
     return agent
 
 
@@ -57,6 +59,7 @@ def _delete_agent_and_descendants(db: Session, agent: User) -> None:
         task.assignee_id = None
     for message in db.scalars(select(AgentMessage).where(AgentMessage.agent_id == agent.id)).all():
         db.delete(message)
+    audit(db, agent.organization_id, None, "agent", agent.id, "deleted")
     db.delete(agent)
     db.flush()
 

@@ -56,7 +56,7 @@ jobs:
         working-directory: backend
         run: |
           pip install -r requirements.txt
-          ENVIRONMENT=ci ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
+          ENVIRONMENT=ci ENABLE_API_DOCS=false DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
       - uses: actions/setup-node@v4
         with:
@@ -76,6 +76,9 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Run Playwright and axe tests
         working-directory: frontend
+        env:
+          E2E_DATABASE_URL: sqlite:////tmp/enter-ai-browser-ci.db
+          E2E_PYTHON: python
         run: npm run test:e2e
 
   api-security-and-load:

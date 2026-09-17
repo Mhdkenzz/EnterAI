@@ -13,6 +13,7 @@ from .auth import create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
 from .models import Activity, AgentMessage, Attachment, Comment, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
 from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
+from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging
 from . import execution
 from .hierarchy import MAX_HIERARCHY_AGENTS, desired_counts, reconcile_agents
 from .ratelimit import SlidingWindowRateLimiter
@@ -93,6 +94,8 @@ def custom_openapi():
     return schema
 
 
+from .admin import router as admin_router, human_admin
+app.include_router(admin_router)
 app.openapi = custom_openapi
 _default_origins = [
     "http://localhost:3000",
@@ -112,6 +115,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup():
+    configure_logging()
     Base.metadata.create_all(engine)
     with next(get_db()) as db: seed(db)
     execution.start_background_loop()
@@ -138,7 +142,7 @@ class HierarchyConfigUpdate(BaseModel):
     managers_per_director: int | None = Field(default=None, ge=0, le=20)
     workers_per_manager: int | None = Field(default=None, ge=0, le=20)
 
-def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"title":user.title,"avatar":user.avatar}
+def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"kind":user.kind,"title":user.title,"avatar":user.avatar}
 def project_out(p: Project, db: Session):
     total = db.query(Task).filter(Task.project_id == p.id, Task.parent_id.is_(None)).count(); done = db.query(Task).filter(Task.project_id == p.id, Task.status == "done", Task.parent_id.is_(None)).count()
     owner = db.get(User,p.owner_id) if p.owner_id else None; team = db.get(Team,p.team_id) if p.team_id else None
@@ -165,13 +169,14 @@ def register(data: Register, db: Session = Depends(get_db)):
     if db.scalar(select(Organization).where(Organization.slug == slug)): raise HTTPException(409,"Organization already exists")
     org = Organization(name=data.organization_name, slug=slug); db.add(org); db.flush()
     user = User(organization_id=org.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user)
-    ensure_hierarchy_config(db, org.id); db.commit()
+    ensure_hierarchy_config(db, org.id); db.flush(); log(db, org.id, user.id, "user", user.id, "registered"); db.commit()
     return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 
 @app.post("/api/auth/login")
 def login(data: SignIn, db: Session = Depends(get_db)):
     user = db.scalar(select(User).where(User.email==data.email))
     if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"Incorrect email or password")
+    log(db,user.organization_id,user.id,"user",user.id,"logged_in"); db.commit()
     org=db.get(Organization,user.organization_id); return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 
 @app.get("/api/me")
@@ -227,8 +232,14 @@ async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(cu
     except ValueError as error: raise HTTPException(415,str(error)) from error
     if not extracted.strip(): raise HTTPException(422,"No readable text was found in this document")
     stored = get_storage().save("project-documents", file.filename or "document", raw)
-    document=ProjectDocument(organization_id=user.organization_id,uploaded_by=user.id,file_name=file.filename or "document",path=str(stored),content_type=file.content_type,extracted_text=extracted[:50000]); db.add(document); db.flush()
-    draft=ProjectDraftProvider().project_draft(document.file_name,document.extracted_text); db.commit()
+    document=ProjectDocument(organization_id=user.organization_id,uploaded_by=user.id,file_name=file.filename or "document",path=str(stored),content_type=file.content_type,extracted_text=extracted[:50000])
+    try:
+        draft = provider_call(WorkspaceTools(db, user), "deterministic", lambda: ProjectDraftProvider().project_draft(document.file_name, document.extracted_text))
+    except CopilotProviderError:
+        raise HTTPException(503, "The configured AI provider is unavailable. Try again later.") from None
+    db.add(document); db.flush()
+    log(db,user.organization_id,user.id,"project_document",document.id,"draft_created")
+    db.commit()
     return {"document":{"id":document.id,"file_name":document.file_name},"draft":draft}
 
 @app.get("/api/projects/{project_id}/documents")
@@ -263,7 +274,7 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
 def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id); db.delete(t); db.commit()
+    ensure_project(db,user,t.project_id); log(db,user.organization_id,user.id,"task",t.id,"deleted"); db.delete(t); db.commit()
 
 @app.get("/api/tasks/{task_id}/comments")
 def comments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -274,7 +285,7 @@ def add_comment(task_id:str,data:CommentIn,user:User=Depends(current_user),db:Se
     t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found")); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented"); db.commit(); return {"id":c.id,"body":c.body}
 @app.post("/api/tasks/{task_id}/attachments",status_code=201)
 async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found")); path=get_storage().save("task-attachments", file.filename or "attachment", await file.read()); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename or "attachment",path=path,content_type=file.content_type); db.add(a); db.commit(); return {"id":a.id,"file_name":a.file_name}
+    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found")); path=get_storage().save("task-attachments", file.filename or "attachment", await file.read()); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename or "attachment",path=path,content_type=file.content_type); db.add(a); log(db,user.organization_id,user.id,"task",task_id,"attachment_uploaded"); db.commit(); return {"id":a.id,"file_name":a.file_name}
 
 @app.get("/api/teams")
 def teams(user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -286,7 +297,7 @@ def team_projects(team_id:str,user:User=Depends(current_user),db:Session=Depends
     return [project_out(p,db) for p in db.scalars(select(Project).where(Project.team_id==team_id)).all()]
 @app.post("/api/teams",status_code=201)
 def create_team(data:TeamIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=Team(organization_id=user.organization_id,**data.model_dump()); db.add(t); db.commit(); return {"id":t.id,"name":t.name,"description":t.description}
+    t=Team(organization_id=user.organization_id,**data.model_dump()); db.add(t); db.flush(); log(db,user.organization_id,user.id,"team",t.id,"created"); db.commit(); return {"id":t.id,"name":t.name,"description":t.description}
 @app.get("/api/users")
 def users(user:User=Depends(current_user),db:Session=Depends(get_db)): return [user_out(u) for u in db.scalars(select(User).where(User.organization_id==user.organization_id,User.kind=="human")).all()]
 
@@ -318,8 +329,7 @@ def hierarchy_config(user:User=Depends(current_user),db:Session=Depends(get_db))
     return _hierarchy_config_out(cfg)
 
 @app.patch("/api/hierarchy-config")
-def update_hierarchy_config(data: HierarchyConfigUpdate, user:User=Depends(current_user), db:Session=Depends(get_db)):
-    if user.role != "admin": raise HTTPException(403, "Only admins can configure the agent hierarchy")
+def update_hierarchy_config(data: HierarchyConfigUpdate, user:User=Depends(human_admin), db:Session=Depends(get_db)):
     cfg = ensure_hierarchy_config(db, user.organization_id)
     values = data.model_dump(exclude_unset=True)
     prospective = {**_hierarchy_config_out(cfg), **values}
@@ -328,7 +338,8 @@ def update_hierarchy_config(data: HierarchyConfigUpdate, user:User=Depends(curre
         raise HTTPException(422, f"This configuration would create {total} agents, above the {MAX_HIERARCHY_AGENTS}-agent limit. Reduce the counts per level.")
     for key, value in values.items(): setattr(cfg, key, value)
     db.commit()
-    reconcile_agents(db, user.organization_id)
+    with audit_context(user.kind, user.id, user.id if user.kind == "human" else None):
+        reconcile_agents(db, user.organization_id)
     log(db, user.organization_id, user.id, "hierarchy_config", cfg.id, "updated", **values); db.commit()
     return _hierarchy_config_out(cfg)
 
@@ -371,18 +382,24 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
     if not AI_PLAN_RATE_LIMITER.allow(user.id):
         raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
     agent = _get_org_agent(db, user, agent_id)
+    if not execution_allowed(db, agent):
+        raise HTTPException(403, "Agent execution is disabled")
     agent.consecutive_task_failures = 0  # a human reaching out is an intervention -- give the agent a clean start
     db.add(AgentMessage(agent_id=agent.id, author_id=user.id, role="user", body=data.message))
+    audit(db,user.organization_id,user.id,"agent",agent.id,"message_sent")
     scope_project_id = None
     if agent.current_task_id:
         current_task = db.get(Task, agent.current_task_id)
         if current_task:
             scope_project_id = current_task.project_id
     try:
-        result = CopilotService().plan(data.message, WorkspaceTools(db, agent, scope_project_id=scope_project_id))
+        with audit_context("agent", agent.id, user.id):
+            result = CopilotService().plan(data.message, WorkspaceTools(db, agent, scope_project_id=scope_project_id))
     except CopilotProviderError as error:
         db.commit()
-        raise HTTPException(503, str(error)) from error
+        raise HTTPException(503, "The configured AI provider is unavailable. Try again later.") from error
+    with audit_context("agent", agent.id, user.id):
+        audit(db,user.organization_id,agent.id,"agent",agent.id,"message_sent")
     db.add(AgentMessage(agent_id=agent.id, author_id=None, role="agent", body=result["reply"]))
     db.commit()
     return result
@@ -392,10 +409,10 @@ def notifications(user:User=Depends(current_user),db:Session=Depends(get_db)): r
 def read_notification(notification_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     n=db.get(Notification,notification_id)
     if not n or n.user_id!=user.id: raise HTTPException(404,"Notification not found")
-    n.read=True; db.commit(); return {"ok":True}
+    n.read=True; log(db,user.organization_id,user.id,"notification",n.id,"read"); db.commit(); return {"ok":True}
 @app.get("/api/activity")
 def activity(user:User=Depends(current_user),db:Session=Depends(get_db)):
-    return [{"id":a.id,"action":a.action,"entity_type":a.entity_type,"detail":a.detail,"created_at":a.created_at,"actor":user_out(db.get(User,a.actor_id)) if a.actor_id else None} for a in db.scalars(select(Activity).where(Activity.organization_id==user.organization_id).order_by(Activity.created_at.desc()).limit(50)).all()]
+    return [{"id":a.id,"action":a.action,"entity_type":a.entity_type,"detail":legacy_detail(a.detail or {}),"created_at":a.created_at,"actor":user_out(db.get(User,a.actor_id)) if a.actor_id else None} for a in db.scalars(select(Activity).where(Activity.organization_id==user.organization_id).order_by(Activity.created_at.desc()).limit(50)).all()]
 @app.get("/api/search")
 def search(q:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     term=f"%{q}%"; ps=db.scalars(select(Project).where(Project.organization_id==user.organization_id,or_(Project.name.ilike(term),Project.code.ilike(term)))).all(); ts=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id,Task.title.ilike(term))).all(); return {"projects":[project_out(p,db) for p in ps],"tasks":[task_out(t,db) for t in ts]}
@@ -413,9 +430,13 @@ def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(ge
     if data.project_id:
         ensure_project(db, user, data.project_id)
     try:
-        return CopilotService().plan(data.message, WorkspaceTools(db, user, scope_project_id=data.project_id))
+        with audit_context("copilot", user.id, user.id):
+            result = CopilotService().plan(data.message, WorkspaceTools(db, user, scope_project_id=data.project_id))
+            audit(db,user.organization_id,user.id,"copilot",user.id,"planned")
+        db.commit()
+        return result
     except CopilotProviderError as error:
-        raise HTTPException(503, str(error)) from error
+        raise HTTPException(503, "The configured AI provider is unavailable. Try again later.") from error
 def _without(args: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {key: value for key, value in args.items() if key not in keys}
 
@@ -464,6 +485,8 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
             tool, args, proposer_agent_id = read_agent_confirmation(data.confirmation_token, user, db)
         except ValueError:
             raise HTTPException(400, str(self_error)) from self_error
+    if proposer_agent_id and not execution_allowed(db, db.get(User, proposer_agent_id)):
+        raise HTTPException(403, "Agent execution is disabled")
     handler = WRITE_TOOL_HANDLERS.get(tool)
     if not handler:
         raise HTTPException(400, "Unsupported action")
@@ -473,12 +496,14 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
         raise HTTPException(409, "This Copilot proposal has already been used. Ask again for a new proposal.")
     before = _audit_before_state(tool, args, db)
     try:
-        result = handler(args, user, db)
+        with audit_context("agent" if proposer_agent_id else "copilot", proposer_agent_id or user.id, user.id):
+            result = handler(args, user, db)
     except (TypeError, KeyError, ValidationError) as error:
         raise HTTPException(422, "This Copilot proposal is missing required details.") from error
-    log(db, user.organization_id, user.id, "copilot", user.id, "confirmed",
-        tool=tool, args=jsonable_encoder(args), before=jsonable_encoder(before),
-        after=jsonable_encoder(result) if isinstance(result, dict) else None,
-        proposed_by_agent_id=proposer_agent_id)
+    with audit_context("agent" if proposer_agent_id else "copilot", proposer_agent_id or user.id, user.id):
+        log(db, user.organization_id, user.id, "copilot", user.id, "confirmed",
+            tool=tool, args=jsonable_encoder(args), before=jsonable_encoder(before),
+            after=jsonable_encoder(result) if isinstance(result, dict) else None,
+            proposed_by_agent_id=proposer_agent_id)
     db.commit()
     return result

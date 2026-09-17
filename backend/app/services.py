@@ -39,7 +39,9 @@ def _seed_admin_credentials() -> tuple[str, str]:
     return email, (password or "enterai-demo").strip()
 
 def log(db: Session, org_id: str, actor_id: str | None, entity_type: str, entity_id: str, action: str, **detail):
-    db.add(Activity(organization_id=org_id, actor_id=actor_id, entity_type=entity_type, entity_id=entity_id, action=action, detail=detail))
+    from .observability import audit, legacy_detail
+    audit(db, org_id, actor_id, entity_type, entity_id, action, **detail)
+    db.add(Activity(organization_id=org_id, actor_id=actor_id, entity_type=entity_type, entity_id=entity_id, action=action, detail=legacy_detail(detail)))
 
 def ensure_hierarchy_config(db: Session, organization_id: str) -> HierarchyConfig:
     """Every organization gets exactly one HierarchyConfig row (all-zero until an

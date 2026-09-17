@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from .auth import SECRET
 from .models import Activity, Comment, Notification, Project, Task, Team, User
 from .services import log, sync_agent_task_pointers
+from .observability import legacy_detail, provider_call, require_execution, execution_run, audit, audit_context, tool_audit
 
 
 class CopilotProviderError(RuntimeError):
@@ -108,7 +109,7 @@ class WorkspaceTools:
             select(Activity).where(Activity.organization_id == self.user.organization_id).order_by(Activity.created_at.desc()).limit(20)
         ).all()
         return [
-            {"id": a.id, "action": a.action, "entity_type": a.entity_type, "detail": a.detail, "created_at": a.created_at.isoformat()}
+            {"id": a.id, "action": a.action, "entity_type": a.entity_type, "detail": legacy_detail(a.detail or {}), "created_at": a.created_at.isoformat()}
             for a in rows
         ]
 
@@ -256,6 +257,17 @@ def openai_tool_specs(role: str | None = None) -> list[dict[str, Any]]:
 
 
 def execute_read_tool(name: str, args: dict[str, Any], tools: WorkspaceTools) -> Any:
+    outcome = 'failed'
+    try:
+        result = _execute_read_tool(name, args, tools)
+        outcome = 'succeeded'
+        return result
+    finally:
+        # Never persist provider-controlled tool names or arguments.
+        tool_audit(tools, 'provider_read', name if name in READ_TOOL_NAMES else 'unknown_tool', outcome=outcome)
+
+
+def _execute_read_tool(name: str, args: dict[str, Any], tools: WorkspaceTools) -> Any:
     if name == "get_projects": return tools.get_projects()
     if name == "get_tasks": return tools.get_tasks()
     if name == "get_my_tasks": return tools.get_my_tasks()
@@ -357,7 +369,7 @@ class AnthropicCopilotProvider:
         except (error.URLError, ValueError) as exc:
             raise CopilotProviderError("The configured AI provider is unavailable. Check AI_PROVIDER settings and try again.") from exc
         if "error" in payload:
-            raise CopilotProviderError(payload["error"].get("message", "The configured AI provider returned an error."))
+            raise CopilotProviderError("The configured AI provider returned an error.")
         text_parts: list[str] = []
         tool_calls: list[dict[str, Any]] = []
         for block in payload.get("content", []):
@@ -485,13 +497,24 @@ class CopilotService:
             self.mode = "deterministic"
 
     def plan(self, message: str, tools: WorkspaceTools) -> dict[str, Any]:
+        try:
+            return self._plan(message, tools)
+        except Exception:
+            tool_audit(tools, 'copilot', 'plan_failed', outcome='failed')
+            raise
+
+    def _plan(self, message: str, tools: WorkspaceTools) -> dict[str, Any]:
+        if tools.user.kind == "agent":
+            require_execution(tools.db, tools.user)
         if self.mode == "deterministic":
             return self._plan_deterministic(message, tools)
         return self._plan_tool_calling(message, tools)
 
     def _plan_deterministic(self, message: str, tools: WorkspaceTools) -> dict[str, Any]:
         snapshot = tools.snapshot()
-        reply = self.provider.answer(message, _provider_snapshot(snapshot))
+        reply = provider_call(tools, self.mode, lambda: self.provider.answer(message, _provider_snapshot(snapshot)))
+        if tools.user.kind == "agent":
+            require_execution(tools.db, tools.user)
         actions = self._proposed_actions(message, snapshot, tools.user)
         return {"reply": reply, "actions": actions, "read_tools": ["get_projects", "get_tasks", "summarize_priorities"]}
 
@@ -517,7 +540,11 @@ class CopilotService:
         messages: list[dict[str, Any]] = [self.provider.user_message(message)]
         used_read_tools: list[str] = []
         for _ in range(MAX_TOOL_TURNS):
-            turn = self.provider.respond(system, messages, role)
+            if tools.user.kind == "agent":
+                require_execution(tools.db, tools.user)
+            turn = provider_call(tools, self.mode, lambda: self.provider.respond(system, messages, role))
+            if tools.user.kind == "agent":
+                require_execution(tools.db, tools.user)
             if not turn.tool_calls:
                 return {"reply": turn.text or "I don't have a response right now.", "actions": [], "read_tools": used_read_tools}
             messages.append(self.provider.assistant_message(turn))
@@ -553,6 +580,15 @@ class CopilotService:
         raise CopilotProviderError("Enter AI Copilot could not finish answering within the allotted tool calls. Try a narrower question.")
 
     def run_execution_step(self, tools: WorkspaceTools, task: Task) -> dict[str, Any]:
+        require_execution(tools.db, tools.user)
+        if tools.user.kind != 'agent' or task.assignee_id != tools.user.id or tools.user.current_task_id != task.id:
+            raise CopilotProviderError('Agent task is no longer assigned')
+        with execution_run(tools) as run:
+            result = self._run_execution_step(tools, task)
+            run.outcome = result["outcome"]
+            return result
+
+    def _run_execution_step(self, tools: WorkspaceTools, task: Task) -> dict[str, Any]:
         """One autonomous-execution tick for `tools.user` (must be an agent) on its own
         assigned `task`. log_progress/mark_task_complete execute immediately -- they are
         safe by construction, since neither takes a task/agent id and both always act on
@@ -568,12 +604,16 @@ class CopilotService:
         used_read_tools: list[str] = []
         progress_notes: list[str] = []
         for _ in range(MAX_EXECUTION_TURNS):
-            turn = self.provider.respond(system, messages, agent.role, extra_tools=EXECUTION_TOOL_SPECS)
+            require_execution(db, agent)
+            turn = provider_call(tools, self.mode, lambda: self.provider.respond(system, messages, agent.role, extra_tools=EXECUTION_TOOL_SPECS))
+            require_execution(db, agent)
             if not turn.tool_calls:
                 return {"outcome": "narrated", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
             messages.append(self.provider.assistant_message(turn))
             for call in turn.tool_calls:
                 name = call["name"]
+                if name in EXECUTION_TOOL_NAMES or name in WRITE_TOOL_NAMES:
+                    require_execution(db, agent)
                 if name == "log_progress":
                     note = str(call["args"].get("note") or "").strip()[:2000] or "Made progress."
                     db.add(Comment(task_id=task.id, author_id=agent.id, body=note))

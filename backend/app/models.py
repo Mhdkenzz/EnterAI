@@ -12,6 +12,7 @@ class Organization(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
     name: Mapped[str] = mapped_column(String(160), unique=True)
     slug: Mapped[str] = mapped_column(String(80), unique=True)
+    execution_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 AGENT_HIERARCHY_LEVELS = ("ceo", "vp", "director", "senior_manager", "worker")
@@ -31,6 +32,7 @@ class User(Base):
     title: Mapped[str | None] = mapped_column(String(120), nullable=True)
     avatar: Mapped[str | None] = mapped_column(String(12), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
+    execution_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     kind: Mapped[str] = mapped_column(String(10), default="human")
     hierarchy_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
@@ -124,6 +126,46 @@ class Activity(Base):
     action: Mapped[str] = mapped_column(String(100))
     detail: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+class ExecutionRun(Base):
+    __tablename__ = "execution_runs"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(String, index=True)
+    agent_id: Mapped[str] = mapped_column(String, index=True)
+    outcome: Mapped[str] = mapped_column(String(20), default="started")
+    failed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+
+class ProviderCall(Base):
+    __tablename__ = "provider_calls"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(String, index=True)
+    actor_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    initiator_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str] = mapped_column(String(20))
+    run_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    provider_mode: Mapped[str] = mapped_column(String(30))
+    failed: Mapped[bool] = mapped_column(Boolean, default=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
+
+class AuditEvent(Base):
+    """Append-only ledger; identity strings deliberately have no deletion FKs."""
+    __tablename__ = "audit_events"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(String, index=True)
+    actor_id: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    initiator_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str] = mapped_column(String(20), index=True)
+    action: Mapped[str] = mapped_column(String(100), index=True)
+    entity_type: Mapped[str] = mapped_column(String(40), index=True)
+    entity_id: Mapped[str] = mapped_column(String)
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+
 
 class Notification(Base):
     __tablename__ = "notifications"

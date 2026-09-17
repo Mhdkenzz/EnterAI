@@ -24,8 +24,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .copilot import CopilotProviderError, CopilotService, WorkspaceTools
-from .database import SessionLocal
-from .models import AgentMessage, Task, User
+from .database import SessionLocal, engine
+from .models import AgentMessage, Task, User, Organization
+from .observability import execution_allowed, audit_context, scheduler_failure
 from .ratelimit import SlidingWindowRateLimiter
 
 MAX_CONSECUTIVE_FAILURES = int(os.getenv("AGENT_EXECUTION_MAX_FAILURES", "3"))
@@ -38,7 +39,8 @@ _background_task: asyncio.Task | None = None
 
 def _eligible_agents(db: Session) -> list[User]:
     return db.scalars(
-        select(User).where(
+        select(User).join(Organization, User.organization_id == Organization.id).where(
+            User.execution_enabled.is_(True), Organization.execution_enabled.is_(True),
             User.kind == "agent",
             User.current_task_id.isnot(None),
             User.consecutive_task_failures < MAX_CONSECUTIVE_FAILURES,
@@ -47,6 +49,8 @@ def _eligible_agents(db: Session) -> list[User]:
 
 
 def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
+    if not execution_allowed(db, agent):
+        return
     task = db.get(Task, agent.current_task_id)
     if not task:
         # The task was deleted or unassigned since the agent list was read; clear the
@@ -60,7 +64,7 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
     except CopilotProviderError as error:
         agent.consecutive_task_failures += 1
         agent.last_execution_at = datetime.now(timezone.utc)
-        db.add(AgentMessage(agent_id=agent.id, author_id=None, role="agent", body=f"I couldn't make progress just now: {error}"))
+        db.add(AgentMessage(agent_id=agent.id, author_id=None, role="agent", body="I couldn't make progress just now. Try again later."))
         db.commit()
         return
 
@@ -98,7 +102,13 @@ def run_execution_tick(db: Session | None = None, service: CopilotService | None
         for agent in _eligible_agents(db):
             if not _daily_limiter.allow(agent.id):
                 continue
-            _run_agent_step(db, agent, service)
+            org_id, agent_id = agent.organization_id, agent.id
+            with audit_context("scheduler", agent_id):
+                try:
+                    _run_agent_step(db, agent, service)
+                except Exception:
+                    db.rollback()
+                    scheduler_failure(db.get_bind(), org_id, agent_id)
             stepped += 1
         return stepped
     finally:
@@ -111,7 +121,7 @@ async def _loop() -> None:
         try:
             await asyncio.to_thread(run_execution_tick)
         except Exception:
-            pass  # A single bad tick must never kill the scheduler; the next tick retries.
+            scheduler_failure(engine)  # No tenant/agent is known for a global tick failure.
         await asyncio.sleep(TICK_INTERVAL_SECONDS)
 
 
