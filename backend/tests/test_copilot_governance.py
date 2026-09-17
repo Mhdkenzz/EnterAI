@@ -46,7 +46,7 @@ def _create_member(db) -> tuple[User, dict[str, str]]:
 
 
 def test_tool_specs_hide_admin_only_write_tools_from_members():
-    assert allowed_write_tools("admin") == {"create_task", "update_task", "add_comment", "create_project", "update_project", "create_team"}
+    assert allowed_write_tools("admin") == {"create_task", "update_task", "add_comment", "create_project", "update_project", "create_team", "delegate_task"}
     assert allowed_write_tools("member") == {"create_task", "update_task", "add_comment", "create_project", "update_project"}
     assert "create_team" not in {spec["name"] for spec in anthropic_tool_specs("member")}
     assert "create_team" in {spec["name"] for spec in anthropic_tool_specs("admin")}

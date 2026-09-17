@@ -136,6 +136,13 @@ class WorkspaceTools:
             "tasks": [{"id": t.id, "title": t.title, "project_id": t.project_id} for t in tasks],
         }
 
+    def get_direct_reports(self) -> list[dict[str, Any]]:
+        reports = self.db.scalars(select(User).where(User.parent_agent_id == self.user.id)).all()
+        return [
+            {"id": r.id, "name": r.name, "hierarchy_level": r.hierarchy_level, "current_task_id": r.current_task_id}
+            for r in reports
+        ]
+
     def snapshot(self) -> dict[str, Any]:
         projects = self.get_projects()
         tasks = self.get_tasks()
@@ -166,6 +173,8 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
      "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"], "additionalProperties": False}},
     {"name": "search", "description": "Search projects and tasks by name, code, or title.",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False}},
+    {"name": "get_direct_reports", "description": "List the agents who report directly to you in the org chart (empty if you are not an agent, or have no reports).",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
 ]
 
 WRITE_TOOL_SPECS: list[dict[str, Any]] = [
@@ -200,6 +209,10 @@ WRITE_TOOL_SPECS: list[dict[str, Any]] = [
      "input_schema": {"type": "object", "properties": {
          "name": {"type": "string"}, "description": {"type": "string"},
      }, "required": ["name"], "additionalProperties": False}},
+    {"name": "delegate_task", "description": "Propose reassigning a task to a different agent (e.g. pushing it down to a direct report). Never executes without confirmation.",
+     "input_schema": {"type": "object", "properties": {
+         "task_id": {"type": "string"}, "agent_id": {"type": "string"},
+     }, "required": ["task_id", "agent_id"], "additionalProperties": False}},
 ]
 
 TOOL_SPECS = READ_TOOL_SPECS + WRITE_TOOL_SPECS
@@ -219,6 +232,9 @@ TOOL_ROLES: dict[str, frozenset[str]] = {
     "create_project": frozenset({"admin", "member"}),
     "update_project": frozenset({"admin", "member"}),
     "create_team": frozenset({"admin"}),
+    # Only admin-equivalent identities may re-delegate work -- for agents, that's the
+    # ceo/vp levels (see hierarchy.SENIOR_LEVELS), matching real reporting authority.
+    "delegate_task": frozenset({"admin"}),
 }
 
 
@@ -246,6 +262,7 @@ def execute_read_tool(name: str, args: dict[str, Any], tools: WorkspaceTools) ->
     if name == "get_users": return tools.get_users()
     if name == "get_notifications": return tools.get_notifications()
     if name == "get_activity": return tools.get_activity()
+    if name == "get_direct_reports": return tools.get_direct_reports()
     if name == "get_comments": return tools.get_comments(args.get("task_id", ""))
     if name == "search": return tools.search(args.get("query", ""))
     raise KeyError(f"Unknown read tool {name!r}")
@@ -258,6 +275,7 @@ def _describe_write_call(name: str, args: dict[str, Any]) -> str:
     if name == "update_project": return "Update project"
     if name == "add_comment": return "Add comment"
     if name == "create_team": return f"Create team: {args.get('name', 'New team')}"
+    if name == "delegate_task": return "Delegate task"
     return "Proposed action"
 
 
@@ -469,7 +487,8 @@ class CopilotService:
             return []
         title = re.sub(r"\b(create|add|make)( a)? task\b", "", message, flags=re.I).strip(" :.-")[:140] or "New task"
         args = {"project_id": target["id"], "title": title[:1].upper() + title[1:], "priority": "medium"}
-        return [{"label": f"Create task: {args['title']}", "confirmation_token": create_confirmation(user, "create_task", args), "requires_confirmation": True}]
+        mint = create_agent_confirmation if user.kind == "agent" else create_confirmation
+        return [{"label": f"Create task: {args['title']}", "confirmation_token": mint(user, "create_task", args), "requires_confirmation": True}]
 
     def _plan_tool_calling(self, message: str, tools: WorkspaceTools) -> dict[str, Any]:
         role = tools.user.role
@@ -495,7 +514,8 @@ class CopilotService:
                     elif confirmed_action is not None:
                         messages.append(self.provider.tool_result_message(call["id"], "Only one proposed action is allowed per turn.", is_error=True))
                     else:
-                        token = create_confirmation(tools.user, name, call["args"])
+                        mint = create_agent_confirmation if tools.user.kind == "agent" else create_confirmation
+                        token = mint(tools.user, name, call["args"])
                         label = _describe_write_call(name, call["args"])
                         confirmed_action = {"label": label, "confirmation_token": token, "requires_confirmation": True}
                     continue
@@ -542,3 +562,34 @@ def read_confirmation(token: str, user: User) -> tuple[str, dict[str, Any]]:
     if tool not in WRITE_TOOL_NAMES or not isinstance(args, dict):
         raise ValueError("This Copilot proposal is not supported.")
     return tool, args
+
+
+def create_agent_confirmation(agent: User, tool: str, args: dict[str, Any]) -> str:
+    """Same shape as create_confirmation, but for a proposal an *agent* made rather than
+    the human chatting -- a distinct `kind` so the two token families can never be
+    confused, since an agent can't click "confirm" for itself; a human in its org must."""
+    return jwt.encode(
+        {"kind": "agent_copilot_confirmation", "sub": agent.id, "org": agent.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
+        SECRET,
+        algorithm="HS256",
+    )
+
+
+def read_agent_confirmation(token: str, confirming_user: User, db: Session) -> tuple[str, dict[str, Any], str]:
+    """Redeem an agent-proposed confirmation on the agent's behalf. Any human in the
+    same organisation as the proposing agent may confirm it -- role permission for the
+    tool itself is still checked by the caller against the *confirming human's* role."""
+    try:
+        claim = jwt.decode(token, SECRET, algorithms=["HS256"])
+    except jwt.PyJWTError as exc:
+        raise ValueError("This Copilot confirmation has expired or is invalid. Ask again to create a new proposal.") from exc
+    if claim.get("kind") != "agent_copilot_confirmation" or claim.get("org") != confirming_user.organization_id:
+        raise ValueError("This Copilot confirmation does not belong to your workspace.")
+    agent_id = claim.get("sub")
+    agent = db.get(User, agent_id) if agent_id else None
+    if not agent or agent.kind != "agent" or agent.organization_id != confirming_user.organization_id:
+        raise ValueError("This Copilot confirmation does not belong to your workspace.")
+    tool, args = claim.get("tool"), claim.get("args")
+    if tool not in WRITE_TOOL_NAMES or not isinstance(args, dict):
+        raise ValueError("This Copilot proposal is not supported.")
+    return tool, args, agent_id

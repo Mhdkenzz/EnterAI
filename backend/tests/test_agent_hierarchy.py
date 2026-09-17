@@ -61,6 +61,18 @@ def _make_agent(db, org_id, name, level, parent_id=None, current_task_id=None, l
     return agent
 
 
+def _delete_agents(db, *agents):
+    """These tests build agents directly via SQLAlchemy, bypassing hierarchy
+    reconciliation -- clean them up so they don't linger in the shared demo org and
+    pollute other tests' /api/agents listings (delete children before parents)."""
+    for agent in agents:
+        for message in db.scalars(select(AgentMessage).where(AgentMessage.agent_id == agent.id)).all():
+            db.delete(message)
+    for agent in agents:
+        db.delete(agent)
+    db.commit()
+
+
 def test_agents_endpoint_reports_hierarchy_links_and_current_and_last_task():
     headers, org, db = _admin_headers_and_org()
     try:
@@ -86,6 +98,7 @@ def test_agents_endpoint_reports_hierarchy_links_and_current_and_last_task():
         assert by_id[vp.id]["last_completed_task"]["id"] == completed_task.id
         assert by_id[ceo.id]["current_task"] is None
     finally:
+        _delete_agents(db, vp, ceo)
         db.close()
 
 
@@ -104,6 +117,7 @@ def test_agents_are_excluded_from_the_human_user_list_and_copilot_read_tool():
         tools = WorkspaceTools(db, admin)
         assert all(u["id"] != agent.id for u in tools.get_users())
     finally:
+        _delete_agents(db, agent)
         db.close()
 
 
@@ -121,4 +135,5 @@ def test_agent_messages_persist_independently_of_the_general_copilot_transcript(
         assert history[0].author_id == admin.id
         assert history[1].author_id is None
     finally:
+        _delete_agents(db, agent)
         db.close()

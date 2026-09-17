@@ -11,8 +11,9 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 from .auth import create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
-from .models import Activity, Attachment, Comment, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
-from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_confirmation
+from .models import Activity, AgentMessage, Attachment, Comment, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
+from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
+from .hierarchy import MAX_HIERARCHY_AGENTS, desired_counts, reconcile_agents
 from .ratelimit import SlidingWindowRateLimiter
 from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed
 from .storage import get_storage
@@ -121,6 +122,13 @@ class CommentIn(BaseModel): body: str = Field(min_length=1)
 class TeamIn(BaseModel): name: str; description: str | None = None
 class AIRequest(BaseModel): message: str = Field(min_length=1, max_length=4000); project_id: str | None = None
 class ConfirmAction(BaseModel): confirmation_token: str = Field(min_length=20, max_length=10000)
+class AssignAgent(BaseModel): agent_id: str
+class AgentMessageIn(BaseModel): message: str = Field(min_length=1, max_length=4000)
+class HierarchyConfigUpdate(BaseModel):
+    vp_count: int | None = Field(default=None, ge=0, le=20)
+    directors_per_vp: int | None = Field(default=None, ge=0, le=20)
+    managers_per_director: int | None = Field(default=None, ge=0, le=20)
+    workers_per_manager: int | None = Field(default=None, ge=0, le=20)
 
 def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"title":user.title,"avatar":user.avatar}
 def project_out(p: Project, db: Session):
@@ -234,13 +242,33 @@ async def add_project_document(project_id:str,file:UploadFile=File(...),user:Use
 @app.post("/api/tasks",status_code=201)
 def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     p=ensure_project(db,user,data.project_id); t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title); db.commit(); return task_out(t,db)
+def _sync_agent_task_pointers(db: Session, task: Task, before_assignee_id: str | None) -> None:
+    """Keep an agent's current/last-completed task pointers in step with the task it's
+    assigned to, however the assignment or status change was made (direct PATCH,
+    /assign-agent, or a confirmed delegate_task proposal all funnel through here)."""
+    if task.assignee_id != before_assignee_id:
+        if before_assignee_id:
+            previous = db.get(User, before_assignee_id)
+            if previous and previous.kind == "agent" and previous.current_task_id == task.id:
+                previous.current_task_id = None
+        if task.assignee_id:
+            new_assignee = db.get(User, task.assignee_id)
+            if new_assignee and new_assignee.kind == "agent":
+                new_assignee.current_task_id = task.id
+    if task.status == "done" and task.assignee_id:
+        assignee = db.get(User, task.assignee_id)
+        if assignee and assignee.kind == "agent" and assignee.current_task_id == task.id:
+            assignee.last_completed_task_id = task.id
+            assignee.current_task_id = None
+
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
-    before=t.status
+    before, before_assignee_id = t.status, t.assignee_id
     for key,value in data.model_dump(exclude_unset=True).items(): setattr(t,key,value)
     if "status" in data.model_fields_set and data.status != before:
         t.completed_at = datetime.utcnow() if data.status == "done" else None
+    _sync_agent_task_pointers(db, t, before_assignee_id)
     log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status); db.commit(); return task_out(t,db)
 @app.delete("/api/tasks/{task_id}",status_code=204)
 def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -288,10 +316,81 @@ def agents(user:User=Depends(current_user),db:Session=Depends(get_db)):
     rows = db.scalars(select(User).where(User.organization_id==user.organization_id,User.kind=="agent")).all()
     return [agent_out(a, db) for a in rows]
 
+def _hierarchy_config_out(cfg: HierarchyConfig) -> dict:
+    return {"vp_count":cfg.vp_count,"directors_per_vp":cfg.directors_per_vp,"managers_per_director":cfg.managers_per_director,"workers_per_manager":cfg.workers_per_manager}
+
 @app.get("/api/hierarchy-config")
 def hierarchy_config(user:User=Depends(current_user),db:Session=Depends(get_db)):
     cfg = ensure_hierarchy_config(db, user.organization_id); db.commit()
-    return {"vp_count":cfg.vp_count,"directors_per_vp":cfg.directors_per_vp,"managers_per_director":cfg.managers_per_director,"workers_per_manager":cfg.workers_per_manager}
+    return _hierarchy_config_out(cfg)
+
+@app.patch("/api/hierarchy-config")
+def update_hierarchy_config(data: HierarchyConfigUpdate, user:User=Depends(current_user), db:Session=Depends(get_db)):
+    if user.role != "admin": raise HTTPException(403, "Only admins can configure the agent hierarchy")
+    cfg = ensure_hierarchy_config(db, user.organization_id)
+    values = data.model_dump(exclude_unset=True)
+    prospective = {**_hierarchy_config_out(cfg), **values}
+    total = sum(desired_counts(**prospective).values())
+    if total > MAX_HIERARCHY_AGENTS:
+        raise HTTPException(422, f"This configuration would create {total} agents, above the {MAX_HIERARCHY_AGENTS}-agent limit. Reduce the counts per level.")
+    for key, value in values.items(): setattr(cfg, key, value)
+    db.commit()
+    reconcile_agents(db, user.organization_id)
+    log(db, user.organization_id, user.id, "hierarchy_config", cfg.id, "updated", **values); db.commit()
+    return _hierarchy_config_out(cfg)
+
+def assign_task_to_agent(task_id: str, data: AssignAgent, user: User, db: Session):
+    t = db.get(Task, task_id)
+    if not t: raise HTTPException(404, "Task not found")
+    ensure_project(db, user, t.project_id)
+    agent = db.get(User, data.agent_id)
+    if not agent or agent.kind != "agent" or agent.organization_id != user.organization_id:
+        raise HTTPException(404, "Agent not found")
+    before_assignee_id = t.assignee_id
+    t.assignee_id = agent.id
+    _sync_agent_task_pointers(db, t, before_assignee_id)
+    log(db, user.organization_id, user.id, "task", t.id, "delegated_to_agent", agent_id=agent.id, agent_name=agent.name)
+    db.commit()
+    return task_out(t, db)
+
+@app.post("/api/tasks/{task_id}/assign-agent")
+def assign_agent_route(task_id: str, data: AssignAgent, user:User=Depends(current_user), db:Session=Depends(get_db)):
+    return assign_task_to_agent(task_id, data, user, db)
+
+def _get_org_agent(db: Session, user: User, agent_id: str) -> User:
+    agent = db.get(User, agent_id)
+    if not agent or agent.kind != "agent" or agent.organization_id != user.organization_id:
+        raise HTTPException(404, "Agent not found")
+    return agent
+
+def agent_message_out(m: AgentMessage) -> dict:
+    return {"id": m.id, "role": m.role, "body": m.body, "author_id": m.author_id, "created_at": m.created_at}
+
+@app.get("/api/agents/{agent_id}/messages")
+def agent_messages(agent_id: str, user:User=Depends(current_user), db:Session=Depends(get_db)):
+    _get_org_agent(db, user, agent_id)
+    rows = db.scalars(select(AgentMessage).where(AgentMessage.agent_id == agent_id).order_by(AgentMessage.created_at)).all()
+    return [agent_message_out(m) for m in rows]
+
+@app.post("/api/agents/{agent_id}/messages", status_code=201)
+def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(current_user), db:Session=Depends(get_db)):
+    if not AI_PLAN_RATE_LIMITER.allow(user.id):
+        raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
+    agent = _get_org_agent(db, user, agent_id)
+    db.add(AgentMessage(agent_id=agent.id, author_id=user.id, role="user", body=data.message))
+    scope_project_id = None
+    if agent.current_task_id:
+        current_task = db.get(Task, agent.current_task_id)
+        if current_task:
+            scope_project_id = current_task.project_id
+    try:
+        result = CopilotService().plan(data.message, WorkspaceTools(db, agent, scope_project_id=scope_project_id))
+    except CopilotProviderError as error:
+        db.commit()
+        raise HTTPException(503, str(error)) from error
+    db.add(AgentMessage(agent_id=agent.id, author_id=None, role="agent", body=result["reply"]))
+    db.commit()
+    return result
 @app.get("/api/notifications")
 def notifications(user:User=Depends(current_user),db:Session=Depends(get_db)): return [{"id":n.id,"title":n.title,"body":n.body,"href":n.href,"read":n.read,"created_at":n.created_at} for n in db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc())).all()]
 @app.patch("/api/notifications/{notification_id}/read")
@@ -332,6 +431,7 @@ WRITE_TOOL_HANDLERS: dict[str, Callable[[dict[str, Any], User, Session], Any]] =
     "update_project": lambda args, user, db: update_project(args["project_id"], ProjectUpdate(**_without(args, "project_id")), user, db),
     "add_comment": lambda args, user, db: add_comment(args["task_id"], CommentIn(**_without(args, "task_id")), user, db),
     "create_team": lambda args, user, db: create_team(TeamIn(**args), user, db),
+    "delegate_task": lambda args, user, db: assign_task_to_agent(args["task_id"], AssignAgent(agent_id=args["agent_id"]), user, db),
 }
 
 def _audit_before_state(tool: str, args: dict[str, Any], db: Session) -> dict[str, Any] | None:
@@ -361,10 +461,14 @@ def _consume_confirmation_once(token: str) -> bool:
 
 @app.post("/api/ai/confirm")
 def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    proposer_agent_id: str | None = None
     try:
         tool, args = read_confirmation(data.confirmation_token, user)
-    except ValueError as error:
-        raise HTTPException(400, str(error)) from error
+    except ValueError as self_error:
+        try:
+            tool, args, proposer_agent_id = read_agent_confirmation(data.confirmation_token, user, db)
+        except ValueError:
+            raise HTTPException(400, str(self_error)) from self_error
     handler = WRITE_TOOL_HANDLERS.get(tool)
     if not handler:
         raise HTTPException(400, "Unsupported action")
@@ -379,6 +483,7 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
         raise HTTPException(422, "This Copilot proposal is missing required details.") from error
     log(db, user.organization_id, user.id, "copilot", user.id, "confirmed",
         tool=tool, args=jsonable_encoder(args), before=jsonable_encoder(before),
-        after=jsonable_encoder(result) if isinstance(result, dict) else None)
+        after=jsonable_encoder(result) if isinstance(result, dict) else None,
+        proposed_by_agent_id=proposer_agent_id)
     db.commit()
     return result
