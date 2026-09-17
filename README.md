@@ -18,13 +18,11 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 
 1. Install Docker Engine and the Docker Compose plugin on your machine.
 2. Copy the environment file: `cp .env.example .env`.
-3. Run `docker compose up --build`.
-4. Open `http://localhost:3000`.
+3. Edit `.env` and set `JWT_SECRET`, `SEED_ADMIN_EMAIL`, and `SEED_ADMIN_PASSWORD` to your own values (the Compose default runs with `ENVIRONMENT=production`, which refuses to start with the placeholder secret or the published demo password -- see the comments in `.env.example`).
+4. Run `docker compose up --build`.
+5. Open `http://localhost:3000` and sign in with the `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD` you set.
 
-Use the seeded login:
-
-- Email: `admin@demo.enterai.com`
-- Password: `enterai-demo`
+For local, non-production evaluation only, set `ENVIRONMENT=development` in `.env` instead of setting the three values above; that restores the fixed demo login (`admin@demo.enterai.com` / `enterai-demo`) and the relaxed startup checks. Never use `ENVIRONMENT=development` on a deployment reachable by anyone but you.
 
 The API docs are available for local development at `http://localhost:8000/docs`. The Compose configuration disables `/docs`, `/redoc`, and `/openapi.json` by default; enable them explicitly with `ENABLE_API_DOCS=true` only in a trusted development or CI environment.
 

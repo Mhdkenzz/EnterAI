@@ -12,15 +12,36 @@ from .models import User
 password_hash = PasswordHash.recommended()
 bearer = HTTPBearer(auto_error=False)
 
+_INSECURE_JWT_SECRETS = {
+    "dev-secret-change-me",
+    "change-me-in-production",
+    "replace-this-with-a-long-random-production-secret",
+}
+
+
 def _get_jwt_secret() -> str:
-    """Resolve JWT_SECRET securely: production must have it set, dev has fallback."""
+    """Resolve JWT_SECRET securely: production must have it set, dev has fallback.
+
+    Production also rejects the exact placeholder strings published in this repo's
+    own docker-compose.yml and .env.example, and anything shorter than 32 chars --
+    otherwise a deployment that copies the example file verbatim would boot with a
+    publicly known signing secret, letting anyone forge auth tokens for any user.
+    """
     secret = os.getenv("JWT_SECRET")
     environment = os.getenv("ENVIRONMENT", "development").strip().lower()
-    if environment == "production" and (not secret or not secret.strip()):
-        raise RuntimeError(
-            "JWT_SECRET must be set in production environment."
-            " Set JWT_SECRET in your environment or .env file."
-        )
+    if environment == "production":
+        stripped = (secret or "").strip()
+        if not stripped:
+            raise RuntimeError(
+                "JWT_SECRET must be set in production environment."
+                " Set JWT_SECRET in your environment or .env file."
+            )
+        if stripped in _INSECURE_JWT_SECRETS or len(stripped) < 32:
+            raise RuntimeError(
+                "JWT_SECRET must be a unique, random value of at least 32 characters in"
+                " production -- the placeholder from .env.example or docker-compose.yml"
+                " is not safe to use. Generate one with e.g. `openssl rand -hex 32`."
+            )
     return secret or "dev-secret-change-me"
 
 SECRET = _get_jwt_secret()

@@ -93,12 +93,14 @@ def custom_openapi():
 
 
 app.openapi = custom_openapi
-allowed_origins = [
+_default_origins = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:6767",
     "http://127.0.0.1:6767",
 ]
+_configured_origins = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
+allowed_origins = [origin.strip() for origin in _configured_origins.split(",") if origin.strip()] or _default_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,

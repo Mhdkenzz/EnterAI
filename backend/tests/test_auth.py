@@ -20,6 +20,26 @@ def test_production_startup_requires_jwt_secret(secret):
     assert result.stdout == ""
 
 
+@pytest.mark.parametrize("secret", [
+    "dev-secret-change-me",
+    "change-me-in-production",
+    "replace-this-with-a-long-random-production-secret",
+    "short",
+])
+def test_production_startup_rejects_insecure_jwt_secret(secret):
+    """A production deployment that copies the placeholder from .env.example or
+    docker-compose.yml verbatim, or sets a too-short secret, must fail closed --
+    otherwise anyone can forge auth tokens using the publicly known placeholder."""
+    env = {**os.environ, "ENVIRONMENT": "production", "DATABASE_URL": "sqlite://", "JWT_SECRET": secret}
+    result = subprocess.run(
+        [sys.executable, "-c", "import app.main"],
+        env=env, capture_output=True, text=True, check=False,
+    )
+    assert result.returncode != 0
+    assert "JWT_SECRET must be a unique, random value" in result.stderr
+    assert result.stdout == ""
+
+
 @pytest.mark.parametrize("environment,configured", [
     ("production", True), ("development", False), ("development", True),
     ("test", False), ("test", True),

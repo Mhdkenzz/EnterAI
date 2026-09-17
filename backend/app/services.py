@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta
 import json
+import os
 import re
 import html
 from io import BytesIO
@@ -9,6 +10,33 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .auth import hash_password
 from .models import Activity, HierarchyConfig, Notification, Organization, Project, Task, Team, User
+
+_INSECURE_SEED_PASSWORDS = {"enterai-demo"}
+
+
+def _seed_admin_credentials() -> tuple[str, str]:
+    """Resolve the bootstrap admin's email/password, created on first boot when no
+    organization exists yet.
+
+    Production must supply its own via SEED_ADMIN_EMAIL/SEED_ADMIN_PASSWORD and fails
+    closed otherwise (same pattern as JWT_SECRET) -- the fixed demo login is published
+    in this repo's own README, so a production deployment that kept it would ship a
+    public admin backdoor. Non-production environments keep the fixed demo login.
+    """
+    environment = os.getenv("ENVIRONMENT", "development").strip().lower()
+    email = (os.getenv("SEED_ADMIN_EMAIL") or "admin@demo.enterai.com").strip()
+    password = os.getenv("SEED_ADMIN_PASSWORD")
+    if environment == "production":
+        stripped = (password or "").strip()
+        if not stripped or stripped in _INSECURE_SEED_PASSWORDS or len(stripped) < 12:
+            raise RuntimeError(
+                "SEED_ADMIN_PASSWORD must be set to a unique password of at least 12"
+                " characters in production. Set SEED_ADMIN_EMAIL and SEED_ADMIN_PASSWORD"
+                " in your environment or .env file before first boot -- the documented"
+                " demo login is public and must never be used in production."
+            )
+        return email, stripped
+    return email, (password or "enterai-demo").strip()
 
 def log(db: Session, org_id: str, actor_id: str | None, entity_type: str, entity_id: str, action: str, **detail):
     db.add(Activity(organization_id=org_id, actor_id=actor_id, entity_type=entity_type, entity_id=entity_id, action=action, detail=detail))
@@ -35,11 +63,12 @@ def seed(db: Session):
         ensure_hierarchy_config(db, existing.id)
         db.commit()
         return
+    admin_email, admin_password = _seed_admin_credentials()
     org = Organization(name="Enter AI", slug="enter-ai")
     db.add(org); db.flush()
     ensure_hierarchy_config(db, org.id)
     users = [
-        User(organization_id=org.id, name="Enter AI Admin", email="admin@demo.enterai.com", password_hash=hash_password("enterai-demo"), role="admin", title="Administrator", avatar="EA"),
+        User(organization_id=org.id, name="Enter AI Admin", email=admin_email, password_hash=hash_password(admin_password), role="admin", title="Administrator", avatar="EA"),
     ]
     db.add_all(users); db.flush()
     product, platform = Team(organization_id=org.id, name="Product", description="Product direction and delivery"), Team(organization_id=org.id, name="Operations", description="Planning and delivery support")
