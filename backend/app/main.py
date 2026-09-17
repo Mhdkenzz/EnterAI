@@ -1,16 +1,20 @@
 import os
+import time
 from datetime import datetime, timedelta
+from typing import Any, Callable
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 from .auth import create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
-from .models import Activity, Attachment, Comment, Notification, Organization, Project, ProjectDocument, Task, Team, User
-from .copilot import CopilotProviderError, CopilotService, WorkspaceTools, read_confirmation
-from .services import ProjectDraftProvider, extract_document_text, log, seed
+from .models import Activity, Attachment, Comment, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
+from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_confirmation
+from .ratelimit import SlidingWindowRateLimiter
+from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed
 from .storage import get_storage
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
@@ -115,7 +119,7 @@ class TaskIn(BaseModel): project_id: str; title: str; description: str | None = 
 class TaskUpdate(BaseModel): title: str | None = None; description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
 class CommentIn(BaseModel): body: str = Field(min_length=1)
 class TeamIn(BaseModel): name: str; description: str | None = None
-class AIRequest(BaseModel): message: str = Field(min_length=1, max_length=4000)
+class AIRequest(BaseModel): message: str = Field(min_length=1, max_length=4000); project_id: str | None = None
 class ConfirmAction(BaseModel): confirmation_token: str = Field(min_length=20, max_length=10000)
 
 def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"title":user.title,"avatar":user.avatar}
@@ -144,7 +148,8 @@ def register(data: Register, db: Session = Depends(get_db)):
     slug = data.organization_name.lower().replace(" ","-")[:70]
     if db.scalar(select(Organization).where(Organization.slug == slug)): raise HTTPException(409,"Organization already exists")
     org = Organization(name=data.organization_name, slug=slug); db.add(org); db.flush()
-    user = User(organization_id=org.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user); db.commit()
+    user = User(organization_id=org.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user)
+    ensure_hierarchy_config(db, org.id); db.commit()
     return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 
 @app.post("/api/auth/login")
@@ -266,7 +271,27 @@ def team_projects(team_id:str,user:User=Depends(current_user),db:Session=Depends
 def create_team(data:TeamIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=Team(organization_id=user.organization_id,**data.model_dump()); db.add(t); db.commit(); return {"id":t.id,"name":t.name,"description":t.description}
 @app.get("/api/users")
-def users(user:User=Depends(current_user),db:Session=Depends(get_db)): return [user_out(u) for u in db.scalars(select(User).where(User.organization_id==user.organization_id)).all()]
+def users(user:User=Depends(current_user),db:Session=Depends(get_db)): return [user_out(u) for u in db.scalars(select(User).where(User.organization_id==user.organization_id,User.kind=="human")).all()]
+
+def agent_out(a: User, db: Session) -> dict:
+    current = db.get(Task, a.current_task_id) if a.current_task_id else None
+    last_completed = db.get(Task, a.last_completed_task_id) if a.last_completed_task_id else None
+    return {
+        "id": a.id, "name": a.name, "title": a.title, "avatar": a.avatar,
+        "hierarchy_level": a.hierarchy_level, "parent_agent_id": a.parent_agent_id,
+        "current_task": task_out(current, db) if current else None,
+        "last_completed_task": task_out(last_completed, db) if last_completed else None,
+    }
+
+@app.get("/api/agents")
+def agents(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    rows = db.scalars(select(User).where(User.organization_id==user.organization_id,User.kind=="agent")).all()
+    return [agent_out(a, db) for a in rows]
+
+@app.get("/api/hierarchy-config")
+def hierarchy_config(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    cfg = ensure_hierarchy_config(db, user.organization_id); db.commit()
+    return {"vp_count":cfg.vp_count,"directors_per_vp":cfg.directors_per_vp,"managers_per_director":cfg.managers_per_director,"workers_per_manager":cfg.workers_per_manager}
 @app.get("/api/notifications")
 def notifications(user:User=Depends(current_user),db:Session=Depends(get_db)): return [{"id":n.id,"title":n.title,"body":n.body,"href":n.href,"read":n.read,"created_at":n.created_at} for n in db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc())).all()]
 @app.patch("/api/notifications/{notification_id}/read")
@@ -283,20 +308,77 @@ def search(q:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
 @app.get("/api/risks")
 def risks(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id,Project.health=="at_risk")).all()]
+AI_PLAN_RATE_LIMITER = SlidingWindowRateLimiter(
+    max_calls=int(os.getenv("AI_PLAN_RATE_LIMIT_PER_MINUTE", "20")), window_seconds=60,
+)
+
 @app.post("/api/ai/plan")
 def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    if not AI_PLAN_RATE_LIMITER.allow(user.id):
+        raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
+    if data.project_id:
+        ensure_project(db, user, data.project_id)
     try:
-        return CopilotService().plan(data.message, WorkspaceTools(db, user))
+        return CopilotService().plan(data.message, WorkspaceTools(db, user, scope_project_id=data.project_id))
     except CopilotProviderError as error:
         raise HTTPException(503, str(error)) from error
+def _without(args: dict[str, Any], *keys: str) -> dict[str, Any]:
+    return {key: value for key, value in args.items() if key not in keys}
+
+WRITE_TOOL_HANDLERS: dict[str, Callable[[dict[str, Any], User, Session], Any]] = {
+    "create_task": lambda args, user, db: create_task(TaskIn(**args), user, db),
+    "update_task": lambda args, user, db: update_task(args["task_id"], TaskUpdate(**_without(args, "task_id")), user, db),
+    "create_project": lambda args, user, db: create_project(ProjectIn(**args), user, db),
+    "update_project": lambda args, user, db: update_project(args["project_id"], ProjectUpdate(**_without(args, "project_id")), user, db),
+    "add_comment": lambda args, user, db: add_comment(args["task_id"], CommentIn(**_without(args, "task_id")), user, db),
+    "create_team": lambda args, user, db: create_team(TeamIn(**args), user, db),
+}
+
+def _audit_before_state(tool: str, args: dict[str, Any], db: Session) -> dict[str, Any] | None:
+    """Capture the pre-change state for update tools, for the confirmed-action audit record."""
+    if tool == "update_task":
+        t = db.get(Task, args.get("task_id"))
+        return task_out(t, db) if t else None
+    if tool == "update_project":
+        p = db.get(Project, args.get("project_id"))
+        return project_out(p, db) if p else None
+    return None
+
+# Confirmation tokens are meant to be used once. This in-memory set (bounded by the
+# token's own 10-minute expiry, pruned on every call) stops the same proposal from being
+# replayed twice by a network retry or a malicious actor who intercepts the token.
+_CONSUMED_CONFIRMATIONS: dict[str, float] = {}
+_CONFIRMATION_TTL_SECONDS = 600
+
+def _consume_confirmation_once(token: str) -> bool:
+    now = time.monotonic()
+    for expired in [t for t, expires_at in _CONSUMED_CONFIRMATIONS.items() if expires_at < now]:
+        _CONSUMED_CONFIRMATIONS.pop(expired, None)
+    if token in _CONSUMED_CONFIRMATIONS:
+        return False
+    _CONSUMED_CONFIRMATIONS[token] = now + _CONFIRMATION_TTL_SECONDS
+    return True
+
 @app.post("/api/ai/confirm")
 def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Depends(get_db)):
     try:
         tool, args = read_confirmation(data.confirmation_token, user)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
-    log(db, user.organization_id, user.id, "copilot", user.id, "confirmed", tool=tool)
-    if tool=="create_task": return create_task(TaskIn(**args),user,db)
-    if tool=="update_task":
-        args=dict(args); tid=args.pop("task_id"); return update_task(tid,TaskUpdate(**args),user,db)
-    raise HTTPException(400,"Unsupported action")
+    handler = WRITE_TOOL_HANDLERS.get(tool)
+    if not handler:
+        raise HTTPException(400, "Unsupported action")
+    if user.role not in TOOL_ROLES.get(tool, frozenset()):
+        raise HTTPException(403, "Your role cannot perform this Copilot action.")
+    if not _consume_confirmation_once(data.confirmation_token):
+        raise HTTPException(409, "This Copilot proposal has already been used. Ask again for a new proposal.")
+    before = _audit_before_state(tool, args, db)
+    try:
+        result = handler(args, user, db)
+    except (TypeError, KeyError, ValidationError) as error:
+        raise HTTPException(422, "This Copilot proposal is missing required details.") from error
+    log(db, user.organization_id, user.id, "copilot", user.id, "confirmed",
+        tool=tool, args=jsonable_encoder(args), before=jsonable_encoder(before),
+        after=jsonable_encoder(result) if isinstance(result, dict) else None)
+    db.commit()
+    return result
