@@ -8,10 +8,20 @@ from zipfile import ZipFile
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from .auth import hash_password
-from .models import Activity, Notification, Organization, Project, Task, Team, User
+from .models import Activity, HierarchyConfig, Notification, Organization, Project, Task, Team, User
 
 def log(db: Session, org_id: str, actor_id: str | None, entity_type: str, entity_id: str, action: str, **detail):
     db.add(Activity(organization_id=org_id, actor_id=actor_id, entity_type=entity_type, entity_id=entity_id, action=action, detail=detail))
+
+def ensure_hierarchy_config(db: Session, organization_id: str) -> HierarchyConfig:
+    """Every organization gets exactly one HierarchyConfig row (all-zero until an
+    admin sets counts in Phase 4). Idempotent so it's safe to call from seed() and
+    from registration alike."""
+    config = db.scalar(select(HierarchyConfig).where(HierarchyConfig.organization_id == organization_id))
+    if not config:
+        config = HierarchyConfig(organization_id=organization_id)
+        db.add(config)
+    return config
 
 def seed(db: Session):
     existing = db.scalar(select(Organization))
@@ -22,10 +32,12 @@ def seed(db: Session):
         for user in db.scalars(select(User).where(User.organization_id == existing.id)).all():
             if legacy_seed and user.role == "admin":
                 user.name, user.title, user.avatar, user.email = "Enter AI Admin", "Administrator", "EA", "admin@demo.enterai.com"
+        ensure_hierarchy_config(db, existing.id)
         db.commit()
         return
     org = Organization(name="Enter AI", slug="enter-ai")
     db.add(org); db.flush()
+    ensure_hierarchy_config(db, org.id)
     users = [
         User(organization_id=org.id, name="Enter AI Admin", email="admin@demo.enterai.com", password_hash=hash_password("enterai-demo"), role="admin", title="Administrator", avatar="EA"),
     ]

@@ -14,7 +14,13 @@ class Organization(Base):
     slug: Mapped[str] = mapped_column(String(80), unique=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
+AGENT_HIERARCHY_LEVELS = ("ceo", "vp", "director", "senior_manager", "worker")
+
 class User(Base):
+    """A workspace member. `kind="agent"` rows are AI agents in the org chart -- they
+    share this table (and its FKs from Task/Comment/Attachment) so an agent can be
+    assigned work exactly like a human once that's wired up, rather than needing a
+    parallel identity system. Agent-only columns are nullable/unused for humans."""
     __tablename__ = "users"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
     organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
@@ -26,6 +32,11 @@ class User(Base):
     avatar: Mapped[str | None] = mapped_column(String(12), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    kind: Mapped[str] = mapped_column(String(10), default="human")
+    hierarchy_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    parent_agent_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    current_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
+    last_completed_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
 
 class Team(Base):
     __tablename__ = "teams"
@@ -117,3 +128,28 @@ class Notification(Base):
     href: Mapped[str | None] = mapped_column(String(255), nullable=True)
     read: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+class AgentMessage(Base):
+    """Persistent per-agent conversation history, separate from the general Copilot's
+    ephemeral per-request tool-calling transcript -- this is what backs the "chat with
+    this agent" panel and survives across sessions."""
+    __tablename__ = "agent_messages"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    author_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    role: Mapped[str] = mapped_column(String(10))
+    body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+class HierarchyConfig(Base):
+    """Per-organization shape of the agent org chart: how many agents exist at each
+    level below the (single, implicit) CEO. Reconciling actual agent rows to match
+    this config is Phase 4 work -- this table only stores the desired shape."""
+    __tablename__ = "hierarchy_configs"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), unique=True, index=True)
+    vp_count: Mapped[int] = mapped_column(Integer, default=0)
+    directors_per_vp: Mapped[int] = mapped_column(Integer, default=0)
+    managers_per_director: Mapped[int] = mapped_column(Integer, default=0)
+    workers_per_manager: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
