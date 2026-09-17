@@ -51,6 +51,27 @@ def ensure_hierarchy_config(db: Session, organization_id: str) -> HierarchyConfi
         db.add(config)
     return config
 
+
+def sync_agent_task_pointers(db: Session, task: Task, before_assignee_id: str | None) -> None:
+    """Keep an agent's current/last-completed task pointers in step with the task it's
+    assigned to, however the assignment or status change was made (direct PATCH,
+    /assign-agent, a confirmed delegate_task proposal, or autonomous execution
+    marking its own task done all funnel through here)."""
+    if task.assignee_id != before_assignee_id:
+        if before_assignee_id:
+            previous = db.get(User, before_assignee_id)
+            if previous and previous.kind == "agent" and previous.current_task_id == task.id:
+                previous.current_task_id = None
+        if task.assignee_id:
+            new_assignee = db.get(User, task.assignee_id)
+            if new_assignee and new_assignee.kind == "agent":
+                new_assignee.current_task_id = task.id
+    if task.status == "done" and task.assignee_id:
+        assignee = db.get(User, task.assignee_id)
+        if assignee and assignee.kind == "agent" and assignee.current_task_id == task.id:
+            assignee.last_completed_task_id = task.id
+            assignee.current_task_id = None
+
 def seed(db: Session):
     existing = db.scalar(select(Organization))
     if existing:

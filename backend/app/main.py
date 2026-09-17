@@ -13,9 +13,10 @@ from .auth import create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
 from .models import Activity, AgentMessage, Attachment, Comment, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
 from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
+from . import execution
 from .hierarchy import MAX_HIERARCHY_AGENTS, desired_counts, reconcile_agents
 from .ratelimit import SlidingWindowRateLimiter
-from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed
+from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
 from .storage import get_storage
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
@@ -113,6 +114,11 @@ app.add_middleware(
 def startup():
     Base.metadata.create_all(engine)
     with next(get_db()) as db: seed(db)
+    execution.start_background_loop()
+
+@app.on_event("shutdown")
+def shutdown():
+    execution.stop_background_loop()
 
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str
 class Register(BaseModel): organization_name: str = Field(min_length=2); name: str; email: EmailStr; password: str = Field(min_length=8)
@@ -244,25 +250,6 @@ async def add_project_document(project_id:str,file:UploadFile=File(...),user:Use
 @app.post("/api/tasks",status_code=201)
 def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     p=ensure_project(db,user,data.project_id); t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title); db.commit(); return task_out(t,db)
-def _sync_agent_task_pointers(db: Session, task: Task, before_assignee_id: str | None) -> None:
-    """Keep an agent's current/last-completed task pointers in step with the task it's
-    assigned to, however the assignment or status change was made (direct PATCH,
-    /assign-agent, or a confirmed delegate_task proposal all funnel through here)."""
-    if task.assignee_id != before_assignee_id:
-        if before_assignee_id:
-            previous = db.get(User, before_assignee_id)
-            if previous and previous.kind == "agent" and previous.current_task_id == task.id:
-                previous.current_task_id = None
-        if task.assignee_id:
-            new_assignee = db.get(User, task.assignee_id)
-            if new_assignee and new_assignee.kind == "agent":
-                new_assignee.current_task_id = task.id
-    if task.status == "done" and task.assignee_id:
-        assignee = db.get(User, task.assignee_id)
-        if assignee and assignee.kind == "agent" and assignee.current_task_id == task.id:
-            assignee.last_completed_task_id = task.id
-            assignee.current_task_id = None
-
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
@@ -270,7 +257,7 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
     for key,value in data.model_dump(exclude_unset=True).items(): setattr(t,key,value)
     if "status" in data.model_fields_set and data.status != before:
         t.completed_at = datetime.utcnow() if data.status == "done" else None
-    _sync_agent_task_pointers(db, t, before_assignee_id)
+    sync_agent_task_pointers(db, t, before_assignee_id)
     log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status); db.commit(); return task_out(t,db)
 @app.delete("/api/tasks/{task_id}",status_code=204)
 def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -306,11 +293,15 @@ def users(user:User=Depends(current_user),db:Session=Depends(get_db)): return [u
 def agent_out(a: User, db: Session) -> dict:
     current = db.get(Task, a.current_task_id) if a.current_task_id else None
     last_completed = db.get(Task, a.last_completed_task_id) if a.last_completed_task_id else None
+    blocked = a.current_task_id is not None and a.consecutive_task_failures >= execution.MAX_CONSECUTIVE_FAILURES
     return {
         "id": a.id, "name": a.name, "title": a.title, "avatar": a.avatar,
         "hierarchy_level": a.hierarchy_level, "parent_agent_id": a.parent_agent_id,
         "current_task": task_out(current, db) if current else None,
         "last_completed_task": task_out(last_completed, db) if last_completed else None,
+        "is_working": a.current_task_id is not None and not blocked,
+        "is_blocked": blocked,
+        "last_execution_at": a.last_execution_at,
     }
 
 @app.get("/api/agents")
@@ -350,7 +341,8 @@ def assign_task_to_agent(task_id: str, data: AssignAgent, user: User, db: Sessio
         raise HTTPException(404, "Agent not found")
     before_assignee_id = t.assignee_id
     t.assignee_id = agent.id
-    _sync_agent_task_pointers(db, t, before_assignee_id)
+    sync_agent_task_pointers(db, t, before_assignee_id)
+    agent.consecutive_task_failures = 0  # a fresh assignment is a human intervention -- give it a clean start
     log(db, user.organization_id, user.id, "task", t.id, "delegated_to_agent", agent_id=agent.id, agent_name=agent.name)
     db.commit()
     return task_out(t, db)
@@ -379,6 +371,7 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
     if not AI_PLAN_RATE_LIMITER.allow(user.id):
         raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
     agent = _get_org_agent(db, user, agent_id)
+    agent.consecutive_task_failures = 0  # a human reaching out is an intervention -- give the agent a clean start
     db.add(AgentMessage(agent_id=agent.id, author_id=user.id, role="user", body=data.message))
     scope_project_id = None
     if agent.current_task_id:

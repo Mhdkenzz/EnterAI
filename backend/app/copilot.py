@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from .auth import SECRET
 from .models import Activity, Comment, Notification, Project, Task, Team, User
+from .services import log, sync_agent_task_pointers
 
 
 class CopilotProviderError(RuntimeError):
@@ -338,7 +339,7 @@ class AnthropicCopilotProvider:
         self.timeout = float(os.getenv("AI_TIMEOUT_SECONDS", "20"))
         self.version = os.getenv("AI_ANTHROPIC_VERSION", "2023-06-01")
 
-    def respond(self, system: str, messages: list[dict[str, Any]], role: str | None = None) -> ProviderTurn:
+    def respond(self, system: str, messages: list[dict[str, Any]], role: str | None = None, extra_tools: list[dict[str, Any]] | None = None) -> ProviderTurn:
         if not self.api_key:
             raise CopilotProviderError("AI_API_KEY is not configured. Set it to use AI_PROVIDER=anthropic.")
         body = json.dumps({
@@ -346,7 +347,7 @@ class AnthropicCopilotProvider:
             "max_tokens": 1024,
             "system": system,
             "messages": messages,
-            "tools": anthropic_tool_specs(role),
+            "tools": anthropic_tool_specs(role) + list(extra_tools or []),
         }).encode()
         headers = {"Content-Type": "application/json", "x-api-key": self.api_key, "anthropic-version": self.version}
         outgoing = request.Request(f"{self.base_url}/v1/messages", data=body, headers=headers, method="POST")
@@ -394,11 +395,12 @@ class OpenAICompatibleCopilotProvider:
         self.api_key = os.getenv("AI_API_KEY", "")
         self.timeout = float(os.getenv("AI_TIMEOUT_SECONDS", "20"))
 
-    def respond(self, system: str, messages: list[dict[str, Any]], role: str | None = None) -> ProviderTurn:
+    def respond(self, system: str, messages: list[dict[str, Any]], role: str | None = None, extra_tools: list[dict[str, Any]] | None = None) -> ProviderTurn:
+        extra = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in (extra_tools or [])]
         body = json.dumps({
             "model": self.model,
             "messages": [{"role": "system", "content": system}, *messages],
-            "tools": openai_tool_specs(role),
+            "tools": openai_tool_specs(role) + extra,
             "tool_choice": "auto",
             "temperature": 0.2,
         }).encode()
@@ -450,6 +452,23 @@ SYSTEM_PROMPT = (
     "Whenever you call a write tool, also include a short plain-language explanation of the proposal in the same turn."
 )
 MAX_TOOL_TURNS = 6
+
+EXECUTION_SYSTEM_PROMPT = (
+    "You are {name}, a {title} agent in an AI-native workspace, autonomously working on your assigned task. Use "
+    "your read tools to check any context you need, then call log_progress to record concrete progress as you make "
+    "it, or mark_task_complete once the task is genuinely finished -- never claim you did something you did not "
+    "actually do. If real progress requires something outside your own task (delegating to a report, creating a "
+    "task, editing another task or project), propose it with the matching tool; a human will review and confirm it "
+    "before anything changes. Call at most one tool per turn."
+)
+EXECUTION_TOOL_SPECS: list[dict[str, Any]] = [
+    {"name": "log_progress", "description": "Record a progress note as a comment on your current task. Use this to narrate concrete work as you do it.",
+     "input_schema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"], "additionalProperties": False}},
+    {"name": "mark_task_complete", "description": "Mark your current task as done. Only call this once the work is genuinely finished.",
+     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+]
+EXECUTION_TOOL_NAMES = {spec["name"] for spec in EXECUTION_TOOL_SPECS}
+MAX_EXECUTION_TURNS = 4
 
 
 class CopilotService:
@@ -532,6 +551,60 @@ class CopilotService:
                 reply = turn.text or f"I can {confirmed_action['label'][0].lower()}{confirmed_action['label'][1:]} once you confirm."
                 return {"reply": reply, "actions": [confirmed_action], "read_tools": used_read_tools}
         raise CopilotProviderError("Enter AI Copilot could not finish answering within the allotted tool calls. Try a narrower question.")
+
+    def run_execution_step(self, tools: WorkspaceTools, task: Task) -> dict[str, Any]:
+        """One autonomous-execution tick for `tools.user` (must be an agent) on its own
+        assigned `task`. log_progress/mark_task_complete execute immediately -- they are
+        safe by construction, since neither takes a task/agent id and both always act on
+        this exact task. Any other write tool still mints a human confirmation and stops
+        the tick right there, same as the interactive chat loop."""
+        agent, db = tools.user, tools.db
+        system = EXECUTION_SYSTEM_PROMPT.format(name=agent.name, title=agent.title or agent.hierarchy_level or "agent")
+        kickoff = (
+            f'Your current task is "{task.title}" (status: {task.status}, priority: {task.priority}).\n'
+            f"{task.description or 'No description was provided.'}\nMake progress now."
+        )
+        messages: list[dict[str, Any]] = [self.provider.user_message(kickoff)]
+        used_read_tools: list[str] = []
+        progress_notes: list[str] = []
+        for _ in range(MAX_EXECUTION_TURNS):
+            turn = self.provider.respond(system, messages, agent.role, extra_tools=EXECUTION_TOOL_SPECS)
+            if not turn.tool_calls:
+                return {"outcome": "narrated", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+            messages.append(self.provider.assistant_message(turn))
+            for call in turn.tool_calls:
+                name = call["name"]
+                if name == "log_progress":
+                    note = str(call["args"].get("note") or "").strip()[:2000] or "Made progress."
+                    db.add(Comment(task_id=task.id, author_id=agent.id, body=note))
+                    log(db, agent.organization_id, agent.id, "task", task.id, "agent_progress", note=note)
+                    progress_notes.append(note)
+                    messages.append(self.provider.tool_result_message(call["id"], "Logged."))
+                    continue
+                if name == "mark_task_complete":
+                    before_status = task.status
+                    task.status = "done"
+                    task.completed_at = datetime.utcnow()
+                    sync_agent_task_pointers(db, task, task.assignee_id)
+                    log(db, agent.organization_id, agent.id, "task", task.id, "agent_completed", from_status=before_status)
+                    return {"outcome": "completed", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+                if name in WRITE_TOOL_NAMES:
+                    if name not in allowed_write_tools(agent.role):
+                        messages.append(self.provider.tool_result_message(call["id"], "Your role is not permitted to perform this action.", is_error=True))
+                        continue
+                    token = create_agent_confirmation(agent, name, call["args"])
+                    action = {"label": _describe_write_call(name, call["args"]), "confirmation_token": token, "requires_confirmation": True}
+                    return {"outcome": "proposed", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": action}
+                if name not in READ_TOOL_NAMES:
+                    messages.append(self.provider.tool_result_message(call["id"], "This tool does not exist.", is_error=True))
+                    continue
+                try:
+                    result = execute_read_tool(name, call["args"], tools)
+                    used_read_tools.append(name)
+                    messages.append(self.provider.tool_result_message(call["id"], result))
+                except (ValueError, KeyError) as exc:
+                    messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
+        return {"outcome": "inconclusive", "text": None, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
 
 
 def _provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:

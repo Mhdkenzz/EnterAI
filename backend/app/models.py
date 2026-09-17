@@ -37,6 +37,12 @@ class User(Base):
     parent_agent_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     current_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
     last_completed_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
+    # Autonomous execution (Phase 6): consecutive_task_failures is a circuit breaker --
+    # an agent stops being polled for its current task once this hits the configured
+    # threshold, until a human intervenes (message, reassignment). last_execution_at
+    # drives the "agent is working" status shown in the hierarchy tree/inspector.
+    consecutive_task_failures: Mapped[int] = mapped_column(Integer, default=0)
+    last_execution_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 class Team(Base):
     __tablename__ = "teams"
