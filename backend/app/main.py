@@ -7,7 +7,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field, ValidationError
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 from .auth import create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
@@ -96,7 +96,10 @@ def custom_openapi():
 
 
 from .admin import router as admin_router, human_admin
+from . import accounts, email as mailer
+from .accounts import router as accounts_router, enforce, _LOGIN_LIMITER, _SIGNUP_LIMITER
 app.include_router(admin_router)
+app.include_router(accounts_router)
 app.openapi = custom_openapi
 _default_origins = [
     "http://localhost:3000",
@@ -142,7 +145,7 @@ class HierarchyConfigUpdate(BaseModel):
     managers_per_director: int | None = Field(default=None, ge=0, le=20)
     workers_per_manager: int | None = Field(default=None, ge=0, le=20)
 
-def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"kind":user.kind,"title":user.title,"avatar":user.avatar}
+def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"kind":user.kind,"title":user.title,"avatar":user.avatar,"email_verified":user.email_verified_at is not None}
 def project_out(p: Project, db: Session):
     total = db.query(Task).filter(Task.project_id == p.id, Task.parent_id.is_(None)).count(); done = db.query(Task).filter(Task.project_id == p.id, Task.status == "done", Task.parent_id.is_(None)).count()
     owner = db.get(User,p.owner_id) if p.owner_id else None; team = db.get(Team,p.team_id) if p.team_id else None
@@ -196,20 +199,49 @@ def health(): return {"ok":True}
 @app.get("/")
 def root(): return {"service": "Enter AI API", "status": "ok"}
 
+# A real hash of a value nobody holds, verified against when the submitted address
+# has no account so that both paths do the same amount of password hashing.
+_ABSENT_USER_HASH = hash_password(os.urandom(24).hex())
+
 @app.post("/api/auth/register")
-def register(data: Register, db: Session = Depends(get_db)):
-    if db.scalar(select(User).where(User.email==data.email)): raise HTTPException(409,"Email already exists")
+def register(data: Register, request: Request, db: Session = Depends(get_db)):
+    """Self-serve signup: creates the organization and its first admin.
+
+    A taken email address is answered with the same message as any other rejected
+    signup, and the notice that an account already exists goes to the address
+    itself rather than to whoever submitted the form. An organization name clash is
+    reported plainly -- names are chosen, not secret, and the person needs to know
+    to pick another one.
+    """
+    enforce(_SIGNUP_LIMITER, request)
+    address = accounts.normalize(data.email)
     slug = data.organization_name.lower().replace(" ","-")[:70]
+    existing = db.scalar(select(User).where(func.lower(User.email) == address))
+    if existing:
+        organization = db.get(Organization, existing.organization_id)
+        mailer.send_existing_account_notice(address, organization.name if organization else "Enter AI")
+        raise HTTPException(409, "We couldn't create an account with those details.")
     if db.scalar(select(Organization).where(Organization.slug == slug)): raise HTTPException(409,"Organization already exists")
     org = Organization(name=data.organization_name, slug=slug); db.add(org); db.flush()
-    user = User(organization_id=org.id,name=data.name,email=data.email,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user)
-    ensure_hierarchy_config(db, org.id); db.flush(); log(db, org.id, user.id, "user", user.id, "registered"); db.commit()
+    user = User(organization_id=org.id,name=data.name,email=address,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user)
+    ensure_hierarchy_config(db, org.id); db.flush(); log(db, org.id, user.id, "user", user.id, "registered")
+    verification = accounts.issue_verification(db, user)
+    db.commit()
+    mailer.send_verification(user.email, user.name, verification)
     return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 
 @app.post("/api/auth/login")
-def login(data: SignIn, db: Session = Depends(get_db)):
-    user = db.scalar(select(User).where(User.email==data.email))
-    if not user or not verify_password(data.password,user.password_hash): raise HTTPException(401,"Incorrect email or password")
+def login(data: SignIn, request: Request, db: Session = Depends(get_db)):
+    enforce(_LOGIN_LIMITER, request)
+    user = db.scalar(select(User).where(func.lower(User.email) == accounts.normalize(data.email)))
+    if not user:
+        # Hash anyway. Returning early for an unknown address answers in a fraction
+        # of the time a real one takes, which turns the login form into an account
+        # enumeration oracle no matter how generic the message is.
+        verify_password(data.password, _ABSENT_USER_HASH)
+        raise HTTPException(401,"Incorrect email or password")
+    if not verify_password(data.password,user.password_hash): raise HTTPException(401,"Incorrect email or password")
+    if not user.active: raise HTTPException(401,"Incorrect email or password")
     log(db,user.organization_id,user.id,"user",user.id,"logged_in"); db.commit()
     org=db.get(Organization,user.organization_id); return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 

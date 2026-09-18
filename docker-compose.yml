@@ -19,6 +19,12 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+  # A real SMTP server for development, so password reset, verification and invite
+  # mail travels the same path it will in production. Captured mail is readable at
+  # http://localhost:8025 instead of being delivered.
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports: ["8025:8025"]
   # S3-compatible object storage, so local development exercises the same storage
   # adapter production uses rather than a code path only dev ever runs.
   minio:
@@ -49,6 +55,12 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://enterai:enterai_dev_password@db:5432/enterai}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      EMAIL_FROM: ${EMAIL_FROM:-no-reply@enterai.local}
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-s3}
       STORAGE_BUCKET: ${STORAGE_BUCKET:-enterai-uploads}
       STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
@@ -71,6 +83,7 @@ services:
     depends_on:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
+      mailpit: {condition: service_started}
       minio-init: {condition: service_completed_successfully}
   web:
     build: ./frontend

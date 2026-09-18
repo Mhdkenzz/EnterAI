@@ -51,7 +51,9 @@ def test_auth_and_copilot_share_startup_secret(environment, configured):
     # client connects lazily, so naming an address is enough to get past that gate
     # and test the one thing this case is about: the signing secrets.
     env = {**os.environ, "ENVIRONMENT": environment, "DATABASE_URL": "sqlite://",
-           "REDIS_URL": "redis://127.0.0.1:6379/0"}
+           "REDIS_URL": "redis://127.0.0.1:6379/0", "EMAIL_PROVIDER": "smtp",
+           "SMTP_HOST": "smtp.example.com", "EMAIL_FROM": "bot@example.com",
+           "APP_BASE_URL": "https://app.example.com"}
     env.pop("JWT_SECRET", None)
     if configured:
         env["JWT_SECRET"] = secrets.token_hex(32)

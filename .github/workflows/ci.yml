@@ -106,7 +106,7 @@ jobs:
           pip install -r requirements.txt
           # Startup no longer creates schema; migrate the same disposable database.
           DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db PYTHONPATH=. alembic upgrade head
-          ENVIRONMENT=ci ENABLE_API_DOCS=false DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
+          ENVIRONMENT=ci ENABLE_API_DOCS=false DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db JWT_SECRET=ci-only-secret AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
       - uses: actions/setup-node@v4
         with:
@@ -154,7 +154,7 @@ jobs:
           pip install -r requirements.txt
           pip install schemathesis==4.27.2 --upgrade pytest
           DATABASE_URL=sqlite:///./ci.db PYTHONPATH=. alembic upgrade head
-          ENVIRONMENT=ci ENABLE_API_DOCS=true DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
+          ENVIRONMENT=ci ENABLE_API_DOCS=true DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
           echo $! > /tmp/enter-ai-api.pid
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
       - name: Schemathesis
@@ -167,7 +167,7 @@ jobs:
         run: |
           kill "$(cat /tmp/enter-ai-api.pid)"
           for attempt in $(seq 1 30); do ! curl -sS http://127.0.0.1:8000/health >/dev/null 2>&1 && break || sleep 1; done
-          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SEED_ADMIN_PASSWORD=ci-only-seed-admin-password PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
+          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SEED_ADMIN_PASSWORD=ci-only-seed-admin-password EMAIL_PROVIDER=smtp SMTP_HOST=127.0.0.1 EMAIL_FROM=ci@enterai.test APP_BASE_URL=http://127.0.0.1:3000 AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
           curl -fsS http://127.0.0.1:8000/health || { echo "::error::API failed to come back up in production mode"; cat /tmp/enter-ai-api-zap.log; exit 1; }
       - uses: zaproxy/action-baseline@v0.14.0
@@ -194,6 +194,9 @@ jobs:
       STORAGE_BUCKET: enterai-uploads
       STORAGE_ACCESS_KEY: enterai_minio_ci
       STORAGE_SECRET_KEY: enterai_minio_ci_password
+      SMTP_HOST: 127.0.0.1
+      EMAIL_FROM: ci@enterai.test
+      APP_BASE_URL: http://127.0.0.1:3000
       AI_PLAN_RATE_LIMIT_PER_MINUTE: "3"
     steps:
       - uses: actions/checkout@v4

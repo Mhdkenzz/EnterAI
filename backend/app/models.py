@@ -13,6 +13,7 @@ class Organization(Base):
     name: Mapped[str] = mapped_column(String(160), unique=True)
     slug: Mapped[str] = mapped_column(String(80), unique=True)
     execution_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    onboarded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 AGENT_HIERARCHY_LEVELS = ("ceo", "vp", "director", "senior_manager", "worker")
@@ -45,6 +46,11 @@ class User(Base):
     # drives the "agent is working" status shown in the hierarchy tree/inspector.
     consecutive_task_failures: Mapped[int] = mapped_column(Integer, default=0)
     last_execution_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Bumped whenever credentials change. Session tokens carry the epoch they were
+    # minted under, so a password reset silently invalidates every token issued
+    # before it -- otherwise whoever prompted the reset keeps their stolen session.
+    session_epoch: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     # Retention: retiring an agent (headcount shrink or an explicit admin decision)
     # never deletes it -- identity and all historical tasks/messages/comments/audit
     # rows must survive. `retired_at` is agent-only and orthogonal to `active`
@@ -208,3 +214,39 @@ class HierarchyConfig(Base):
     managers_per_director: Mapped[int] = mapped_column(Integer, default=0)
     workers_per_manager: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+class AuthToken(Base):
+    """Single-use, short-lived tokens for password reset and email verification.
+
+    Only a SHA-256 of the token is stored: the raw value exists in the recipient's
+    inbox and nowhere else, so a database disclosure cannot be replayed into an
+    account takeover. `used_at` makes redemption one-shot and `expires_at` bounds
+    the window; both are checked at redemption, not at lookup.
+    """
+    __tablename__ = "auth_tokens"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    purpose: Mapped[str] = mapped_column(String(30), index=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+class Invite(Base):
+    """An invitation to join one specific organization, at one specific role.
+
+    The organization and role are fixed when the invite is created by an admin of
+    that organization; acceptance never reads them from the request, which is what
+    stops an invite for one workspace being redeemed into another or escalated.
+    """
+    __tablename__ = "invites"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    email: Mapped[str] = mapped_column(String(255), index=True)
+    role: Mapped[str] = mapped_column(String(30), default="member")
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    invited_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

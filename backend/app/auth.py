@@ -65,7 +65,11 @@ CONFIRMATION_SECRET = hashlib.sha256(f"enterai:copilot-confirmation:v1:{SECRET}"
 def hash_password(value: str): return password_hash.hash(value)
 def verify_password(value: str, hashed: str): return password_hash.verify(value, hashed)
 def create_token(user: User):
-    return jwt.encode({"kind": SESSION_TOKEN_KIND, "sub": user.id, "exp": datetime.now(timezone.utc)+timedelta(days=7)}, SECRET, algorithm="HS256")
+    # `epoch` pins the token to the credentials it was minted under. A password
+    # reset bumps the user's epoch, which retires every token issued before it --
+    # the only way to end a stolen session when sessions are stateless JWTs.
+    return jwt.encode({"kind": SESSION_TOKEN_KIND, "sub": user.id, "epoch": user.session_epoch or 0,
+                       "exp": datetime.now(timezone.utc)+timedelta(days=7)}, SECRET, algorithm="HS256")
 def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db: Session = Depends(get_db)):
     if not credentials: raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in required")
     try: payload = jwt.decode(credentials.credentials, SECRET, algorithms=["HS256"])
@@ -73,6 +77,10 @@ def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db
     if payload.get("kind") != SESSION_TOKEN_KIND: raise HTTPException(status_code=401, detail="Invalid session")
     user = db.scalar(select(User).where(User.id == payload.get("sub")))
     if not user or not user.active: raise HTTPException(status_code=401, detail="User unavailable")
+    # Tokens minted before this file existed carry no epoch; treating that as 0
+    # matches the default column value, so upgrading does not sign everyone out.
+    if int(payload.get("epoch") or 0) != int(user.session_epoch or 0):
+        raise HTTPException(status_code=401, detail="Invalid session")
     # Agents authenticate with session tokens too (their writes are still gated by
     # per-route role checks); only confirmation tokens are barred above via the
     # pinned `kind` claim and the separate confirmation signing key.

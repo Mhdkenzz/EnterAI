@@ -22,7 +22,9 @@ def _run_startup(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
     # keeps each case testing the one control it is about; the case that *is* about
     # Redis overrides this back to empty.
     env = {**os.environ, "DATABASE_URL": f"sqlite:///{boot_db}", "JWT_SECRET": "a" * 32,
-           "REDIS_URL": "redis://127.0.0.1:6379/0", **env_overrides}
+           "REDIS_URL": "redis://127.0.0.1:6379/0", "EMAIL_PROVIDER": "smtp",
+           "SMTP_HOST": "smtp.example.com", "EMAIL_FROM": "bot@example.com",
+           "APP_BASE_URL": "https://app.example.com", **env_overrides}
     script = (
         "import alembic.config, alembic.command\n"
         "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"
