@@ -221,6 +221,24 @@ function PrivacyAdminSection() {
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [confirmingOrgDelete, setConfirmingOrgDelete] = useState(false);
 
+  useEffect(() => {
+    // Aborting a superseded request (StrictMode's dev-only double-invoke of this
+    // effect is the common case, same as AdminConsole's own loader above) stops
+    // its response from landing after the current one and clobbering `draft`
+    // with stale/empty values -- including over whatever the admin has since
+    // typed into the retention form but not saved yet.
+    const controller = new AbortController();
+    Promise.all([
+      api<RetentionPolicy>("/admin/privacy/retention", { signal: controller.signal }),
+      api<DeletionRequest[]>("/admin/privacy/deletion-requests", { signal: controller.signal }),
+    ]).then(([nextPolicy, nextRequests]) => {
+      if (controller.signal.aborted) return;
+      setPolicy(nextPolicy); setRequests(nextRequests);
+      setDraft(Object.fromEntries(retentionFields.map(([key]) => [key, nextPolicy[key] ? String(nextPolicy[key]) : ""])));
+    }).catch(err => { if (!controller.signal.aborted) setLoadError(errorText(err)); });
+    return () => controller.abort();
+  }, []);
+
   function load() {
     Promise.all([
       api<RetentionPolicy>("/admin/privacy/retention"),
@@ -230,7 +248,6 @@ function PrivacyAdminSection() {
       setDraft(Object.fromEntries(retentionFields.map(([key]) => [key, nextPolicy[key] ? String(nextPolicy[key]) : ""])));
     }).catch(err => setLoadError(errorText(err)));
   }
-  useEffect(load, []);
 
   async function saveRetention(event: FormEvent) {
     event.preventDefault();
