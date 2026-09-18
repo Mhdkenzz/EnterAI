@@ -114,6 +114,26 @@ services:
       redis: {condition: service_healthy}
       minio-init: {condition: service_completed_successfully}
 
+  # Runs scripts/backup.sh on a loop rather than only documenting it -- a runbook
+  # nobody's cron actually calls is not a backup strategy. Not wired into `lb`'s
+  # dependency chain, so `docker compose up -d --build lb` (what CI's multi-replica
+  # job runs) never starts it; a real deployment brings it up with `docker compose
+  # up -d` (no target) to include everything.
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
+      BACKUP_DIR: /var/backups/enterai
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    volumes:
+      - ./scripts/backup.sh:/backup.sh:ro
+      - backup_data:/var/backups/enterai
+    entrypoint: >-
+      sh -c "while true; do sh /backup.sh || echo 'backup run failed, retrying next interval'; sleep \"$$BACKUP_INTERVAL_SECONDS\"; done"
+    depends_on:
+      db: {condition: service_healthy}
+
   lb:
     image: nginx:1.27-alpine
     restart: unless-stopped
@@ -132,3 +152,4 @@ services:
 volumes:
   postgres_data:
   minio_data:
+  backup_data:

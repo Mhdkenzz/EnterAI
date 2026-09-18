@@ -19,6 +19,7 @@ from uuid import uuid4
 
 class Storage(Protocol):
     def save(self, folder: str, filename: str, content: bytes) -> str: ...
+    def delete(self, identifier: str) -> None: ...
 
 
 def _safe_name(filename: str) -> str:
@@ -38,6 +39,16 @@ class LocalStorage:
         target.write_bytes(content)
         return str(target)
 
+    def delete(self, identifier: str) -> None:
+        target = Path(identifier).resolve()
+        root = self.root.resolve()
+        if root not in target.parents:
+            # `identifier` always comes from a `save()` return value stored on a
+            # row, never straight from a request, but refusing to unlink outside
+            # our own root costs nothing and rules out a whole class of mistake.
+            return
+        target.unlink(missing_ok=True)
+
 
 class S3Storage:
     def __init__(self, bucket: str, client):
@@ -48,6 +59,13 @@ class S3Storage:
         key = f"{folder}/{uuid4()}-{_safe_name(filename)}"
         self._client.put_object(Bucket=self.bucket, Key=key, Body=content)
         return f"s3://{self.bucket}/{key}"
+
+    def delete(self, identifier: str) -> None:
+        prefix = f"s3://{self.bucket}/"
+        if not identifier.startswith(prefix):
+            return  # not one of ours (e.g. a row saved under a different backend)
+        key = identifier[len(prefix):]
+        self._client.delete_object(Bucket=self.bucket, Key=key)
 
 
 def _s3_client():

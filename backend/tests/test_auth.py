@@ -67,9 +67,18 @@ from fastapi.security import HTTPAuthorizationCredentials
 
 expected = os.environ.get("JWT_SECRET") or "dev-secret-change-me"
 user = User(id="test-user", organization_id="test-org", active=True)
+class _EmptyResult:
+    def all(self):
+        return []
 class Database:
     def scalar(self, statement):
-        return user
+        # The User lookup must resolve to the fake user; the IP-allowlist /
+        # session-policy lookups current_user also makes must resolve to
+        # "nothing configured" so this stays a test of secret-sharing, not of
+        # those (separately tested) enforcement paths.
+        return user if "users" in str(statement) else None
+    def scalars(self, statement):
+        return _EmptyResult()
 
 session = auth.create_token(user)
 assert jwt.decode(session, expected, algorithms=["HS256"])["sub"] == user.id

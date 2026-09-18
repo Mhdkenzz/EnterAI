@@ -164,9 +164,35 @@ def get_embedding_provider() -> EmbeddingProvider:
     - "openai" -> OpenAIEmbeddingProvider (requires OPENAI_API_KEY)
     - "local" -> LocalEmbeddingProvider (requires sentence-transformers)
     - "deterministic" -> DeterministicEmbeddingProvider (no deps, for tests)
-    - unset/empty -> DeterministicEmbeddingProvider (default for dev)
+    - unset/empty -> DeterministicEmbeddingProvider (default for dev), but
+      production must set EMBEDDING_PROVIDER explicitly -- see the fail-closed
+      check below.
     """
-    provider_name = os.getenv("EMBEDDING_PROVIDER", "deterministic").strip().lower()
+    provider_name = os.getenv("EMBEDDING_PROVIDER", "").strip().lower()
+    environment = os.getenv("ENVIRONMENT", "development").strip().lower()
+
+    if not provider_name:
+        if environment == "production":
+            # Deterministic embeddings are a SHA256 hash, not a semantic vector --
+            # search built on them returns essentially random nearest-neighbors.
+            # Leaving this unset in production would ship that silently, exactly
+            # like the JWT_SECRET/REDIS_URL/STRIPE_WEBHOOK_SECRET checks refuse to
+            # silently fall back to an unsafe default.
+            raise RuntimeError(
+                "EMBEDDING_PROVIDER must be set in production ('openai' or 'local')."
+                " Leaving it unset falls back to deterministic fake embeddings, which"
+                " are not semantic and make RAG search return meaningless results."
+                " Set EMBEDDING_PROVIDER=openai or EMBEDDING_PROVIDER=local, or set it"
+                " explicitly to 'deterministic' only if this deployment intentionally"
+                " does not use RAG document search."
+            )
+        provider_name = "deterministic"
+    elif provider_name == "deterministic" and environment == "production":
+        import logging
+        logging.getLogger(__name__).warning(
+            "embedding_provider_deterministic_in_production",
+            extra={"event": "embedding_provider_deterministic_in_production"},
+        )
 
     if provider_name == "openai":
         return OpenAIEmbeddingProvider(

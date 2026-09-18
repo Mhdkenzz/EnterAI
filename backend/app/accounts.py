@@ -24,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import email as mailer
+from .admin import human_admin
 from .auth import create_token, current_user, hash_password
 from .database import get_db
 from .models import AuthToken, Invite, Organization, Project, User
@@ -94,12 +95,6 @@ class AcceptInvite(BaseModel):
     token: str = Field(min_length=20, max_length=500)
     name: str = Field(min_length=1, max_length=160)
     password: str = Field(min_length=8, max_length=200)
-
-
-def human_admin(user: User = Depends(current_user)) -> User:
-    if user.kind != "human" or user.role != "admin" or not user.active:
-        raise HTTPException(403, "Human administrator required")
-    return user
 
 
 def issue_verification(db: Session, user: User) -> str:

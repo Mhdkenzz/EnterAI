@@ -21,6 +21,7 @@ delete can be undone before it runs (`request_deletion` / `cancel_deletion` /
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
@@ -34,8 +35,28 @@ from .models import (Activity, AgentMessage, Attachment, AuditEvent, AuthToken, 
                      Organization, Project, ProjectDocument, ProviderCall, Task, Team, User)
 from .privacy_models import DeletionRequest, RetentionPolicy
 from .services import log
+from .storage import get_storage
 
 DEFAULT_GRACE_DAYS = 14
+
+
+_logger = logging.getLogger(__name__)
+
+
+def _purge_storage_objects(paths: list[str]) -> None:
+    """Best-effort delete of the underlying files for rows this call is about to
+    remove from the database. A single missing or already-gone object must not
+    abort the rest of the deletion -- the database rows are the source of truth
+    for what "deleted" means, and a storage-side inconsistency here is a bug to
+    fix, not a reason to leave the rest of an org's data behind."""
+    if not paths:
+        return
+    storage = get_storage()
+    for path in paths:
+        try:
+            storage.delete(path)
+        except Exception:
+            _logger.warning("Failed to delete storage object %r during data deletion", path)
 
 
 # --------------------------------------------------------------------------- #
@@ -131,6 +152,14 @@ def delete_organization_data(db: Session, organization_id: str) -> None:
     project_ids = list(db.scalars(select(Project.id).where(Project.organization_id == organization_id)))
     task_ids = list(db.scalars(select(Task.id).where(Task.project_id.in_(project_ids)))) if project_ids else []
 
+    # Read the storage identifiers before the rows that carry them are deleted --
+    # once the DELETEs below run there is nothing left in the database to point
+    # the underlying object out to purge_storage_objects.
+    document_paths = list(db.scalars(select(ProjectDocument.path).where(
+        ProjectDocument.organization_id == organization_id, ProjectDocument.path.isnot(None))))
+    attachment_paths = (list(db.scalars(select(Attachment.path).where(
+        Attachment.task_id.in_(task_ids), Attachment.path.isnot(None)))) if task_ids else [])
+
     # Break cycles: users<->tasks (current/last-completed pointers), tasks<->tasks
     # (subtasks), projects->users (owner).
     if user_ids:
@@ -182,6 +211,11 @@ def delete_organization_data(db: Session, organization_id: str) -> None:
     db.execute(delete(Organization).where(Organization.id == organization_id))
     db.flush()
 
+    # Rows are gone; the underlying objects (uploaded documents, task
+    # attachments) are not deleted by any of the DELETEs above and would
+    # otherwise survive an org deletion indefinitely in the storage backend.
+    _purge_storage_objects(document_paths + attachment_paths)
+
 
 # --------------------------------------------------------------------------- #
 # Deletion-request workflow
@@ -226,6 +260,11 @@ def execute_due_deletions(db: Session, *, now: datetime | None = None) -> dict:
         DeletionRequest.status == "pending", DeletionRequest.scheduled_for <= cutoff)).all()
     completed_users, completed_orgs = 0, 0
     for request in due:
+        # Commit per request, not once at the end of the batch. delete_organization_data
+        # unlinks real files/S3 objects as its last step, which cannot be rolled back;
+        # batching every request into one final commit meant a later request's failure
+        # rolled back an earlier request's already-completed row deletion while its
+        # files stayed deleted -- rows pointing at objects that no longer exist.
         if request.target_type == "user":
             user = db.get(User, request.target_id)
             if user is not None:
@@ -236,7 +275,7 @@ def execute_due_deletions(db: Session, *, now: datetime | None = None) -> dict:
             completed_orgs += 1
         request.status = "completed"
         request.completed_at = datetime.now(timezone.utc)
-    db.commit()
+        db.commit()
     return {"users_anonymized": completed_users, "organizations_deleted": completed_orgs}
 
 
@@ -279,13 +318,19 @@ def run_retention_cleanup(db: Session, *, organization_id: str | None = None, no
 
         if policy.document_retention_days is not None:
             cutoff = cutoff_now - timedelta(days=policy.document_retention_days)
-            stale_ids = list(db.scalars(select(ProjectDocument.id).where(
+            stale_rows = list(db.execute(select(ProjectDocument.id, ProjectDocument.path).where(
                 ProjectDocument.organization_id == org_id, ProjectDocument.created_at < cutoff)))
+            stale_ids = [row[0] for row in stale_rows]
             if stale_ids:
                 db.execute(delete(DocumentChunk).where(DocumentChunk.document_id.in_(stale_ids)))
                 result = db.execute(delete(ProjectDocument).where(ProjectDocument.id.in_(stale_ids)))
                 totals["documents"] += result.rowcount or 0
-    db.commit()
+                _purge_storage_objects([row[1] for row in stale_rows if row[1]])
+
+        # Commit per org, not once after the whole loop -- the storage purge above
+        # cannot be rolled back, so a later org's failure must not roll back an
+        # earlier org's already-completed row deletion while its files stay gone.
+        db.commit()
     return totals
 
 

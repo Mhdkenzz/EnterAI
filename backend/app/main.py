@@ -102,7 +102,12 @@ from .accounts import router as accounts_router, enforce, _LOGIN_LIMITER, _SIGNU
 from .billing_webhook import router as billing_webhook_router
 from .privacy import router as privacy_router, admin_router as admin_privacy_router
 from . import privacy_service
+from .sso_routes import router_admin as sso_admin_router, router_scim as scim_router
+from .enterprise_routes import router as enterprise_router
 app.include_router(admin_router)
+app.include_router(sso_admin_router)
+app.include_router(scim_router)
+app.include_router(enterprise_router)
 app.include_router(accounts_router)
 app.include_router(billing_webhook_router)
 app.include_router(privacy_router)
@@ -203,7 +208,34 @@ def ensure_task_parent(db, project, parent_id):
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
 @app.get("/health")
-def health(): return {"ok":True}
+def health(db: Session = Depends(get_db)):
+    """A replica that answers here but cannot reach its database or shared rate
+    limiter is not actually healthy -- a load balancer or orchestrator routing
+    traffic to it on a bare 200 would be routing into a wall. Both checks are a
+    single cheap round trip each, so this stays fast enough for a tight probe
+    interval."""
+    from sqlalchemy import text as _text
+    checks: dict[str, str] = {}
+    try:
+        db.execute(_text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception:
+        checks["db"] = "error"
+    redis_url = os.getenv("REDIS_URL", "").strip()
+    if redis_url:
+        try:
+            from .ratelimit import get_redis
+            get_redis(redis_url).ping()
+            checks["redis"] = "ok"
+        except Exception:
+            checks["redis"] = "error"
+    else:
+        checks["redis"] = "not_configured"
+    healthy = checks["db"] == "ok" and checks["redis"] != "error"
+    body = {"ok": healthy, **checks}
+    if not healthy:
+        raise HTTPException(status_code=503, detail=body)
+    return body
 
 @app.get("/")
 def root(): return {"service": "Enter AI API", "status": "ok"}
@@ -233,7 +265,10 @@ def register(data: Register, request: Request, db: Session = Depends(get_db)):
     if db.scalar(select(Organization).where(Organization.slug == slug)): raise HTTPException(409,"Organization already exists")
     org = Organization(name=data.organization_name, slug=slug); db.add(org); db.flush()
     user = User(organization_id=org.id,name=data.name,email=address,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user)
-    ensure_hierarchy_config(db, org.id); db.flush(); log(db, org.id, user.id, "user", user.id, "registered")
+    ensure_hierarchy_config(db, org.id)
+    from .billing_service import ensure_trial_subscription
+    ensure_trial_subscription(db, org.id)
+    db.flush(); log(db, org.id, user.id, "user", user.id, "registered")
     verification = accounts.issue_verification(db, user)
     db.commit()
     mailer.send_verification(user.email, user.name, verification)
@@ -251,6 +286,10 @@ def login(data: SignIn, request: Request, db: Session = Depends(get_db)):
         raise HTTPException(401,"Incorrect email or password")
     if not verify_password(data.password,user.password_hash): raise HTTPException(401,"Incorrect email or password")
     if not user.active: raise HTTPException(401,"Incorrect email or password")
+    from .enterprise_models import SessionPolicy
+    policy = db.scalar(select(SessionPolicy).where(SessionPolicy.organization_id == user.organization_id))
+    if policy and policy.sso_only_enforced:
+        raise HTTPException(403, "This organization requires signing in through SSO.")
     log(db,user.organization_id,user.id,"user",user.id,"logged_in"); db.commit()
     org=db.get(Organization,user.organization_id); return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 
@@ -510,6 +549,7 @@ def agent_messages(agent_id: str, user:User=Depends(current_user), db:Session=De
 def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(current_user), db:Session=Depends(get_db)):
     if not AI_PLAN_RATE_LIMITER.allow(user.id):
         raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
+    _enforce_ai_usage_limit(db, user.organization_id)
     agent = _get_org_agent(db, user, agent_id)
     if agent.retired_at is not None:
         raise HTTPException(409, "This agent has been retired and can no longer be messaged")
@@ -532,6 +572,7 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
     with audit_context("agent", agent.id, user.id):
         audit(db,user.organization_id,agent.id,"agent",agent.id,"message_sent")
     db.add(AgentMessage(agent_id=agent.id, author_id=None, role="agent", body=result["reply"]))
+    _record_ai_usage(db, user.organization_id)
     db.commit()
     return result
 @app.get("/api/notifications")
@@ -555,16 +596,29 @@ AI_PLAN_RATE_LIMITER = build_rate_limiter(
     namespace="ai-plan",
 )
 
+def _enforce_ai_usage_limit(db: Session, organization_id: str) -> None:
+    from .billing_service import BillingService
+    if not BillingService(db).enforce_plan_limit(organization_id, "ai_calls", 1):
+        raise HTTPException(402, "This workspace's AI usage limit has been reached for the current plan.")
+
+
+def _record_ai_usage(db: Session, organization_id: str) -> None:
+    from .billing_service import BillingService
+    BillingService(db).record_usage(organization_id, "ai_calls", 1)
+
+
 @app.post("/api/ai/plan")
 def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(get_db)):
     if not AI_PLAN_RATE_LIMITER.allow(user.id):
         raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
+    _enforce_ai_usage_limit(db, user.organization_id)
     if data.project_id:
         ensure_project(db, user, data.project_id)
     try:
         with audit_context("copilot", user.id, user.id):
             result = CopilotService().plan(data.message, WorkspaceTools(db, user, scope_project_id=data.project_id))
             audit(db,user.organization_id,user.id,"copilot",user.id,"planned")
+        _record_ai_usage(db, user.organization_id)
         db.commit()
         return result
     except CopilotProviderError as error:

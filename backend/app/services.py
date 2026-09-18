@@ -96,6 +96,8 @@ def _bootstrap(db: Session, *, demo_content: bool):
     org = Organization(name="Enter AI", slug="enter-ai")
     db.add(org); db.flush()
     ensure_hierarchy_config(db, org.id)
+    from .billing_service import ensure_trial_subscription
+    ensure_trial_subscription(db, org.id)
     users = [
         User(organization_id=org.id, name="Enter AI Admin", email=admin_email, password_hash=hash_password(admin_password), role="admin", title="Administrator", avatar="EA"),
     ]
