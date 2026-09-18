@@ -1,6 +1,6 @@
 FROM python:3.12-slim
 WORKDIR /app
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
 
 # curl is the healthcheck's only runtime need; installed before the app layers so
 # it stays cached across code changes.
