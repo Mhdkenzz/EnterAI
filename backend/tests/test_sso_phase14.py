@@ -145,8 +145,12 @@ def test_scim_rejects_a_normal_member_session_token_with_403():
 
 
 def test_scim_rejects_requests_with_no_token_and_with_a_garbage_token():
+    # No Authorization header at all: 401 (unauthenticated). A header present
+    # but not a live SCIM token: 403 (authenticated as the wrong principal) --
+    # the same distinction test_scim_rejects_a_normal_member_session_token_with_403
+    # exercises with a real, otherwise-valid session token.
     with TestClient(app) as c:
-        assert c.get('/scim/v2/Users').status_code == 403
+        assert c.get('/scim/v2/Users').status_code == 401
         assert c.get('/scim/v2/Users', headers={'Authorization': 'Bearer not-a-real-token'}).status_code == 403
 
 

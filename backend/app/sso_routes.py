@@ -36,9 +36,17 @@ def scim_auth(
     """The only entry point into /scim/v2/*. A member's (or admin's) ordinary
     session token never satisfies this -- it is signed with a different key and
     was never hashed into any identity_providers.scim_token_hash row -- so it
-    falls straight through to the same 403 an unrecognized token gets."""
-    token = credentials.credentials if credentials else None
-    idp = resolve_scim_identity_provider(db, token) if token else None
+    falls straight through to the same 403 an unrecognized token gets.
+
+    No Authorization header at all is 401 (unauthenticated); a header that
+    doesn't resolve to a live SCIM token -- including a perfectly valid user
+    session token -- is 403 (authenticated as the wrong kind of principal).
+    Collapsing both to 403 is what schemathesis's negative_data_rejection
+    check caught: HTTP requires 401 for "no/invalid credentials presented".
+    """
+    if not credentials:
+        raise HTTPException(status_code=401, detail="SCIM bearer token required")
+    idp = resolve_scim_identity_provider(db, credentials.credentials)
     if not idp:
         raise HTTPException(status_code=403, detail="Valid SCIM service token required")
     return idp
