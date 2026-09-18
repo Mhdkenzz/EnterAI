@@ -202,11 +202,13 @@ jobs:
         # image, which this job does not exercise.
         run: docker compose -f docker-compose.prod.yml up -d --build lb
       - name: Wait for the load balancer
-        run: for attempt in $(seq 1 60); do curl -fsS http://127.0.0.1:8000/health && break || sleep 2; done
-      - name: Confirm both replicas are healthy
+        run: |
+          for attempt in $(seq 1 60); do curl -fsS http://127.0.0.1:8000/health && break || sleep 2; done
+          curl -fsS http://127.0.0.1:8000/health || { echo "::error::the stack never became reachable"; exit 1; }
+      - name: Confirm both replicas are running
         run: |
           docker compose -f docker-compose.prod.yml ps
-          running=$(docker compose -f docker-compose.prod.yml ps --status running --format '{{.Service}}' | grep -c '^api$')
+          running=$(docker compose -f docker-compose.prod.yml ps -q api | wc -l)
           test "$running" -eq 2 || { echo "::error::expected 2 running api replicas, found $running"; exit 1; }
       - name: Multi-replica checks
         run: python3 qa/multi_replica_check.py "$AI_PLAN_RATE_LIMIT_PER_MINUTE"
