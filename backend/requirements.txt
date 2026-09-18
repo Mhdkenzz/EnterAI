@@ -14,3 +14,8 @@ pytest==9.1.1
 httpx==0.28.1
 fakeredis[lua]==2.38.0
 moto[s3]==5.2.3
+# Phase 10.1 - RAG
+pgvector==0.2.5
+openai==1.35.0
+sentence-transformers==3.0.1
+tiktoken==0.7.0

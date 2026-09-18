@@ -2,6 +2,7 @@ from datetime import datetime
 from uuid import uuid4
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
+from pgvector.sqlalchemy import Vector
 from .database import Base
 
 def uid() -> str: return str(uuid4())
@@ -249,4 +250,23 @@ class Invite(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime)
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class DocumentChunk(Base):
+    """A text chunk from a ProjectDocument with its vector embedding for RAG retrieval.
+
+    Each chunk belongs to exactly one document and inherits its organization/project
+    ownership for tenancy enforcement. The embedding column uses pgvector for
+    efficient cosine similarity search.
+    """
+    __tablename__ = "document_chunks"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True, index=True)
+    document_id: Mapped[str] = mapped_column(ForeignKey("project_documents.id", ondelete="CASCADE"), index=True)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

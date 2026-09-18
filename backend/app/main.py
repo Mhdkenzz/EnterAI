@@ -19,6 +19,7 @@ from .hierarchy import MAX_HIERARCHY_AGENTS, desired_counts, reconcile_agents
 from .ratelimit import build_rate_limiter
 from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
 from .storage import get_storage
+from .indexing import index_document
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
 demo_seed_enabled = os.getenv("ENABLE_DEMO_SEED", "false" if environment == "production" else "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -305,6 +306,13 @@ async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(cu
     db.add(document); db.flush()
     log(db,user.organization_id,user.id,"project_document",document.id,"draft_created")
     db.commit()
+    # Index the document for RAG
+    try:
+        index_document(db, document)
+    except Exception as e:
+        # Log but don't fail the request - indexing is async-friendly
+        import logging
+        logging.getLogger(__name__).warning("Failed to index document %s: %s", document.id, e)
     return {"document":{"id":document.id,"file_name":document.file_name},"draft":draft}
 
 @app.get("/api/projects/{project_id}/documents")
@@ -321,6 +329,12 @@ async def add_project_document(project_id:str,file:UploadFile=File(...),user:Use
     except ValueError as error: raise HTTPException(415,str(error)) from error
     stored = get_storage().save("project-documents", file.filename or "document", raw)
     document=ProjectDocument(organization_id=user.organization_id,project_id=project_id,uploaded_by=user.id,file_name=file.filename or "document",path=str(stored),content_type=file.content_type,extracted_text=extracted[:50000]); db.add(document); log(db,user.organization_id,user.id,"project",project_id,"document_uploaded",file_name=document.file_name); db.commit()
+    # Index the document for RAG
+    try:
+        index_document(db, document)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning("Failed to index document %s: %s", document.id, e)
     return {"id":document.id,"file_name":document.file_name}
 
 @app.post("/api/tasks",status_code=201)
