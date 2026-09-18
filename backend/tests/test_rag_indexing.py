@@ -12,12 +12,17 @@ from sqlalchemy.orm import sessionmaker
 
 @pytest.fixture
 def db_session():
-    from app.database import DATABASE_URL, Base
+    from app.database import Base
     import app.models  # noqa: F401 -- registers every table on Base.metadata before create_all
-    # Use an in-memory SQLite for isolated RAG tests when no real Postgres is available.
-    # The tests verify schema contracts; full pgvector behavior requires a real Postgres instance.
-    url = DATABASE_URL if DATABASE_URL and DATABASE_URL.startswith("postgresql") else "sqlite:///:memory:"
-    engine = create_engine(url, future=True)
+    # Always an isolated in-memory SQLite, never the ambient DATABASE_URL: the
+    # backend-postgres CI job points DATABASE_URL at one shared, already-migrated
+    # database that every other test in the suite also runs against, and this
+    # fixture's teardown drops every table it created. Targeting that live URL
+    # (as a previous version of this fixture did) would wipe the schema out from
+    # under whichever test happens to run next. These tests verify schema
+    # contracts and app-level logic, not real pgvector query semantics, so a
+    # dedicated SQLite database is both safe and sufficient.
+    engine = create_engine("sqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     Session = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     session = Session()

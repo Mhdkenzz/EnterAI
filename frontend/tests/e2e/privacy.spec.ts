@@ -112,8 +112,16 @@ test("admin can set a retention policy and it round-trips after reload", async (
   await page.getByRole("button", { name: "Save retention policy" }).click();
   await expect(page.getByText("Saved.")).toBeVisible();
 
+  // Tie the assertion to the actual GET completing, rather than hoping the
+  // default 5s DOM-polling window outlasts however long this reload's fetch
+  // takes under CI/runner load -- PrivacyAdminSection's own effect fires
+  // independently of AdminConsole's "Admin console" heading, so waiting only
+  // for that heading does not guarantee the retention data has arrived yet.
+  const retentionLoaded = page.waitForResponse(response =>
+    response.url().includes("/admin/privacy/retention") && response.request().method() === "GET");
   await page.reload();
   await openAdmin(page, isMobile);
+  await retentionLoaded;
   await expect(page.getByLabel("Audit log (days)")).toHaveValue("90");
 });
 
