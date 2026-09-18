@@ -130,6 +130,22 @@ jobs:
           E2E_DATABASE_URL: sqlite:////tmp/enter-ai-browser-ci.db
           E2E_PYTHON: python
         run: npm run test:e2e
+      # A browser assertion failure usually says what the page did not show, not why
+      # the API refused it. The other jobs already dump their logs on failure.
+      - name: API and web logs
+        if: failure()
+        run: |
+          echo "::group::API"; tail -200 /tmp/enter-ai-api.log || true; echo "::endgroup::"
+          echo "::group::web"; tail -80 /tmp/enter-ai-web.log || true; echo "::endgroup::"
+      - name: Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            frontend/test-results
+            frontend/playwright-report
+          retention-days: 7
 
   api-security-and-load:
     runs-on: ubuntu-latest
