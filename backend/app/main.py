@@ -1,6 +1,6 @@
 import os
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -254,7 +254,7 @@ def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db))
     projects=db.scalars(select(Project).where(Project.organization_id==user.organization_id).order_by(Project.created_at.desc())).all()
     assigned=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id, Task.assignee_id==user.id).order_by(Task.due_date)).all()
     tasks=sorted(assigned,key=lambda task: (task.status=="done", task.due_date or datetime.max))
-    now = datetime.utcnow(); week_start = datetime(now.year, now.month, now.day) - timedelta(days=now.weekday())
+    now = datetime.now(timezone.utc); week_start = datetime(now.year, now.month, now.day) - timedelta(days=now.weekday())
     return {"projects":[project_out(p,db) for p in projects],"my_tasks":[task_out(t,db) for t in tasks],"stats":{"active_projects":len([p for p in projects if p.status=="active"]),"at_risk":len([p for p in projects if p.health=="at_risk"]),"my_open_tasks":len([task for task in assigned if task.status!="done"]),"completed_this_week":len([task for task in assigned if task.completed_at and task.completed_at >= week_start])}}
 
 @app.get("/api/projects")
@@ -344,7 +344,9 @@ def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(
     t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title); db.commit(); return task_out(t,db)
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id); p=ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
+    t=db.get(Task,task_id)
+    if not t: raise HTTPException(404,"Task not found")
+    p=ensure_project(db,user,t.project_id)
     if "assignee_id" in data.model_fields_set:
         ensure_org_assignee(db, user, data.assignee_id)
         if t.assignee_id and t.assignee_id != data.assignee_id:
@@ -354,7 +356,7 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
     before, before_assignee_id = t.status, t.assignee_id
     for key,value in data.model_dump(exclude_unset=True).items(): setattr(t,key,value)
     if "status" in data.model_fields_set and data.status != before:
-        t.completed_at = datetime.utcnow() if data.status == "done" else None
+        t.completed_at = datetime.now(timezone.utc) if data.status == "done" else None
     sync_agent_task_pointers(db, t, before_assignee_id)
     log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status); db.commit(); return task_out(t,db)
 def detach_task_references(db, task):
@@ -378,14 +380,20 @@ def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(g
 
 @app.get("/api/tasks/{task_id}/comments")
 def comments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
+    t=db.get(Task,task_id)
+    if not t: raise HTTPException(404,"Task not found")
+    ensure_project(db,user,t.project_id)
     return [{"id":c.id,"body":c.body,"created_at":c.created_at,"author":user_out(db.get(User,c.author_id))} for c in db.scalars(select(Comment).where(Comment.task_id==task_id)).all()]
 @app.post("/api/tasks/{task_id}/comments",status_code=201)
 def add_comment(task_id:str,data:CommentIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found")); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented"); db.commit(); return {"id":c.id,"body":c.body}
+    t=db.get(Task,task_id)
+    if not t: raise HTTPException(404,"Task not found")
+    ensure_project(db,user,t.project_id); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented"); db.commit(); return {"id":c.id,"body":c.body}
 @app.post("/api/tasks/{task_id}/attachments",status_code=201)
 async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id); ensure_project(db,user,t.project_id) if t else (_ for _ in ()).throw(HTTPException(404,"Task not found"))
+    t=db.get(Task,task_id)
+    if not t: raise HTTPException(404,"Task not found")
+    ensure_project(db,user,t.project_id)
     raw=await file.read()
     if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Attachments must be 5 MB or smaller")
     path=get_storage().save("task-attachments", file.filename or "attachment", raw); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename or "attachment",path=path,content_type=file.content_type); db.add(a); log(db,user.organization_id,user.id,"task",task_id,"attachment_uploaded"); db.commit(); return {"id":a.id,"file_name":a.file_name}

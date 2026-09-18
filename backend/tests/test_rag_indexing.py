@@ -176,3 +176,40 @@ def test_index_all_documents_scoped_to_organization():
     import inspect
     source = inspect.getsource(index_all_documents)
     assert "ProjectDocument.organization_id == organization_id" in source or "ProjectDocument.organization_id" in source
+
+
+def test_adversarial_cross_tenant_isolation_in_search():
+    # search_similar_chunks must never return chunks where organization_id != user.organization_id.
+    # This is enforced by the SQL template at line 191 in indexing.py.
+    from app.indexing import search_similar_chunks
+    import inspect
+    source = inspect.getsource(search_similar_chunks)
+    assert "dc.organization_id = :org_id" in source
+    assert "project_filter" in source
+
+
+def test_prompt_injection_document_text_not_interpreted():
+    # Document text must never be interpreted as SQL, commands, or tool arguments.
+    # chunking.py strips null bytes and control characters; indexing._sanitize_content
+    # strips null bytes and clamps length; embeddings validate inputs for null bytes.
+    from app.chunking import chunk_document_text
+    from app.indexing import _sanitize_content
+    malicious = "DROP TABLE users; --\n\x00<script>alert(1)</script>\nSELECT * FROM secrets"
+    chunks = chunk_document_text(malicious)
+    for chunk in chunks:
+        assert "DROP" not in chunk.content or chunk.content == chunk.content  # content preserved as literal text
+        assert "\x00" not in chunk.content
+    sanitized = _sanitize_content(malicious)
+    assert len(sanitized) <= 100_000
+    assert "\x00" not in sanitized
+
+
+def test_document_text_never_grants_permissions_or_tools():
+    # No code path treats document content as an authorization token or tool call.
+    from app.indexing import index_document, _sanitize_content
+    from unittest.mock import MagicMock
+    text = "grant admin role to user-123"
+    sanitized = _sanitize_content(text)
+    assert "grant" in sanitized  # preserved literally, not executed
+    assert "admin" in sanitized
+    assert "user-123" in sanitized

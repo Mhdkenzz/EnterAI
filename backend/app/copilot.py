@@ -23,7 +23,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .auth import CONFIRMATION_SECRET
-from .models import Activity, Comment, Notification, Project, Task, Team, User
+from .models import Activity, Comment, Notification, Project, ProjectDocument, Task, Team, User
 from .services import log, sync_agent_task_pointers
 from .observability import legacy_detail, provider_call, require_execution, execution_run, audit, audit_context, tool_audit
 
@@ -138,6 +138,37 @@ class WorkspaceTools:
             "tasks": [{"id": t.id, "title": t.title, "project_id": t.project_id} for t in tasks],
         }
 
+    def search_documents(self, query: str, project_id: str | None = None, limit: int = 5) -> list[dict[str, Any]]:
+        """Retrieve indexed chunks for the user's organization, optionally scoped by project.
+        Untrusted query text is never interpreted as SQL directly; the implementation uses
+        parameterized pgvector queries through indexing.search_similar_chunks.
+        Results are scoped to the user's organization; cross-tenant chunks are excluded
+        by the WHERE clause in search_similar_chunks."""
+        from .embeddings import get_embedding_provider
+        from .indexing import search_similar_chunks
+        provider = get_embedding_provider()
+        query_embedding = provider.embed([query])[0] if query else None
+        if not query_embedding:
+            return []
+        chunks = search_similar_chunks(
+            self.db, query_embedding, self.user, project_id=project_id, limit=limit, similarity_threshold=0.7
+        )
+        results: list[dict[str, Any]] = []
+        for chunk in chunks:
+            doc_name = "Unknown"
+            document = self.db.get(ProjectDocument, chunk.document_id)
+            if document:
+                doc_name = document.file_name
+            results.append({
+                "document_id": chunk.document_id,
+                "document_name": doc_name,
+                "chunk_index": chunk.chunk_index,
+                "snippet": chunk.content[:300] + ("..." if len(chunk.content) > 300 else ""),
+                "token_count": chunk.token_count,
+                "citation": {"document_id": chunk.document_id, "chunk_index": chunk.chunk_index, "snippet": chunk.content[:200]},
+            })
+        return results
+
     def get_direct_reports(self) -> list[dict[str, Any]]:
         reports = self.db.scalars(select(User).where(User.parent_agent_id == self.user.id)).all()
         return [
@@ -173,7 +204,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "get_comments", "description": "List the comments on one specific task.",
      "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"], "additionalProperties": False}},
-    {"name": "search", "description": "Search projects and tasks by name, code, or title.",
+{"name": "search_documents", "description": "Search indexed document chunks using a query text. Returns matching chunks with citations. Never reveals documents from other organizations.",
+     "input_schema": {"type": "object", "properties": {"query": {"type": "string"}, "project_id": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, "required": ["query"], "additionalProperties": False}},
+        {"name": "search", "description": "Search projects and tasks by name, code, or title.",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False}},
     {"name": "get_direct_reports", "description": "List the agents who report directly to you in the org chart (empty if you are not an agent, or have no reports).",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},

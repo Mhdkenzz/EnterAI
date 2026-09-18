@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
@@ -6,7 +6,7 @@ from pgvector.sqlalchemy import Vector
 from .database import Base
 
 def uid() -> str: return str(uuid4())
-def now() -> datetime: return datetime.utcnow()
+def now() -> datetime: return datetime.now(timezone.utc)
 
 class Organization(Base):
     __tablename__ = "organizations"
