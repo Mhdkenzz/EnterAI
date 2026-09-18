@@ -7,7 +7,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -213,14 +213,18 @@ def rotate_provider_secrets(user: User = Depends(human_admin), db: Session = Dep
 # --- OIDC login (public: this is how a browser gets a session in the first place) ---
 
 @router_login.get('/start')
-def sso_login_start(email: str, db: Session = Depends(get_db)):
+def sso_login_start(email: EmailStr, db: Session = Depends(get_db)):
     """Resolve the active OIDC provider bound to this email's domain and
     redirect the browser to its authorization endpoint. A real 302, not a JSON
     body with a URL for the frontend to navigate to -- the IdP's login page
-    needs to be reached by an actual browser navigation, not a fetch()."""
-    domain = email.strip().lower().rsplit('@', 1)[-1] if '@' in email else ''
-    if not domain:
-        raise HTTPException(422, 'A valid email address is required')
+    needs to be reached by an actual browser navigation, not a fetch().
+
+    `email: EmailStr` (not a hand-checked `str`) so a malformed address is
+    rejected by FastAPI's own request validation, whose 422 response matches
+    the OpenAPI schema it publishes (an array of ValidationError, not a bare
+    string) -- CI's schemathesis run caught a hand-raised HTTPException(422,
+    "...") here violating that schema."""
+    domain = email.lower().rsplit('@', 1)[-1]
     idp = db.scalar(select(IdentityProvider).where(
         IdentityProvider.domain_binding == domain, IdentityProvider.protocol == 'oidc',
         IdentityProvider.active == True))
