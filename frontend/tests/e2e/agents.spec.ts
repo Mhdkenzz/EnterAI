@@ -42,3 +42,38 @@ test("agent hierarchy is reachable and usable on mobile", async ({ page, isMobil
   await expect(page.getByRole("heading", { name: "Agent hierarchy" })).toBeVisible();
   await expect(page.getByRole("complementary")).toBeHidden();
 });
+
+test("a message sent before the transcript finishes loading is not swallowed", async ({ page, isMobile }) => {
+  // The history request is slower than a reader who types straight away. If its
+  // response is allowed to land on top of local state, the message they just sent
+  // disappears in front of them.
+  await page.route("**/api/agents/*/messages", async route => {
+    if (route.request().method() !== "GET") return route.continue();
+    // Let the server answer now -- so its transcript predates the message about to
+    // be sent -- but deliver that answer late, which is the actual race.
+    const response = await route.fetch();
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    await route.fulfill({ response });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  if (isMobile) await page.getByRole("button", { name: "Open menu", exact: true }).click();
+  await page.getByRole("complementary").getByRole("button", { name: "Agents", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Agent hierarchy" })).toBeVisible();
+
+  await page.getByLabel("VPs under CEO").fill("1");
+  await page.getByRole("button", { name: "Save hierarchy" }).click();
+  await expect(page.getByText("Chief Executive Officer", { exact: true }).first()).toBeVisible({ timeout: 15000 });
+
+  await page.getByRole("button", { name: /Chief Executive Officer/ }).first().click();
+  const question = `Racing the transcript ${test.info().project.name} ${Date.now()}?`;
+  await page.getByPlaceholder(/Message Chief Executive Officer/).fill(question);
+  await page.getByRole("button", { name: /Send message to Chief Executive Officer/ }).click();
+
+  await expect(page.getByText(question)).toBeVisible();
+  // Still there once the slow history response has definitely arrived.
+  await page.waitForTimeout(2500);
+  await expect(page.getByText(question)).toBeVisible();
+});
