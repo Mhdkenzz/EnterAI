@@ -19,3 +19,5 @@ pgvector==0.2.5
 openai==1.35.0
 sentence-transformers==3.0.1
 tiktoken==0.7.0
+# Phase 12 - Billing
+stripe==12.3.0
