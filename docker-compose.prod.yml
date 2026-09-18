@@ -89,6 +89,13 @@ services:
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       EMAIL_FROM: ${EMAIL_FROM:?set EMAIL_FROM}
       APP_BASE_URL: ${APP_BASE_URL:?set APP_BASE_URL}
+      # Only required for OIDC login (Phase 14.2): the redirect_uri registered
+      # with an IdP must resolve to this backend, not the frontend/APP_BASE_URL.
+      API_BASE_URL: ${API_BASE_URL:-}
+      # Only required once an OIDC identity provider's client_secret is stored
+      # (app/secrets_store.py fails closed in production if unset and one is).
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
+      SECRETS_ENCRYPTION_KEY_PREVIOUS: ${SECRETS_ENCRYPTION_KEY_PREVIOUS:-}
       # The API only ever sees the load balancer's address, so rate limiting has to
       # read the client from the header nginx appends.
       TRUST_PROXY_HEADERS: "true"

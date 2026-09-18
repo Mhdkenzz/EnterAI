@@ -3,17 +3,86 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+
+# Everything here is real and runs on every push: images actually build (a
+# broken Dockerfile fails this workflow, not just a "deploy" step that never
+# looked at them). Whether the deploy job then goes on to touch a real server
+# depends entirely on whether DEPLOY_HOST is configured -- see check-target
+# below. It is not configured for this repo as of this workflow: `gh secret
+# list` returns nothing. That job step is written and structurally correct,
+# but has never been exercised against a live host, and must not be reported
+# as validated until it has.
 jobs:
-  deploy:
+  build-images:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Deploy to production
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          JWT_SECRET: ${{ secrets.JWT_SECRET }}
-          REDIS_URL: ${{ secrets.REDIS_URL }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      - name: Build backend image
+        run: docker build -t enterai-backend:${{ github.sha }} ./backend
+      - name: Build frontend image
+        run: docker build -t enterai-frontend:${{ github.sha }} ./frontend
+
+  check-target:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.check.outputs.configured }}
+    steps:
+      - id: check
         run: |
-          echo "Production deployment pipeline executed for commit $GITHUB_SHA"
-          # Rollback procedure: restore previous image tag; restore DB to last snapshot
+          if [ -n "${{ secrets.DEPLOY_HOST }}" ] && [ -n "${{ secrets.DEPLOY_SSH_KEY }}" ] && [ -n "${{ secrets.DEPLOY_SSH_USER }}" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [build-images, check-target]
+    if: needs.check-target.outputs.configured == 'true'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - name: Record the currently-deployed SHA for rollback
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ secrets.DEPLOY_PATH || '/opt/enterai' }} && git rev-parse HEAD" > /tmp/previous_sha.txt || echo "none" > /tmp/previous_sha.txt
+      - name: Deploy this commit
+        run: |
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ secrets.DEPLOY_PATH || '/opt/enterai' }} && \
+             git fetch origin main && git checkout ${{ github.sha }} && \
+             docker compose -f docker-compose.prod.yml up -d --build"
+      - name: Health check
+        run: |
+          for attempt in $(seq 1 30); do
+            curl -fsS "${{ secrets.DEPLOY_HEALTH_URL || format('https://{0}/health', secrets.DEPLOY_HOST) }}" && exit 0
+            sleep 5
+          done
+          echo "::error::New deployment did not become healthy"
+          exit 1
+      - name: Roll back on failed health check
+        if: failure()
+        run: |
+          previous="$(cat /tmp/previous_sha.txt)"
+          if [ "$previous" = "none" ]; then
+            echo "::error::No previous SHA recorded -- cannot roll back automatically. Restore from the last known-good backup (docs/RESTORE_RUNBOOK.md)."
+            exit 1
+          fi
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "cd ${{ secrets.DEPLOY_PATH || '/opt/enterai' }} && \
+             git checkout $previous && docker compose -f docker-compose.prod.yml up -d --build"
+
+  no-target-configured:
+    runs-on: ubuntu-latest
+    needs: [build-images, check-target]
+    if: needs.check-target.outputs.configured == 'false'
+    steps:
+      - run: |
+          echo "::notice::No deployment target is configured (DEPLOY_HOST/DEPLOY_SSH_USER/DEPLOY_SSH_KEY repo secrets are unset)."
+          echo "::notice::Images for $GITHUB_SHA built successfully above. Deployment is manual -- see docs/DEPLOY.md."

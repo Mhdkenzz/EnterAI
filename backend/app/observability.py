@@ -8,16 +8,26 @@ Usage currently loads the time-window rows and scans per agent; aggregate in SQL
 before scaling to large ledgers. Global scheduler faults use the reserved
 organization namespace '__system__' (no tenant or agent is yet known).
 """
+import asyncio
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import date, datetime, timezone
 import logging
 import json
 import re
 import time
-from sqlalchemy import event, select
+from sqlalchemy import event, func, select, text
+from sqlalchemy import update as sa_update
 from sqlalchemy.orm import Session
 from .models import ProviderCall, ExecutionRun, Organization
 from .models import AuditEvent, User, uid
+
+# Scheduler faults with no known tenant use this sentinel (see
+# scheduler_failure below) -- it is never a real organizations.id, so the
+# aggregation writer must skip it rather than violate the FK on
+# enterprise_audit_aggregations.organization_id.
+_NO_TENANT = '__system__'
 
 _context = ContextVar('audit_context', default=None)
 _run_id: ContextVar[str | None] = ContextVar('execution_run_id', default=None)
@@ -229,3 +239,117 @@ def provider_call(tools, mode, invoke):
 @event.listens_for(AuditEvent, 'before_delete')
 def immutable_audit(mapper, connection, target):
     raise ValueError('Audit events are append-only')
+
+
+# --------------------------------------------------------------------------- #
+# Enterprise audit aggregation (materialized per-day/per-action counts for
+# enterprise_routes.audit_aggregation, the SIEM/export surface).
+#
+# Deliberately NOT written synchronously inside audit() above. That was tried
+# first and reliably broke things on SQLite: an extra write on every audited
+# request, whether inline in the caller's own transaction or on a second
+# session, either corrupted the caller's transaction state (SAVEPOINT
+# support needs event-listener workarounds this engine does not register for
+# pysqlite) or self-deadlocked (SQLite allows only one writer for the whole
+# file at a time; a second connection's write blocks on a lock only the
+# still-running caller could release). Both were reproduced and are not
+# theoretical. Postgres does not have this problem, but this app runs on
+# both, and correctness cannot depend on which one is in front of it.
+#
+# Instead this recomputes from the real AuditEvent table on a periodic tick,
+# the same shape as privacy_service.py's retention cleanup loop (advisory-
+# locked for multi-replica safety, off by default, real GROUP BY count so a
+# missed or repeated tick just reproduces the same correct totals -- not an
+# incremental patch that could drift). The aggregation is eventually
+# consistent (lagging by up to one tick), not real-time; SIEM/export use
+# cases tolerate that far better than they would tolerate the audit trail
+# itself becoming unreliable.
+# --------------------------------------------------------------------------- #
+
+def refresh_audit_aggregations(db: Session, *, organization_id: str | None = None) -> int:
+    from .enterprise_models import EnterpriseAuditAggregation
+    # func.date() renders as each dialect's native DATE()/::date equivalent
+    # (verified against both SQLite and real Postgres) and returns the same
+    # "YYYY-MM-DD" shape EnterpriseAuditAggregation.date_bucket already uses.
+    bucket_expr = func.date(AuditEvent.created_at)
+    stmt = select(AuditEvent.organization_id, AuditEvent.action, bucket_expr.label('bucket'), func.count().label('total')
+                 ).group_by(AuditEvent.organization_id, AuditEvent.action, bucket_expr)
+    if organization_id is not None:
+        stmt = stmt.where(AuditEvent.organization_id == organization_id)
+    touched = 0
+    now = datetime.now(timezone.utc)
+    for org_id, action, bucket, total in db.execute(stmt):
+        if not org_id or org_id == _NO_TENANT or not bucket:
+            continue  # not a real organizations.id -- the table FKs to it
+        # func.date() returns a str on SQLite (no native DATE type) but a
+        # real datetime.date on Postgres -- normalize to the "YYYY-MM-DD"
+        # string date_bucket has always stored, on both dialects.
+        bucket = bucket.isoformat() if hasattr(bucket, "isoformat") else bucket
+        where = (
+            EnterpriseAuditAggregation.organization_id == org_id,
+            EnterpriseAuditAggregation.action == action,
+            EnterpriseAuditAggregation.date_bucket == bucket,
+        )
+        result = db.execute(
+            sa_update(EnterpriseAuditAggregation).where(*where).values(count=total, last_updated=now)
+        )
+        if not result.rowcount:
+            db.add(EnterpriseAuditAggregation(organization_id=org_id, action=action,
+                                              date_bucket=bucket, count=total, last_updated=now))
+        touched += 1
+    db.commit()
+    return touched
+
+
+AUDIT_AGGREGATION_INTERVAL_SECONDS = float(os.getenv("AUDIT_AGGREGATION_INTERVAL_SECONDS", "0"))
+_AGGREGATION_LOCK_NAMESPACE = 0x454153  # distinct from execution.py's/privacy_service.py's own namespaces
+_aggregation_background_task: asyncio.Task | None = None
+
+
+def _with_aggregation_lock(engine, fn) -> None:
+    """Same advisory-lock shape as execution.agent_step_lock /
+    privacy_service._with_cleanup_lock: SQLite always grants (it cannot be
+    serving the multi-replica deployment this guards)."""
+    if engine.dialect.name != "postgresql":
+        fn()
+        return
+    connection = engine.connect()
+    acquired = False
+    try:
+        acquired = bool(connection.execute(text("SELECT pg_try_advisory_lock(:ns, 1)"), {"ns": _AGGREGATION_LOCK_NAMESPACE}).scalar())
+        if acquired:
+            fn()
+    finally:
+        if acquired:
+            connection.execute(text("SELECT pg_advisory_unlock(:ns, 1)"), {"ns": _AGGREGATION_LOCK_NAMESPACE})
+        connection.close()
+
+
+def run_aggregation_tick() -> None:
+    from .database import SessionLocal, engine
+    def _tick():
+        with SessionLocal() as db:
+            refresh_audit_aggregations(db)
+    _with_aggregation_lock(engine, _tick)
+
+
+async def _aggregation_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(run_aggregation_tick)
+        except Exception:
+            pass  # a missed tick is retried next interval; never crash the app over it
+        await asyncio.sleep(AUDIT_AGGREGATION_INTERVAL_SECONDS)
+
+
+def start_aggregation_background_loop() -> None:
+    global _aggregation_background_task
+    if _aggregation_background_task is None and AUDIT_AGGREGATION_INTERVAL_SECONDS > 0:
+        _aggregation_background_task = asyncio.ensure_future(_aggregation_loop())
+
+
+def stop_aggregation_background_loop() -> None:
+    global _aggregation_background_task
+    if _aggregation_background_task is not None:
+        _aggregation_background_task.cancel()
+        _aggregation_background_task = None

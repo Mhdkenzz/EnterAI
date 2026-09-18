@@ -102,10 +102,11 @@ from .accounts import router as accounts_router, enforce, _LOGIN_LIMITER, _SIGNU
 from .billing_webhook import router as billing_webhook_router
 from .privacy import router as privacy_router, admin_router as admin_privacy_router
 from . import privacy_service
-from .sso_routes import router_admin as sso_admin_router, router_scim as scim_router
+from .sso_routes import router_admin as sso_admin_router, router_login as sso_login_router, router_scim as scim_router
 from .enterprise_routes import router as enterprise_router
 app.include_router(admin_router)
 app.include_router(sso_admin_router)
+app.include_router(sso_login_router)
 app.include_router(scim_router)
 app.include_router(enterprise_router)
 app.include_router(accounts_router)
@@ -135,11 +136,15 @@ def startup():
     with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
     execution.start_background_loop()
     privacy_service.start_background_loop()
+    from . import observability as _observability
+    _observability.start_aggregation_background_loop()
 
 @app.on_event("shutdown")
 def shutdown():
     execution.stop_background_loop()
     privacy_service.stop_background_loop()
+    from . import observability as _observability
+    _observability.stop_aggregation_background_loop()
 
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str
 class Register(BaseModel): organization_name: str = Field(min_length=2); name: str; email: EmailStr; password: str = Field(min_length=8)

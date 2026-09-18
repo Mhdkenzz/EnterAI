@@ -1,25 +1,14 @@
 """SSO / SCIM authentication, validation, role mapping, and deactivation (Phase 14)."""
-import hashlib
-import hmac
-import os
 from datetime import datetime, timezone
-from typing import Literal
 
-from fastapi import HTTPException, status
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import Organization, User
+from .models import User
 from .sso_models import IdentityProvider, SCIMUserMapping
 from .services import log
 from .tokens import hash_token, mint
-
-# Secret resolution for IdP token signatures: derived from JWT_SECRET so rotation is consistent.
-SECRET = os.getenv("JWT_SECRET", "dev-secret-change-me")
-
-
-def _derive_idp_secret(name: str) -> str:
-    return hashlib.sha256(f"enterai:idp:{name}:{SECRET}".encode()).hexdigest()
 
 
 def validate_org_isolation(db: Session, user: User, target_org_id: str) -> None:

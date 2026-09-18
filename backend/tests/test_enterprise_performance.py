@@ -4,6 +4,7 @@ Runs against the suite's real, externally-migrated database (see
 test_sso_phase14.py's module docstring).
 """
 import time
+from datetime import date, timedelta
 from uuid import uuid4
 
 import pytest
@@ -29,9 +30,15 @@ def test_large_volume_aggregation_query_stays_fast(db_session):
     db_session.add(org)
     db_session.flush()
     org_id = org.id
+    # One row per day over ~500 days of history for this org/action -- a real
+    # distribution 0014_audit_aggregation_unique.py's constraint allows,
+    # unlike 500 rows sharing one (org, action, date_bucket) (which the
+    # constraint now correctly rejects as a real duplicate).
+    base = date(2024, 1, 1)
     for i in range(500):
         db_session.add(EnterpriseAuditAggregation(
-            organization_id=org_id, action="test_action", date_bucket="2025-09-18", count=i,
+            organization_id=org_id, action="test_action",
+            date_bucket=(base + timedelta(days=i)).isoformat(), count=i,
         ))
     db_session.commit()
 

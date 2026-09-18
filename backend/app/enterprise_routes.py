@@ -34,6 +34,16 @@ def audit_aggregation(user: User = Depends(admin), db: Session = Depends(get_db)
     return [{'id': r.id, 'action': r.action, 'date_bucket': r.date_bucket,
              'count': r.count, 'last_updated': r.last_updated.isoformat() if r.last_updated else None} for r in agg_rows]
 
+@router.post('/audit/refresh-aggregation')
+def refresh_audit_aggregation_now(user: User = Depends(admin), db: Session = Depends(get_db)):
+    """On-demand version of the periodic aggregation refresh (see
+    observability.py's module-level comment for why this recomputes from
+    audit_events rather than updating incrementally on every event). Scoped
+    to this org: refreshing here can never touch another tenant's counts."""
+    from .observability import refresh_audit_aggregations
+    touched = refresh_audit_aggregations(db, organization_id=user.organization_id)
+    return {'buckets_refreshed': touched}
+
 # --- Session / Org Policies ---
 
 class PolicyIn(BaseModel):

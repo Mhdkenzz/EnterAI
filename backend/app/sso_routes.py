@@ -1,13 +1,17 @@
 """SSO / SCIM / Enterprise Identity routes (Phase 14)."""
+import os
 from datetime import datetime, timezone
 from typing import Literal
+from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from . import secrets_store, sso_oidc
 from .admin import human_admin
 from .database import get_db
 from .models import User, AuditEvent
@@ -17,10 +21,24 @@ from .sso_auth import (
     deactivate_scim_user, issue_scim_token, scim_create_or_update,
     resolve_role_mapping, resolve_scim_identity_provider, validate_org_isolation,
 )
-from .tokens import hash_token
 
 router_admin = APIRouter(prefix='/api/admin/sso', tags=['admin-sso'])
 router_scim = APIRouter(prefix='/scim/v2', tags=['scim'])
+# Public (unauthenticated by construction -- this IS how a user gets a session
+# token in the first place) browser-facing OIDC login endpoints.
+router_login = APIRouter(prefix='/api/auth/sso', tags=['sso-login'])
+
+
+def _api_base_url() -> str:
+    # The redirect_uri registered with the IdP must be *this backend's* own
+    # publicly reachable URL, not APP_BASE_URL (the frontend, used for email
+    # links elsewhere) -- the token exchange that follows sends the client
+    # secret and must happen server-to-server, never in the browser.
+    return os.getenv("API_BASE_URL", "http://localhost:8000").rstrip("/")
+
+
+def _app_base_url() -> str:
+    return os.getenv("APP_BASE_URL", "http://localhost:3000").rstrip("/")
 
 # SCIM calls come from the IdP's provisioning engine, not a browser -- they carry
 # their own dedicated bearer token (see sso_auth.issue_scim_token), never a normal
@@ -60,7 +78,10 @@ class IdPConfig(BaseModel):
     entity_id: str | None = None
     certificate_pem: str | None = None
     client_id: str | None = None
-    client_secret: str | None = None  # only at creation/update; stored as hash
+    client_secret: str | None = None  # only at creation/update; stored encrypted at rest
+    # OIDC only. Endpoints are resolved from this at login time via discovery
+    # (sso_oidc.discover), not entered by hand -- see sso_oidc.py's docstring.
+    oidc_issuer: str | None = None
     domain_binding: str | None = None
     sso_only: bool = False
     role_mapping_json: dict = {}
@@ -92,7 +113,8 @@ def create_provider(data: IdPConfig, user: User = Depends(human_admin), db: Sess
         entity_id=data.entity_id,
         certificate_pem=data.certificate_pem,
         client_id=data.client_id,
-        client_secret_hash=hash_token(data.client_secret) if data.client_secret else None,
+        client_secret_encrypted=secrets_store.encrypt(data.client_secret) if data.client_secret else None,
+        oidc_issuer=data.oidc_issuer,
         domain_binding=data.domain_binding,
         sso_only=data.sso_only,
         role_mapping_json=data.role_mapping_json,
@@ -100,8 +122,11 @@ def create_provider(data: IdPConfig, user: User = Depends(human_admin), db: Sess
     )
     db.add(idp)
     db.flush()  # idp.id is server/default-generated on flush, not at construction
+    # Config changes are audited, including the ones that don't include the
+    # secret itself -- a security review of "who could sign in as whom" needs
+    # to see every provider config change, not just role-mapping edits.
     log(db, user.organization_id, user.id, 'identity_provider', idp.id, 'created',
-        protocol=idp.protocol, domain_binding=idp.domain_binding)
+        protocol=idp.protocol, domain_binding=idp.domain_binding, oidc_issuer=idp.oidc_issuer)
     db.commit()
     return {'id': idp.id, 'name': idp.name, 'protocol': idp.protocol}
 
@@ -119,12 +144,24 @@ def patch_provider(provider_id: str, data: IdPConfig, user: User = Depends(human
     idp.certificate_pem = data.certificate_pem
     idp.client_id = data.client_id
     if data.client_secret:
-        idp.client_secret_hash = hash_token(data.client_secret) if data.client_secret else None
+        idp.client_secret_encrypted = secrets_store.encrypt(data.client_secret)
+    # Every other field on this PATCH is a full replace (the pre-existing
+    # contract of this endpoint), but oidc_issuer is deliberately not: a
+    # caller that PATCHes sso_only or domain_binding without resending
+    # oidc_issuer (easy to miss on a field added after this endpoint already
+    # existed) must not silently blank out a working OIDC configuration and
+    # its cached discovery document. Only an explicit, non-empty new issuer
+    # changes it; clearing OIDC config entirely means deactivating/deleting
+    # the provider, not omitting one field.
+    if data.oidc_issuer and data.oidc_issuer != idp.oidc_issuer:
+        idp.oidc_issuer = data.oidc_issuer
+        idp.oidc_discovery_json = None
+        idp.oidc_discovery_fetched_at = None
     idp.domain_binding = data.domain_binding
     idp.sso_only = data.sso_only
     idp.role_mapping_json = data.role_mapping_json
     log(db, user.organization_id, user.id, 'identity_provider', idp.id, 'updated',
-        domain_binding=idp.domain_binding, sso_only=idp.sso_only)
+        domain_binding=idp.domain_binding, sso_only=idp.sso_only, oidc_issuer=idp.oidc_issuer)
     db.commit()
     return {'id': idp.id, 'name': idp.name, 'protocol': idp.protocol, 'sso_only': idp.sso_only}
 
@@ -155,6 +192,70 @@ def sso_audit(q: str | None = None, action: str | None = None,
     rows = db.scalars(stmt.limit(100)).all()
     keys = ['id', 'actor_id', 'initiator_id', 'source', 'action', 'entity_type', 'entity_id', 'detail', 'created_at']
     return {'items': [{key: getattr(row, key) for key in keys} for row in rows], 'total': len(rows)}
+
+
+@router_admin.post('/rotate-secrets')
+def rotate_provider_secrets(user: User = Depends(human_admin), db: Session = Depends(get_db)):
+    """Re-encrypts every stored OIDC client_secret for this organization under
+    the current SECRETS_ENCRYPTION_KEY -- see secrets_store.py's module
+    docstring for the full rotation procedure (set SECRETS_ENCRYPTION_KEY to a
+    new value, keep the old one in SECRETS_ENCRYPTION_KEY_PREVIOUS, call this,
+    then remove the previous key). Scoped to this org: one tenant's rotation
+    can never touch another's secrets."""
+    result = secrets_store.rotate_stored_secrets(
+        db, IdentityProvider, 'client_secret_encrypted', organization_id=user.organization_id)
+    log(db, user.organization_id, user.id, 'identity_provider', user.organization_id, 'secrets_rotated',
+        count=result['rewritten'])
+    db.commit()
+    return result
+
+
+# --- OIDC login (public: this is how a browser gets a session in the first place) ---
+
+@router_login.get('/start')
+def sso_login_start(email: str, db: Session = Depends(get_db)):
+    """Resolve the active OIDC provider bound to this email's domain and
+    redirect the browser to its authorization endpoint. A real 302, not a JSON
+    body with a URL for the frontend to navigate to -- the IdP's login page
+    needs to be reached by an actual browser navigation, not a fetch()."""
+    domain = email.strip().lower().rsplit('@', 1)[-1] if '@' in email else ''
+    if not domain:
+        raise HTTPException(422, 'A valid email address is required')
+    idp = db.scalar(select(IdentityProvider).where(
+        IdentityProvider.domain_binding == domain, IdentityProvider.protocol == 'oidc',
+        IdentityProvider.active == True))
+    if not idp:
+        raise HTTPException(404, 'No SSO identity provider is configured for this email domain')
+    redirect_uri = f'{_api_base_url()}/api/auth/sso/callback'
+    try:
+        authorization_url = sso_oidc.build_authorization_url(db, idp, redirect_uri)
+        db.commit()  # discover() may have cached a freshly-fetched discovery document
+    except sso_oidc.OIDCError as error:
+        raise HTTPException(503, str(error)) from error
+    return RedirectResponse(authorization_url, status_code=302)
+
+
+@router_login.get('/callback')
+def sso_login_callback(request: Request, db: Session = Depends(get_db)):
+    """The IdP redirects the browser back here with `code`+`state` (success)
+    or `error` (the user canceled, access was denied, etc). Never renders
+    anything itself -- always redirects on to the frontend, with a session
+    token on success or a generic error code on failure, so the frontend owns
+    the actual sign-in UI. The token travels as a query param the frontend
+    reads once and discards from the URL, the same handoff shape as an
+    emailed verification link."""
+    params = request.query_params
+    state = params.get('state')
+    if not state:
+        raise HTTPException(400, 'Missing SSO state')
+    try:
+        user, token = sso_oidc.handle_callback(
+            db, code=params.get('code'), state=state, idp_error=params.get('error'))
+    except sso_oidc.OIDCError as error:
+        query = urlencode({'error': str(error)})
+        return RedirectResponse(f'{_app_base_url()}/sso/callback?{query}', status_code=302)
+    query = urlencode({'token': token, 'organization_id': user.organization_id})
+    return RedirectResponse(f'{_app_base_url()}/sso/callback?{query}', status_code=302)
 
 
 # --- SCIM endpoints ---
@@ -252,27 +353,97 @@ def scim_update_user(scim_id: str, data: SCIMUserPayload, idp: IdentityProvider 
     }
 
 
+def _patch_attrs(op: dict) -> dict:
+    """SCIM PATCH allows either `{"path": "active", "value": false}` (the
+    shape Okta/Azure AD send for a single-attribute change) or
+    `{"value": {"active": false, "displayName": "..."}}` (path omitted,
+    multiple attributes in one operation) -- normalize both into one dict."""
+    path = (op.get("path") or "").strip().lower()
+    value = op.get("value")
+    if path:
+        return {path: value}
+    if isinstance(value, dict):
+        return {k.lower(): v for k, v in value.items()}
+    return {}
+
+
 @router_scim.patch('/Users/{scim_id}')
 def scim_patch_user(scim_id: str, payload: dict, idp: IdentityProvider = Depends(scim_auth), db: Session = Depends(get_db)):
-    # SCIM deactivation: if Operations set active=False, deactivate immediately.
-    operations = payload.get("Operations", [{}])
+    """Applies every recognized operation in the request (SCIM PATCH allows
+    several per call), not just the first match -- an IdP that sends
+    `[{replace active=false}, {replace displayName=...}]` in one PATCH (Azure
+    AD does this on some attribute-sync passes) previously had the second
+    operation silently ignored."""
+    mapping = db.scalar(select(SCIMUserMapping).where(
+        SCIMUserMapping.organization_id == idp.organization_id,
+        SCIMUserMapping.scim_external_id == scim_id))
+    if not mapping:
+        raise HTTPException(404, "SCIM user not found")
+    user = db.get(User, mapping.user_id)
+    if not user or user.organization_id != idp.organization_id:
+        raise HTTPException(404, "SCIM user not found")
+
+    operations = payload.get("Operations") or []
+    if not operations:
+        raise HTTPException(400, "SCIM patch requires at least one operation")
+
+    applied = False
     for op in operations:
-        if op.get("op", "").lower() == "replace" and "active" in (op.get("value") or {}):
-            active_val = op.get("value", {}).get("active", True)
-            mapping = db.scalar(select(SCIMUserMapping).where(
-                SCIMUserMapping.organization_id == idp.organization_id,
-                SCIMUserMapping.scim_external_id == scim_id))
-            if mapping:
-                user_target = db.get(User, mapping.user_id) if mapping else None
-                if not active_val:
-                    deactivate_scim_user(db, mapping, actor_id=None, source_provider_id=idp.id)
-                else:
-                    mapping.scim_active = True
-                    user_target = db.get(User, mapping.user_id)
-                    if user_target and user_target.organization_id == idp.organization_id:
-                        user_target.active = True
-                        user_target.session_epoch = (user_target.session_epoch or 0) + 1
-                    mapping.last_synced_at = datetime.now(timezone.utc)
-                db.commit()
-                return {"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "id": scim_id, "active": user_target.active if user_target else False}
-    raise HTTPException(400, "Unsupported SCIM patch operation")
+        if (op.get("op") or "").strip().lower() not in ("replace", "add"):
+            continue  # 'remove' has no defined effect on a user resource here; ignored, not fatal
+        attrs = _patch_attrs(op)
+
+        if "active" in attrs:
+            applied = True
+            if attrs["active"] is False:
+                deactivate_scim_user(db, mapping, actor_id=None, source_provider_id=idp.id)
+            elif attrs["active"] is True and not user.active:
+                user.active = True
+                user.session_epoch = (user.session_epoch or 0) + 1
+                mapping.scim_active = True
+                mapping.last_synced_at = datetime.now(timezone.utc)
+
+        display_name = attrs.get("displayname") or attrs.get("name.formatted")
+        if display_name:
+            user.name = display_name
+            applied = True
+
+        if attrs.get("username") and attrs["username"] != user.email:
+            new_email = attrs["username"]
+            # users.email is a real, global-uniqueness constraint (see
+            # sso_oidc.provision_or_update_user's identical check) -- an
+            # unhandled collision here would surface as a raw 500 from the
+            # later db.commit(), not a clean 4xx.
+            taken = db.scalar(select(User).where(
+                func.lower(User.email) == new_email.lower(), User.id != user.id))
+            if taken:
+                raise HTTPException(409, "Another account already uses this email")
+            user.email = new_email
+            applied = True
+
+        if "roles" in attrs:
+            roles_value = attrs["roles"]
+            role_claim = None
+            if isinstance(roles_value, list) and roles_value:
+                first = roles_value[0]
+                role_claim = first.get("value") if isinstance(first, dict) else str(first)
+            if role_claim is not None:
+                new_role = resolve_role_mapping(idp, role_claim)
+                if user.role != new_role:
+                    before = user.role
+                    user.role = new_role
+                    log(db, idp.organization_id, None, "user", user.id, "scim_role_updated",
+                        scim_mapping_id=mapping.id, scim_identity_provider_id=idp.id,
+                        before=before, after=new_role)
+                applied = True
+
+    if not applied:
+        raise HTTPException(400, "Unsupported SCIM patch operation")
+    db.commit()
+    user = db.get(User, mapping.user_id)
+    return {
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "id": scim_id,
+        "userName": user.email if user else None, "displayName": user.name if user else None,
+        "active": user.active if user else False,
+        "meta": {"resourceType": "User"},
+    }

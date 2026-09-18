@@ -19,11 +19,21 @@ class IdentityProvider(Base):
     certificate_pem: Mapped[str | None] = mapped_column(Text, nullable=True)
     client_id: Mapped[str] = mapped_column(String(255), nullable=True)
     client_secret_hash: Mapped[str] = mapped_column(String(255), nullable=True)
+    # Real, recoverable at-rest encryption (app/secrets_store.py) -- OIDC's
+    # token exchange must resend the raw secret to the IdP, which a one-way
+    # hash (client_secret_hash, above) cannot support.
+    client_secret_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     # SCIM provisioning calls arrive from the IdP, not a browser session -- they
     # authenticate with this dedicated bearer token (hashed, like every other
     # token in tokens.py) rather than a normal user session JWT. Never populated
     # by client_secret; only /api/admin/sso/providers/{id}/scim-token mints one.
     scim_token_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    # OIDC login (see sso_oidc.py). Endpoints are resolved from the issuer via
+    # discovery, not hand-entered -- discovery_json/fetched_at cache that
+    # document on the row so every replica shares one fetch.
+    oidc_issuer: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    oidc_discovery_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    oidc_discovery_fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     domain_binding: Mapped[str] = mapped_column(String(255), index=True, nullable=True)
     sso_only: Mapped[bool] = mapped_column(Boolean, default=False)
     role_mapping_json: Mapped[dict] = mapped_column(JSON, default=dict)

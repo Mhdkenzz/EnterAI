@@ -208,3 +208,138 @@ def test_scim_patch_deactivation_through_the_real_route_kills_the_users_session(
 
         me_after = c.get('/api/me', headers={'Authorization': f'Bearer {user_token}'})
         assert me_after.status_code == 401
+
+
+def _provisioned_scim_user(c, headers, org_id):
+    provider_id = c.post('/api/admin/sso/providers', headers=headers,
+                         json={'name': 'Okta', 'protocol': 'oidc'}).json()['id']
+    scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
+    scim_headers = {'Authorization': f'Bearer {scim_token}'}
+    created = c.post('/scim/v2/Users', headers=scim_headers,
+                     json={'userName': f'{uuid4().hex}@example.com', 'displayName': 'Original Name'})
+    assert created.status_code == 200, created.text
+    # scim_create_user (POST) uses userName as the SCIM external id -- the
+    # response's "id" field is the real external id to address this user by
+    # in subsequent GET/PUT/PATCH calls, not a value the caller invents.
+    return scim_headers, created.json()['id']
+
+
+def test_scim_patch_path_based_single_attribute_replace():
+    """Okta/Azure AD commonly send `{"op": "replace", "path": "active", "value": false}`
+    (path-based) rather than `{"op": "replace", "value": {"active": false}}`
+    (value-object-based) -- both must work."""
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+
+        patched = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
+                          json={'Operations': [{'op': 'replace', 'path': 'displayName', 'value': 'Renamed'}]})
+        assert patched.status_code == 200, patched.text
+        assert patched.json()['displayName'] == 'Renamed'
+
+
+def test_scim_patch_applies_every_operation_in_one_request_not_just_the_first():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+
+        patched = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers, json={'Operations': [
+            {'op': 'replace', 'path': 'displayName', 'value': 'Multi Op'},
+            {'op': 'replace', 'path': 'userName', 'value': f'{uuid4().hex}@renamed.example'},
+        ]})
+        assert patched.status_code == 200, patched.text
+        body = patched.json()
+        assert body['displayName'] == 'Multi Op'
+        assert body['userName'].endswith('@renamed.example')
+
+
+def test_scim_patch_updates_role_from_role_mapping():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        provider_id = c.post('/api/admin/sso/providers', headers=headers,
+                             json={'name': 'Okta', 'protocol': 'oidc',
+                                   'role_mapping_json': {'eng-admins': 'admin'}}).json()['id']
+        scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
+        scim_headers = {'Authorization': f'Bearer {scim_token}'}
+        created = c.post('/scim/v2/Users', headers=scim_headers,
+                         json={'userName': f'{uuid4().hex}@example.com', 'displayName': 'Role Test'})
+        assert created.status_code == 200, created.text
+        scim_id = created.json()['id']
+
+        patched = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers, json={'Operations': [
+            {'op': 'replace', 'path': 'roles', 'value': [{'value': 'eng-admins'}]},
+        ]})
+        assert patched.status_code == 200, patched.text
+
+        with SessionLocal() as db:
+            mapping = db.scalar(select(SCIMUserMapping).where(SCIMUserMapping.scim_external_id == scim_id))
+            user = db.get(User, mapping.user_id)
+            assert user.role == 'admin'
+
+
+def test_scim_patch_reactivation_via_path_based_active_true():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        deactivated = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
+                              json={'Operations': [{'op': 'replace', 'path': 'active', 'value': False}]})
+        assert deactivated.json()['active'] is False
+
+        reactivated = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
+                              json={'Operations': [{'op': 'replace', 'path': 'active', 'value': True}]})
+        assert reactivated.status_code == 200
+        assert reactivated.json()['active'] is True
+
+
+def test_scim_patch_rejects_completely_unrecognized_operations():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        response = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
+                           json={'Operations': [{'op': 'remove', 'path': 'phoneNumbers'}]})
+        assert response.status_code == 400
+
+
+def test_scim_patch_404s_for_an_unknown_scim_id():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        provider_id = c.post('/api/admin/sso/providers', headers=headers,
+                             json={'name': 'Okta', 'protocol': 'oidc'}).json()['id']
+        scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
+        response = c.patch('/scim/v2/Users/does-not-exist', headers={'Authorization': f'Bearer {scim_token}'},
+                           json={'Operations': [{'op': 'replace', 'path': 'active', 'value': False}]})
+        assert response.status_code == 404
+
+
+def test_scim_patch_username_collision_returns_409_not_a_raw_500():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        scim_headers, scim_id_a = _provisioned_scim_user(c, headers, data['organization']['id'])
+        _, scim_id_b = _provisioned_scim_user(c, headers, data['organization']['id'])
+
+        # Look up user A's real email so we can try to PATCH user B onto it.
+        listed = c.get('/scim/v2/Users', headers=scim_headers).json()['Resources']
+        email_a = next(r['userName'] for r in listed if r['id'] == scim_id_a)
+
+        collided = c.patch(f'/scim/v2/Users/{scim_id_b}', headers=scim_headers,
+                           json={'Operations': [{'op': 'replace', 'path': 'userName', 'value': email_a}]})
+        assert collided.status_code == 409
+
+
+def test_patch_provider_omitting_oidc_issuer_does_not_wipe_it():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        created = c.post('/api/admin/sso/providers', headers=headers,
+                         json={'name': 'Okta', 'protocol': 'oidc', 'oidc_issuer': 'https://real-idp.example'})
+        provider_id = created.json()['id']
+
+        # A caller that PATCHes some other field without resending oidc_issuer
+        # (easy to do -- it was added to this endpoint after sso_only/domain_binding).
+        patched = c.patch(f'/api/admin/sso/providers/{provider_id}', headers=headers,
+                          json={'name': 'Okta', 'protocol': 'oidc', 'sso_only': True})
+        assert patched.status_code == 200
+
+        with SessionLocal() as db:
+            idp = db.get(IdentityProvider, provider_id)
+            assert idp.oidc_issuer == 'https://real-idp.example'
+            assert idp.sso_only is True

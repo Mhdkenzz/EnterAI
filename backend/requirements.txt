@@ -21,3 +21,6 @@ sentence-transformers==3.0.1
 tiktoken==0.7.0
 # Phase 12 - Billing
 stripe==12.3.0
+# Phase 14.2 - OIDC login + at-rest secret encryption (was only a transitive
+# dependency of moto; now used directly by app/secrets_store.py)
+cryptography==50.0.1
