@@ -383,7 +383,10 @@ def comments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_
     t=db.get(Task,task_id)
     if not t: raise HTTPException(404,"Task not found")
     ensure_project(db,user,t.project_id)
-    return [{"id":c.id,"body":c.body,"created_at":c.created_at,"author":user_out(db.get(User,c.author_id))} for c in db.scalars(select(Comment).where(Comment.task_id==task_id)).all()]
+    comments_list = db.scalars(select(Comment).where(Comment.task_id==task_id)).all()
+    author_ids = [c.author_id for c in comments_list if c.author_id]
+    authors = {a.id: a for a in db.scalars(select(User).where(User.id.in_(author_ids))).all()}
+    return [{"id":c.id,"body":c.body,"created_at":c.created_at,"author":user_out(authors.get(c.author_id))} for c in comments_list]
 @app.post("/api/tasks/{task_id}/comments",status_code=201)
 def add_comment(task_id:str,data:CommentIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
