@@ -41,7 +41,10 @@ jobs:
         working-directory: backend
     services:
       postgres:
-        image: postgres:16-alpine
+        # pgvector/pgvector, not plain postgres: 0009_rag_chunks needs the
+        # vector extension actually available to CREATE EXTENSION, not just
+        # the SQL keyword to be syntactically valid.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: enterai_ci
           POSTGRES_USER: enterai

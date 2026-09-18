@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException, Header
+from fastapi import APIRouter, Depends, Request, HTTPException, Header
 from .billing_service import BillingService
 from .database import get_db
 from sqlalchemy.orm import Session
@@ -13,5 +13,7 @@ async def stripe_webhook(
 ):
     payload = await request.body()
     service = BillingService(db)
-    result = service.process_webhook(payload, stripe_signature)
-    return result
+    try:
+        return service.process_webhook(payload, stripe_signature)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error

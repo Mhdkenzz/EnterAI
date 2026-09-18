@@ -13,7 +13,17 @@ def upgrade():
     # Named, use_alter FKs (models.py) break the users->tasks->projects->users
     # cycle so PostgreSQL can both create and drop this schema.
     bind = op.get_bind()
-    Base.metadata.create_all(bind=bind)
+    # On PostgreSQL, document_chunks (pgvector) is left for 0009, which enables
+    # the vector extension first and adds its own ivfflat/tenancy indexes via
+    # raw SQL -- creating it here via ORM metadata would need the extension
+    # before it exists on a fresh database. SQLite has no extension to wait
+    # for, so it keeps creating document_chunks here as before (0009 then
+    # no-ops on SQLite because the table already exists).
+    if bind.dialect.name == "postgresql":
+        tables = [t for t in Base.metadata.sorted_tables if t.name != "document_chunks"]
+        Base.metadata.create_all(bind=bind, tables=tables)
+    else:
+        Base.metadata.create_all(bind=bind)
 
 def downgrade():
     bind = op.get_bind()

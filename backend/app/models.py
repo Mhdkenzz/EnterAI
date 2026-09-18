@@ -59,6 +59,14 @@ class User(Base):
     # a retired agent is additionally forced execution_enabled=False, but the two
     # columns answer different questions and both are checked independently.
     retired_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Human counterpart to `retired_at`: a deleted human account is anonymized in
+    # place (name/email/password_hash scrubbed) rather than removed, for the same
+    # reason -- tasks, comments, and audit rows that reference this user's id must
+    # keep working and stay attributable to *someone*, not go orphaned or silently
+    # reassign to a different real person's identity.
+    anonymized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tos_accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tos_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
 class Team(Base):
     __tablename__ = "teams"

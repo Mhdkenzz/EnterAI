@@ -18,6 +18,12 @@ from .chunking import chunk_document_text, Chunk
 
 log = logging.getLogger(__name__)
 
+# document_chunks.embedding is a fixed VECTOR(1536) column (see models.py /
+# alembic 0009_rag_chunks). EMBEDDING_PROVIDER=local's default model
+# (all-MiniLM-L6-v2) produces 384-dim vectors, which pgvector would otherwise
+# reject at insert time with an opaque dimension-mismatch error.
+DOCUMENT_CHUNK_EMBEDDING_DIM = 1536
+
 
 def _sanitize_content(content: str) -> str:
     """Sanitize document content before indexing.
@@ -60,6 +66,13 @@ def index_document(db: Session, document: ProjectDocument) -> int:
 
     # Generate embeddings
     provider = get_embedding_provider()
+    if provider.dimension() != DOCUMENT_CHUNK_EMBEDDING_DIM:
+        raise RuntimeError(
+            f"Embedding provider produces {provider.dimension()}-dim vectors, but "
+            f"document_chunks.embedding is a fixed VECTOR({DOCUMENT_CHUNK_EMBEDDING_DIM}) "
+            "column. Set EMBEDDING_MODEL to a model with a matching dimension, or "
+            "re-run the pgvector migration with the provider's actual dimension."
+        )
     chunk_texts = [c.content for c in chunks]
     embeddings = provider.embed(chunk_texts)
 

@@ -99,8 +99,14 @@ def custom_openapi():
 from .admin import router as admin_router, human_admin
 from . import accounts, email as mailer
 from .accounts import router as accounts_router, enforce, _LOGIN_LIMITER, _SIGNUP_LIMITER
+from .billing_webhook import router as billing_webhook_router
+from .privacy import router as privacy_router, admin_router as admin_privacy_router
+from . import privacy_service
 app.include_router(admin_router)
 app.include_router(accounts_router)
+app.include_router(billing_webhook_router)
+app.include_router(privacy_router)
+app.include_router(admin_privacy_router)
 app.openapi = custom_openapi
 _default_origins = [
     "http://localhost:3000",
@@ -123,10 +129,12 @@ def startup():
     configure_logging()
     with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
     execution.start_background_loop()
+    privacy_service.start_background_loop()
 
 @app.on_event("shutdown")
 def shutdown():
     execution.stop_background_loop()
+    privacy_service.stop_background_loop()
 
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str
 class Register(BaseModel): organization_name: str = Field(min_length=2); name: str; email: EmailStr; password: str = Field(min_length=8)

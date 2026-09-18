@@ -21,19 +21,21 @@ def upgrade():
     op.execute("CREATE EXTENSION IF NOT EXISTS vector")
 
     # Create the table using raw SQL so the embedding column is the native
-    # pgvector VECTOR(1536) type (not a String compatible cast).
+    # pgvector VECTOR(1536) type (not a String compatible cast). ids are
+    # VARCHAR to match the rest of the schema (models.py's `uid()` default
+    # generates app-side string ids, not native Postgres UUIDs).
     op.execute(
         """
         CREATE TABLE document_chunks (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            organization_id UUID NOT NULL REFERENCES organizations(id),
-            project_id UUID REFERENCES projects(id),
-            document_id UUID NOT NULL REFERENCES project_documents(id) ON DELETE CASCADE,
+            id VARCHAR PRIMARY KEY,
+            organization_id VARCHAR NOT NULL REFERENCES organizations(id),
+            project_id VARCHAR REFERENCES projects(id),
+            document_id VARCHAR NOT NULL REFERENCES project_documents(id) ON DELETE CASCADE,
             chunk_index INTEGER NOT NULL,
             content TEXT NOT NULL,
             token_count INTEGER NOT NULL,
             embedding VECTOR(1536),
-            created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now()
+            created_at TIMESTAMP WITHOUT TIME ZONE NOT NULL
         )
         """
     )

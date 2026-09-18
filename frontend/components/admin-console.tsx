@@ -179,8 +179,146 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
         </div>
       </section>
     </>}
+    <PrivacyAdminSection />
     <AuditLog revision={auditRevision} />
   </div>;
+}
+
+type RetentionPolicy = {
+  chat_retention_days: number | null; audit_retention_days: number | null;
+  activity_retention_days: number | null; document_retention_days: number | null;
+};
+type DeletionRequest = {
+  id: string; target_type: string; target_id: string; status: string;
+  reason: string | null; requested_at: string; scheduled_for: string;
+};
+
+const retentionFields = [
+  ["chat_retention_days", "Chats (days)"], ["audit_retention_days", "Audit log (days)"],
+  ["activity_retention_days", "Activity (days)"], ["document_retention_days", "Documents (days)"],
+] as const;
+
+function downloadJson(data: unknown, filename: string) {
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url; link.download = filename; link.click();
+  URL.revokeObjectURL(url);
+}
+
+function PrivacyAdminSection() {
+  const [policy, setPolicy] = useState<RetentionPolicy | null>(null);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+  const [requests, setRequests] = useState<DeletionRequest[]>([]);
+  const [loadError, setLoadError] = useState("");
+  const [saveError, setSaveError] = useState("");
+  const [saveOk, setSaveOk] = useState(false);
+  const [exportPassword, setExportPassword] = useState("");
+  const [exportError, setExportError] = useState("");
+  const [exportBusy, setExportBusy] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [confirmingOrgDelete, setConfirmingOrgDelete] = useState(false);
+
+  function load() {
+    Promise.all([
+      api<RetentionPolicy>("/admin/privacy/retention"),
+      api<DeletionRequest[]>("/admin/privacy/deletion-requests"),
+    ]).then(([nextPolicy, nextRequests]) => {
+      setPolicy(nextPolicy); setRequests(nextRequests);
+      setDraft(Object.fromEntries(retentionFields.map(([key]) => [key, nextPolicy[key] ? String(nextPolicy[key]) : ""])));
+    }).catch(err => setLoadError(errorText(err)));
+  }
+  useEffect(load, []);
+
+  async function saveRetention(event: FormEvent) {
+    event.preventDefault();
+    setSaveError(""); setSaveOk(false);
+    try {
+      const body = Object.fromEntries(retentionFields.map(([key]) => [key, draft[key] ? Number(draft[key]) : null]));
+      const next = await api<RetentionPolicy>("/admin/privacy/retention", { method: "PATCH", body: JSON.stringify(body) });
+      setPolicy(next); setSaveOk(true);
+    } catch (err) { setSaveError(errorText(err)); }
+  }
+
+  async function exportOrganization(event: FormEvent) {
+    event.preventDefault();
+    setExportBusy(true); setExportError("");
+    try {
+      const data = await api<Record<string, unknown>>("/admin/privacy/export", { method: "POST", body: JSON.stringify({ password: exportPassword }) });
+      downloadJson(data, "enterai-organization-export.json");
+      setExportPassword("");
+    } catch (err) { setExportError(errorText(err)); } finally { setExportBusy(false); }
+  }
+
+  async function requestOrgDeletion(event: FormEvent) {
+    event.preventDefault();
+    setDeleteBusy(true); setDeleteError("");
+    try {
+      await api<DeletionRequest>("/admin/privacy/delete-organization", { method: "POST", body: JSON.stringify({ password: deletePassword }) });
+      setDeletePassword(""); setConfirmingOrgDelete(false); load();
+    } catch (err) { setDeleteError(errorText(err)); } finally { setDeleteBusy(false); }
+  }
+
+  async function cancelRequest(id: string) {
+    await api<DeletionRequest>(`/admin/privacy/deletion-requests/${id}/cancel`, { method: "POST" });
+    load();
+  }
+
+  return <section aria-labelledby="privacy-heading" className="min-w-0 space-y-3">
+    <h2 id="privacy-heading" className="text-lg font-semibold">Privacy & retention</h2>
+    {loadError && <p role="alert" className="text-sm text-red-300">{loadError}</p>}
+    {policy && <>
+      <Card className="min-w-0 space-y-3 p-5">
+        <h3 className="font-medium">Retention policy</h3>
+        <p className="text-sm text-zinc-300">Leave a field blank to keep that category forever.</p>
+        <form onSubmit={saveRetention} className="grid min-w-0 gap-3 sm:grid-cols-2">
+          {retentionFields.map(([key, label]) => <label key={key} className="block text-sm text-zinc-300">{label}
+            <input type="number" min={1} className={field} value={draft[key] ?? ""}
+              onChange={event => setDraft(current => ({ ...current, [key]: event.target.value }))} />
+          </label>)}
+          <div className="flex flex-wrap items-center gap-2 sm:col-span-2">
+            <Button type="submit">Save retention policy</Button>
+            {saveOk && <p role="status" className="text-sm text-emerald-300">Saved.</p>}
+          </div>
+          {saveError && <p role="alert" className="text-sm text-red-300 sm:col-span-2">{saveError}</p>}
+        </form>
+      </Card>
+      <Card className="min-w-0 space-y-3 p-5">
+        <h3 className="font-medium">Export organization data</h3>
+        <form onSubmit={exportOrganization} className="space-y-3">
+          <label className="block text-sm text-zinc-300">Confirm your password
+            <input type="password" required className={field} value={exportPassword} onChange={e => setExportPassword(e.target.value)} />
+          </label>
+          {exportError && <p role="alert" className="text-sm text-red-300">{exportError}</p>}
+          <Button type="submit" disabled={exportBusy}>{exportBusy ? "Preparing export…" : "Download organization data"}</Button>
+        </form>
+      </Card>
+      <Card className="min-w-0 space-y-3 p-5">
+        <h3 className="font-medium">Delete this organization</h3>
+        <p className="text-sm text-zinc-300">Permanently deletes every project, task, document, and user in this workspace after a grace period. This cannot be undone once it runs.</p>
+        {!confirmingOrgDelete ? <Button type="button" variant="outline" onClick={() => setConfirmingOrgDelete(true)}>Delete organization</Button> :
+          <form onSubmit={requestOrgDeletion} className="space-y-3">
+            <label className="block text-sm text-zinc-300">Confirm your password
+              <input type="password" required className={field} value={deletePassword} onChange={e => setDeletePassword(e.target.value)} />
+            </label>
+            {deleteError && <p role="alert" className="text-sm text-red-300">{deleteError}</p>}
+            <div className="flex flex-wrap gap-2">
+              <Button type="submit" disabled={deleteBusy}>{deleteBusy ? "Requesting…" : "Confirm organization deletion"}</Button>
+              <Button type="button" variant="ghost" onClick={() => setConfirmingOrgDelete(false)}>Cancel</Button>
+            </div>
+          </form>}
+      </Card>
+      {!!requests.length && <Card className="min-w-0 space-y-3 p-5">
+        <h3 className="font-medium">Deletion requests</h3>
+        {requests.map(r => <div key={r.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-line/60 py-2 text-sm last:border-0">
+          <span>{r.target_type} · {r.status} · scheduled {new Date(r.scheduled_for).toLocaleDateString()}</span>
+          {r.status === "pending" && <Button type="button" variant="outline" size="sm" onClick={() => cancelRequest(r.id)}>Cancel</Button>}
+        </div>)}
+      </Card>}
+    </>}
+  </section>;
 }
 
 function RoleForm({ user, self, pending, save }: {

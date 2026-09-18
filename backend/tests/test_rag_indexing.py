@@ -13,6 +13,7 @@ from sqlalchemy.orm import sessionmaker
 @pytest.fixture
 def db_session():
     from app.database import DATABASE_URL, Base
+    import app.models  # noqa: F401 -- registers every table on Base.metadata before create_all
     # Use an in-memory SQLite for isolated RAG tests when no real Postgres is available.
     # The tests verify schema contracts; full pgvector behavior requires a real Postgres instance.
     url = DATABASE_URL if DATABASE_URL and DATABASE_URL.startswith("postgresql") else "sqlite:///:memory:"
@@ -110,6 +111,29 @@ def test_index_document_deletes_existing_chunks_first():
     # The actual DB call is tested through integration; this confirms the contract.
     assert doc.organization_id == "org-1"
     assert doc.project_id == "proj-1"
+
+
+def test_index_document_rejects_provider_dimension_mismatch(db_session, monkeypatch):
+    """document_chunks.embedding is a fixed VECTOR(1536) column. A provider that
+    returns a different dimension (e.g. EMBEDDING_PROVIDER=local's default
+    all-MiniLM-L6-v2, which is 384-dim) must fail loudly before insert, not with
+    an opaque pgvector error."""
+    from app.models import Organization, User, ProjectDocument
+    from app.embeddings import DeterministicEmbeddingProvider
+    from app import indexing
+
+    org = Organization(name="Org", slug="org")
+    db_session.add(org); db_session.flush()
+    user = User(organization_id=org.id, name="U", email="u@example.com", password_hash="x")
+    db_session.add(user); db_session.flush()
+    doc = ProjectDocument(organization_id=org.id, uploaded_by=user.id, file_name="f.txt",
+                           path="/f.txt", extracted_text="Some real content to index.")
+    db_session.add(doc); db_session.flush()
+
+    monkeypatch.setattr(indexing, "get_embedding_provider",
+                         lambda: DeterministicEmbeddingProvider(dimension=384))
+    with pytest.raises(RuntimeError, match="384.*1536|1536.*384"):
+        indexing.index_document(db_session, doc)
 
 
 def test_reindex_document_enforces_ownership():
