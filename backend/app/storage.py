@@ -1,4 +1,16 @@
-"""Storage boundary: local disk now, swappable cloud adapters later."""
+"""Storage boundary: local disk for a single node, S3-compatible object storage
+for anything with more than one replica.
+
+Local disk is per-container. Two API replicas each get their own `uploads/`
+directory, so whichever replica did not receive the upload cannot see the file.
+`STORAGE_BACKEND=s3` points every replica at one bucket instead; the same adapter
+serves real S3 and any S3-compatible server (MinIO in docker-compose) via
+STORAGE_ENDPOINT_URL.
+
+`save` returns the identifier persisted on the row, and it is deliberately
+self-describing -- a filesystem path for local, `s3://bucket/key` for S3 -- so a
+deployment that changes backends can still tell where an existing file lives.
+"""
 import os
 from pathlib import Path
 from typing import Protocol
@@ -9,6 +21,12 @@ class Storage(Protocol):
     def save(self, folder: str, filename: str, content: bytes) -> str: ...
 
 
+def _safe_name(filename: str) -> str:
+    """Caller-supplied filenames never contribute a directory component: `..` and
+    absolute paths would otherwise escape the upload root or the key prefix."""
+    return Path(filename).name or "upload"
+
+
 class LocalStorage:
     def __init__(self, root: str | Path = "uploads"):
         self.root = Path(root)
@@ -16,14 +34,42 @@ class LocalStorage:
     def save(self, folder: str, filename: str, content: bytes) -> str:
         target_dir = self.root / folder
         target_dir.mkdir(parents=True, exist_ok=True)
-        safe_name = Path(filename).name or "upload"
-        target = target_dir / f"{uuid4()}-{safe_name}"
+        target = target_dir / f"{uuid4()}-{_safe_name(filename)}"
         target.write_bytes(content)
         return str(target)
 
 
+class S3Storage:
+    def __init__(self, bucket: str, client):
+        self.bucket = bucket
+        self._client = client
+
+    def save(self, folder: str, filename: str, content: bytes) -> str:
+        key = f"{folder}/{uuid4()}-{_safe_name(filename)}"
+        self._client.put_object(Bucket=self.bucket, Key=key, Body=content)
+        return f"s3://{self.bucket}/{key}"
+
+
+def _s3_client():
+    import boto3
+
+    # Credentials come from the standard AWS environment/instance mechanisms rather
+    # than bespoke settings, so a deployment can use a role instead of long-lived
+    # keys. STORAGE_ENDPOINT_URL is what retargets the same code at MinIO.
+    return boto3.client(
+        "s3",
+        endpoint_url=os.getenv("STORAGE_ENDPOINT_URL") or None,
+        region_name=os.getenv("STORAGE_REGION", "us-east-1"),
+    )
+
+
 def get_storage() -> Storage:
     backend = os.getenv("STORAGE_BACKEND", "local").lower()
-    if backend != "local":
-        raise RuntimeError(f"Unsupported STORAGE_BACKEND={backend!r}; install a cloud adapter before enabling it")
-    return LocalStorage(os.getenv("STORAGE_ROOT", "uploads"))
+    if backend == "local":
+        return LocalStorage(os.getenv("STORAGE_ROOT", "uploads"))
+    if backend == "s3":
+        bucket = os.getenv("STORAGE_BUCKET", "").strip()
+        if not bucket:
+            raise RuntimeError("STORAGE_BUCKET must be set when STORAGE_BACKEND=s3")
+        return S3Storage(bucket, _s3_client())
+    raise RuntimeError(f"Unsupported STORAGE_BACKEND={backend!r}; expected 'local' or 's3'")

@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .auth import hash_password
 from .models import Activity, HierarchyConfig, Notification, Organization, Project, Task, Team, User
@@ -79,6 +80,18 @@ def seed(db: Session, *, demo_content: bool = True):
     if existing:
         # Bootstrap must never rename a customer's workspace or administrator.
         return
+    try:
+        _bootstrap(db, demo_content=demo_content)
+    except IntegrityError:
+        # Replicas all boot against the same empty database and all see no
+        # organization, so they race to create the identical seed rows. The unique
+        # constraints settle that race; losing it is not a failure, it means
+        # another replica has already done the work -- but the losing replica must
+        # not take the whole process down over it.
+        db.rollback()
+
+
+def _bootstrap(db: Session, *, demo_content: bool):
     admin_email, admin_password = _seed_admin_credentials()
     org = Organization(name="Enter AI", slug="enter-ai")
     db.add(org); db.flush()

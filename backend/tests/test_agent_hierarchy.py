@@ -64,10 +64,17 @@ def _make_agent(db, org_id, name, level, parent_id=None, current_task_id=None, l
 def _delete_agents(db, *agents):
     """These tests build agents directly via SQLAlchemy, bypassing hierarchy
     reconciliation -- clean them up so they don't linger in the shared demo org and
-    pollute other tests' /api/agents listings (delete children before parents)."""
+    pollute other tests' /api/agents listings.
+
+    Passing them child-first is not enough: SQLAlchemy batches same-table DELETEs
+    into one executemany whose row order it chooses, so PostgreSQL can see a parent
+    removed while a child still points at it. Breaking the self-referential link
+    first is what actually makes the order irrelevant."""
     for agent in agents:
         for message in db.scalars(select(AgentMessage).where(AgentMessage.agent_id == agent.id)).all():
             db.delete(message)
+        agent.parent_agent_id = None
+    db.flush()
     for agent in agents:
         db.delete(agent)
     db.commit()

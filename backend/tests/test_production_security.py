@@ -17,7 +17,12 @@ def _run_startup(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
     # boot harness migrates first -- on a file-backed database, because in-memory
     # SQLite is per-thread and would not share the migrated schema with startup.
     boot_db = Path(tempfile.mkdtemp()) / "boot.db"
-    env = {**os.environ, "DATABASE_URL": f"sqlite:///{boot_db}", "JWT_SECRET": "a" * 32, **env_overrides}
+    # Production also fails closed without REDIS_URL. The Redis client connects
+    # lazily, so naming an address satisfies that gate without a server running and
+    # keeps each case testing the one control it is about; the case that *is* about
+    # Redis overrides this back to empty.
+    env = {**os.environ, "DATABASE_URL": f"sqlite:///{boot_db}", "JWT_SECRET": "a" * 32,
+           "REDIS_URL": "redis://127.0.0.1:6379/0", **env_overrides}
     script = (
         "import alembic.config, alembic.command\n"
         "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"
@@ -48,6 +53,16 @@ def test_production_boot_requires_a_real_seed_admin_password(password):
 def test_production_boot_succeeds_with_a_real_seed_admin_password():
     result = _run_startup({"ENVIRONMENT": "production", "SEED_ADMIN_PASSWORD": "a-genuinely-unique-password-123"})
     assert result.returncode == 0, result.stderr
+
+
+def test_production_boot_requires_redis_for_shared_rate_limits():
+    """Rate limits are shared state. Without Redis each replica would enforce its
+    own private allowance, so the configured limit would not be the limit callers
+    actually get -- production must refuse to start rather than quietly under-limit."""
+    result = _run_startup({"ENVIRONMENT": "production", "SEED_ADMIN_PASSWORD": "a-genuinely-unique-password-123",
+                           "REDIS_URL": ""})
+    assert result.returncode != 0
+    assert "REDIS_URL must be set in production" in result.stderr
 
 
 def test_development_boot_keeps_the_fixed_demo_login_without_seed_admin_password():

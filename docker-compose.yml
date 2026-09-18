@@ -11,11 +11,52 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  # S3-compatible object storage, so local development exercises the same storage
+  # adapter production uses rather than a code path only dev ever runs.
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY:-enterai_minio}
+      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_KEY:-enterai_minio_dev_password}
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio_data:/data]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+  # Creates the bucket once, then exits; the API waits for it to finish.
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio: {condition: service_healthy}
+    environment:
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-enterai-uploads}
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-enterai_minio}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-enterai_minio_dev_password}
+    entrypoint: >-
+      sh -c "mc alias set local http://minio:9000 $$STORAGE_ACCESS_KEY $$STORAGE_SECRET_KEY &&
+             mc mb --ignore-existing local/$$STORAGE_BUCKET"
   api:
     build: ./backend
     env_file: .env
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://enterai:enterai_dev_password@db:5432/enterai}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      STORAGE_BACKEND: ${STORAGE_BACKEND:-s3}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-enterai-uploads}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
+      AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:-enterai_minio}
+      AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:-enterai_minio_dev_password}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       ENVIRONMENT: ${ENVIRONMENT:-production}
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
@@ -32,6 +73,8 @@ services:
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on:
       db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
   web:
     build: ./frontend
     environment:
@@ -40,4 +83,5 @@ services:
     depends_on: [api]
 volumes:
   postgres_data:
+  minio_data:
   uploads:

@@ -224,13 +224,16 @@ def test_circuit_breaker_stops_polling_an_agent_after_repeated_provider_failures
         provider = _FailingProvider()
         service = _service_with(provider)
 
+        # cooldown_seconds=0 opts out of the anti-double-step window, which would
+        # otherwise skip these deliberately back-to-back ticks; the circuit breaker
+        # is what is under test here, not the tick spacing.
         for _ in range(MAX_CONSECUTIVE_FAILURES):
-            assert run_execution_tick(db, service) == 1
+            assert run_execution_tick(db, service, cooldown_seconds=0) == 1
         db.refresh(agent)
         assert agent.consecutive_task_failures == MAX_CONSECUTIVE_FAILURES
         calls_before = provider.calls
 
-        assert run_execution_tick(db, service) == 0  # circuit breaker excludes it now
+        assert run_execution_tick(db, service, cooldown_seconds=0) == 0  # circuit breaker excludes it now
         assert provider.calls == calls_before  # never even attempted
 
         with TestClient(app) as client:

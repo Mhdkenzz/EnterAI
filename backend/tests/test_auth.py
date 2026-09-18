@@ -47,7 +47,11 @@ def test_production_startup_rejects_insecure_jwt_secret(secret):
 def test_auth_and_copilot_share_startup_secret(environment, configured):
     import secrets
 
-    env = {**os.environ, "ENVIRONMENT": environment, "DATABASE_URL": "sqlite://"}
+    # Production also refuses to boot without REDIS_URL (see ratelimit.py). The
+    # client connects lazily, so naming an address is enough to get past that gate
+    # and test the one thing this case is about: the signing secrets.
+    env = {**os.environ, "ENVIRONMENT": environment, "DATABASE_URL": "sqlite://",
+           "REDIS_URL": "redis://127.0.0.1:6379/0"}
     env.pop("JWT_SECRET", None)
     if configured:
         env["JWT_SECRET"] = secrets.token_hex(32)

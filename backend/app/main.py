@@ -7,7 +7,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field, ValidationError
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 from .auth import create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
@@ -16,7 +16,7 @@ from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, Workspace
 from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging
 from . import execution
 from .hierarchy import MAX_HIERARCHY_AGENTS, desired_counts, reconcile_agents
-from .ratelimit import SlidingWindowRateLimiter
+from .ratelimit import build_rate_limiter
 from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
 from .storage import get_storage
 
@@ -311,11 +311,24 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
         t.completed_at = datetime.utcnow() if data.status == "done" else None
     sync_agent_task_pointers(db, t, before_assignee_id)
     log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status); db.commit(); return task_out(t,db)
+def detach_task_references(db, task):
+    """PostgreSQL enforces the foreign keys SQLite ignores, so every row pointing at
+    this task has to be resolved before the DELETE or the request fails outright.
+    Comments and attachments are owned by the task and go with it; subtasks are
+    promoted to top level rather than silently deleting work nobody asked to delete;
+    agent pointers are cleared so the agent outlives its task."""
+    db.execute(delete(Comment).where(Comment.task_id == task.id))
+    db.execute(delete(Attachment).where(Attachment.task_id == task.id))
+    db.execute(update(Task).where(Task.parent_id == task.id).values(parent_id=None))
+    db.execute(update(User).where(User.current_task_id == task.id).values(current_task_id=None))
+    db.execute(update(User).where(User.last_completed_task_id == task.id).values(last_completed_task_id=None))
+
 @app.delete("/api/tasks/{task_id}",status_code=204)
 def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id); log(db,user.organization_id,user.id,"task",t.id,"deleted"); db.delete(t); db.commit()
+    ensure_project(db,user,t.project_id); log(db,user.organization_id,user.id,"task",t.id,"deleted")
+    detach_task_references(db,t); db.delete(t); db.commit()
 
 @app.get("/api/tasks/{task_id}/comments")
 def comments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -472,8 +485,9 @@ def search(q:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
 @app.get("/api/risks")
 def risks(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id,Project.health=="at_risk")).all()]
-AI_PLAN_RATE_LIMITER = SlidingWindowRateLimiter(
+AI_PLAN_RATE_LIMITER = build_rate_limiter(
     max_calls=int(os.getenv("AI_PLAN_RATE_LIMIT_PER_MINUTE", "20")), window_seconds=60,
+    namespace="ai-plan",
 )
 
 @app.post("/api/ai/plan")
