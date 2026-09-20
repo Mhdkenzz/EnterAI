@@ -7,22 +7,33 @@ and project ownership.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
+from .ai.config import AISettings
 from .models import DocumentChunk, ProjectDocument, User
 from .embeddings import get_embedding_provider
 from .chunking import chunk_document_text, Chunk
 
 log = logging.getLogger(__name__)
 
-# document_chunks.embedding is a fixed VECTOR(1536) column (see models.py /
-# alembic 0009_rag_chunks). EMBEDDING_PROVIDER=local's default model
-# (all-MiniLM-L6-v2) produces 384-dim vectors, which pgvector would otherwise
-# reject at insert time with an opaque dimension-mismatch error.
-DOCUMENT_CHUNK_EMBEDDING_DIM = 1536
+
+def _expected_embedding_dimension() -> int:
+    """document_chunks.embedding is a fixed VECTOR(1536) column by default (see
+    models.py / alembic 0009_rag_chunks). Reads EMBEDDING_DIMENSION (via
+    AISettings, defaulting to 1536 -- one source of truth instead of a second
+    hardcoded constant here) so this check and search_similar_chunks's ::vector
+    cast always agree with each other and with whatever EMBEDDING_PROVIDER is
+    actually configured. Changing the column's *actual* dimension is a separate,
+    explicit migration (see 0016_document_chunk_provenance's docstring) -- this
+    function does not change what the column accepts, only what this code
+    expects it to be, so a mismatch still fails loudly here rather than with an
+    opaque pgvector error at insert time.
+    """
+    return AISettings.from_env().embedding_dimension
 
 
 def _sanitize_content(content: str) -> str:
@@ -66,10 +77,11 @@ def index_document(db: Session, document: ProjectDocument) -> int:
 
     # Generate embeddings
     provider = get_embedding_provider()
-    if provider.dimension() != DOCUMENT_CHUNK_EMBEDDING_DIM:
+    expected_dim = _expected_embedding_dimension()
+    if provider.dimension() != expected_dim:
         raise RuntimeError(
             f"Embedding provider produces {provider.dimension()}-dim vectors, but "
-            f"document_chunks.embedding is a fixed VECTOR({DOCUMENT_CHUNK_EMBEDDING_DIM}) "
+            f"document_chunks.embedding is configured for a fixed VECTOR({expected_dim}) "
             "column. Set EMBEDDING_MODEL to a model with a matching dimension, or "
             "re-run the pgvector migration with the provider's actual dimension."
         )
@@ -80,10 +92,17 @@ def index_document(db: Session, document: ProjectDocument) -> int:
         raise RuntimeError(f"Embedding count mismatch: {len(embeddings)} != {len(chunks)}")
 
     # Verify dimension matches
-    expected_dim = provider.dimension()
     for i, emb in enumerate(embeddings):
         if len(emb) != expected_dim:
             raise RuntimeError(f"Embedding {i} has wrong dimension: {len(emb)} != {expected_dim}")
+
+    # Provenance: which provider/model actually produced these vectors, so a
+    # future dimension change can tell old rows from new ones instead of only
+    # finding out when a query breaks (see 0016_document_chunk_provenance).
+    embedding_provider_name = os.getenv("EMBEDDING_PROVIDER", "deterministic").strip().lower() or "deterministic"
+    embedding_model_name = os.getenv("EMBEDDING_MODEL") or {
+        "openai": "text-embedding-3-small", "local": "all-MiniLM-L6-v2",
+    }.get(embedding_provider_name, "deterministic-sha256")
 
     # Bulk insert chunks
     db_chunks = [
@@ -95,6 +114,9 @@ def index_document(db: Session, document: ProjectDocument) -> int:
             content=chunk.content,
             token_count=chunk.token_count,
             embedding=emb,
+            embedding_provider=embedding_provider_name,
+            embedding_model=embedding_model_name,
+            embedding_dim=expected_dim,
         )
         for chunk, emb in zip(chunks, embeddings)
     ]
@@ -195,16 +217,26 @@ def search_similar_chunks(
     # cosine similarity = 1 - cosine_distance
     # We want similarity >= threshold, so distance <= 1 - threshold
     max_distance = 1.0 - similarity_threshold
+    # Always an int from AISettings (EMBEDDING_DIMENSION, default 1536) -- never
+    # user input, so interpolating it directly into the SQL string is safe.
+    dim = _expected_embedding_dimension()
 
     project_filter = "AND dc.project_id = :project_id" if project_id else ""
+    # The bound parameter needs its own cast too, not just the column -- pgvector's
+    # <=> operator isn't defined for vector <=> double precision[], only
+    # vector <=> vector, and psycopg sends a Python list as a plain array with no
+    # cast unless told to. Parenthesizing the bind parameter before `::` is required:
+    # SQLAlchemy's text() bind-parameter parser doesn't accept `:name::type` directly
+    # adjacent (verified empirically against this session's real pgvector instance --
+    # this whole query path had never actually been exercised end-to-end before).
     sql = f"""
         SELECT dc.*
         FROM document_chunks dc
         WHERE dc.organization_id = :org_id
         AND dc.embedding IS NOT NULL
-        AND (dc.embedding::vector(1536) <=> :query_vec) <= :max_distance
+        AND (dc.embedding::vector({dim}) <=> (:query_vec)::vector({dim})) <= :max_distance
         {project_filter}
-        ORDER BY (dc.embedding::vector(1536) <=> :query_vec)
+        ORDER BY (dc.embedding::vector({dim}) <=> (:query_vec)::vector({dim}))
         LIMIT :limit
     """
 

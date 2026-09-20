@@ -282,3 +282,61 @@ def test_admin_settings_are_human_admin_only_and_tenant_scoped():
         assert c.patch('/api/admin/settings', headers=h, json={'execution_enabled': False}).json() == {'execution_enabled': False}
         assert c.get('/api/admin/settings', headers=h).json() == {'execution_enabled': False}
         assert c.get('/api/admin/settings', headers=other).json() == {'execution_enabled': True}
+
+
+def test_provider_call_records_model_and_token_usage_from_a_tool_calling_turn():
+    from app.ai.turn import ProviderTurn, TokenUsage
+    from app.copilot import WorkspaceTools
+    from app.models import ProviderCall
+    from test_copilot_tool_calling import _ScriptedProvider, _login_and_load_user, _service_with
+
+    db, user = _login_and_load_user()
+    try:
+        tools = WorkspaceTools(db, user)
+        turn = ProviderTurn(
+            text="Here you go.", tool_calls=[],
+            usage=TokenUsage(prompt_tokens=120, completion_tokens=40, reasoning_tokens=15),
+            adapter_used="textual_v1",
+        )
+        _service_with(_ScriptedProvider([turn])).plan("Hi", tools)
+        with SessionLocal() as fresh:
+            call = fresh.scalars(
+                select(ProviderCall).where(ProviderCall.organization_id == user.organization_id).order_by(ProviderCall.created_at.desc())
+            ).first()
+            assert call.prompt_tokens == 120
+            assert call.completion_tokens == 40
+            assert call.reasoning_tokens == 15
+            assert call.adapter_used == "textual_v1"
+            assert call.rounds == 1
+            assert call.provider == "_ScriptedProvider"
+    finally:
+        db.close()
+
+
+def test_provider_call_records_allowlisted_error_kind_not_raw_exception_text():
+    from app.copilot import CopilotProviderError, WorkspaceTools
+    from app.models import ProviderCall
+    from app.observability import audit_context, provider_call
+    from test_copilot_tool_calling import _login_and_load_user
+
+    db, user = _login_and_load_user()
+    try:
+        tools = WorkspaceTools(db, user)
+
+        def fail():
+            raise CopilotProviderError("PRIVATE-DETAIL-not-meant-for-a-column")
+
+        with audit_context('copilot', user.id, user.id):
+            try:
+                provider_call(tools, 'tool_calling', fail)
+            except CopilotProviderError:
+                pass
+        with SessionLocal() as fresh:
+            call = fresh.scalars(
+                select(ProviderCall).where(ProviderCall.organization_id == user.organization_id).order_by(ProviderCall.created_at.desc())
+            ).first()
+            assert call.failed is True
+            assert call.error_kind == "CopilotProviderError"
+            assert call.provider is None and call.prompt_tokens is None  # no extract_metrics given here
+    finally:
+        db.close()

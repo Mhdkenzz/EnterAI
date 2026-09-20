@@ -9,6 +9,13 @@ os.environ.setdefault("AUTH_TOKEN_RATE_LIMIT_PER_MINUTE", "100000")
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.database import engine as _configured_engine
+
+postgres_only = pytest.mark.skipif(
+    _configured_engine.dialect.name != "postgresql",
+    reason="pgvector query semantics are a PostgreSQL feature; SQLite tests above cover schema/logic only",
+)
+
 
 @pytest.fixture
 def db_session():
@@ -215,6 +222,88 @@ def test_adversarial_cross_tenant_isolation_in_search():
     source = inspect.getsource(search_similar_chunks)
     assert "dc.organization_id = :org_id" in source
     assert "project_filter" in source
+
+
+@postgres_only
+def test_search_similar_chunks_actually_executes_against_real_pgvector():
+    # Regression: search_similar_chunks's :query_vec bind parameter was never cast
+    # to ::vector, so pgvector's <=> operator had no vector <=> vector overload to
+    # resolve against a raw array parameter -- this query raised
+    # UndefinedFunction("operator does not exist: vector <=> double precision[]")
+    # on every real call, unconditionally, regardless of row count. No prior test
+    # caught this because every other RAG test in this file deliberately runs
+    # against the isolated in-memory SQLite fixture (see db_session's own
+    # docstring) precisely because this query needs real pgvector -- so this path
+    # had never actually been executed end-to-end before this session.
+    from app.database import SessionLocal
+    from app.embeddings import get_embedding_provider
+    from app.indexing import index_document, search_similar_chunks
+    from app.models import Organization, ProjectDocument, User
+    import uuid
+
+    db = SessionLocal()
+    try:
+        org = Organization(id=str(uuid.uuid4()), name="RAG Test Org", slug=f"rag-test-{uuid.uuid4().hex[:8]}")
+        db.add(org); db.flush()
+        user = User(id=str(uuid.uuid4()), organization_id=org.id, name="U", email=f"u{uuid.uuid4().hex[:8]}@example.com", password_hash="x")
+        db.add(user); db.flush()
+        content = "The regulatory permit is delayed by 12 days pending city review."
+        doc = ProjectDocument(id=str(uuid.uuid4()), organization_id=org.id, uploaded_by=user.id,
+                               file_name="permit.txt", path="/permit.txt", extracted_text=content)
+        db.add(doc); db.flush()
+        assert index_document(db, doc) == 1
+        db.commit()
+
+        # The exact indexed text, guaranteeing an identical deterministic-hash
+        # vector -> distance 0 -- proves the query mechanism itself (cast, execute,
+        # org-scope, return) works, independent of the hash scheme's lack of real
+        # semantic meaning for genuinely different text (a separate, known,
+        # out-of-scope limitation of EMBEDDING_PROVIDER=deterministic).
+        query_vec = get_embedding_provider().embed([content])[0]
+        results = search_similar_chunks(db, query_vec, user, limit=5, similarity_threshold=0.5)
+        assert len(results) == 1
+        assert results[0].content == content
+
+        # Cross-org isolation with REAL data and a REAL query, not just source
+        # inspection: a different org's user must see nothing, even with the
+        # identical query vector.
+        other_org = Organization(id=str(uuid.uuid4()), name="Other Org", slug=f"rag-other-{uuid.uuid4().hex[:8]}")
+        db.add(other_org); db.flush()
+        other_user = User(id=str(uuid.uuid4()), organization_id=other_org.id, name="U2",
+                           email=f"u2{uuid.uuid4().hex[:8]}@example.com", password_hash="x")
+        db.add(other_user); db.flush()
+        assert search_similar_chunks(db, query_vec, other_user, limit=5, similarity_threshold=0.5) == []
+    finally:
+        db.rollback()
+        db.close()
+
+
+@postgres_only
+def test_index_document_stamps_embedding_provenance():
+    from app.database import SessionLocal
+    from app.indexing import index_document
+    from app.models import DocumentChunk, Organization, ProjectDocument, User
+    import uuid
+
+    db = SessionLocal()
+    try:
+        org = Organization(id=str(uuid.uuid4()), name="Provenance Org", slug=f"prov-{uuid.uuid4().hex[:8]}")
+        db.add(org); db.flush()
+        user = User(id=str(uuid.uuid4()), organization_id=org.id, name="U", email=f"u{uuid.uuid4().hex[:8]}@example.com", password_hash="x")
+        db.add(user); db.flush()
+        doc = ProjectDocument(id=str(uuid.uuid4()), organization_id=org.id, uploaded_by=user.id,
+                               file_name="f.txt", path="/f.txt", extracted_text="Some real content.")
+        db.add(doc); db.flush()
+        index_document(db, doc)
+        db.commit()
+
+        chunk = db.query(DocumentChunk).filter(DocumentChunk.document_id == doc.id).first()
+        assert chunk.embedding_dim == 1536
+        assert chunk.embedding_provider == "deterministic"
+        assert chunk.embedding_model == "deterministic-sha256"
+    finally:
+        db.rollback()
+        db.close()
 
 
 def test_prompt_injection_document_text_not_interpreted():

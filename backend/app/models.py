@@ -171,6 +171,16 @@ class ProviderCall(Base):
     provider_mode: Mapped[str] = mapped_column(String(30))
     failed: Mapped[bool] = mapped_column(Boolean, default=False)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rounds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    adapter_used: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    error_kind: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    timed_out: Mapped[bool] = mapped_column(Boolean, default=False)
+    retries: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
 
 
@@ -277,4 +287,10 @@ class DocumentChunk(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)
+    # Provenance for the embedding column's own invariant ("every row shares one
+    # dimension at a time") -- lets a future dimension change detect old/new rows
+    # coexisting instead of only finding out when a pgvector query breaks.
+    embedding_provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    embedding_dim: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)

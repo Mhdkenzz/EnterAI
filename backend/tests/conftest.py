@@ -33,3 +33,22 @@ def link_token(body: str, parameter: str) -> str:
     match = re.search(rf"[?&]{parameter}=([A-Za-z0-9_\-]+)", body)
     assert match, f"no {parameter} link in email body: {body!r}"
     return match.group(1)
+
+
+# SQLite test DB initialization: create tables before any test that relies on them.
+# Production uses PostgreSQL + Alembic; this only affects SQLite test runs.
+from sqlalchemy import inspect
+from app.database import DATABASE_URL, Base, engine
+
+
+def pytest_configure(config):
+    # Run Alembic migrations for SQLite test DB rather than relying on
+    # Base.metadata.create_all(), which hides missing migrations.
+    import app.models  # noqa: F401
+    if "sqlite" in DATABASE_URL:
+        from alembic import command
+        from alembic.config import Config
+        alembic_cfg = Config()
+        alembic_cfg.set_main_option("script_location", "alembic")
+        alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
+        command.upgrade(alembic_cfg, "head")

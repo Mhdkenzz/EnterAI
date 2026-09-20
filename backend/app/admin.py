@@ -79,7 +79,23 @@ def usage(agent_id: str | None = None, start: datetime | None = None, end: datet
         agents.append({'id': a.id, 'name': a.name, 'execution_enabled': a.execution_enabled, 'retired_at': a.retired_at,
             'status': status, 'last_execution_at': a.last_execution_at, 'consecutive_task_failures': a.consecutive_task_failures,
             'calls': len(own), 'failures': sum(c.failed for c in own), 'executions': sum(r.agent_id == a.id for r in runs), 'execution_failures': sum(r.failed and r.agent_id == a.id for r in runs)})
-    return {'totals': totals, 'agents': agents, 'provider_mode': CopilotService().mode}
+    # Same already-fetched `calls` list, grouped by (provider, model) rather than
+    # by agent -- answers "which model actually handled this org's calls" without
+    # a second query or exposing any individual call's prompt/reply (see
+    # ProviderCall's own privacy-minimal column set).
+    by_model: dict[tuple[str | None, str | None], dict] = {}
+    for c in calls:
+        bucket = by_model.setdefault((c.provider, c.model), {
+            'provider': c.provider, 'model': c.model, 'calls': 0, 'failures': 0,
+            'duration_ms': 0, 'prompt_tokens': 0, 'completion_tokens': 0, 'reasoning_tokens': 0,
+        })
+        bucket['calls'] += 1
+        bucket['failures'] += int(c.failed)
+        bucket['duration_ms'] += c.duration_ms
+        bucket['prompt_tokens'] += c.prompt_tokens or 0
+        bucket['completion_tokens'] += c.completion_tokens or 0
+        bucket['reasoning_tokens'] += c.reasoning_tokens or 0
+    return {'totals': totals, 'agents': agents, 'provider_mode': CopilotService().mode, 'by_model': list(by_model.values())}
 
 
 @router.get('/users')

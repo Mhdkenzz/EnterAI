@@ -43,7 +43,16 @@ def test_tool_specs_cover_read_and_write_surface_with_valid_shapes():
     assert {spec["function"]["name"] for spec in openai_specs} == names
 
 
-def test_execute_read_tool_dispatches_every_declared_read_tool():
+def test_execute_read_tool_dispatches_every_declared_read_tool(monkeypatch):
+    # Regression: search_documents was declared in READ_TOOL_SPECS (and offered to
+    # every model as a callable tool) but had no branch in _execute_read_tool's
+    # dispatch chain at all -- any correct native call to it failed with
+    # KeyError("Unknown read tool 'search_documents'"). Caught here by actually
+    # asserting on it, closing the exact coverage gap that let it through despite
+    # this test's own name. Monkeypatched because the real implementation needs
+    # pgvector, unavailable on this suite's SQLite engine -- this test's job is
+    # dispatch, not RAG query correctness.
+    monkeypatch.setattr(WorkspaceTools, "search_documents", lambda self, query, project_id=None, limit=5: [{"document_id": "doc-1"}])
     db, user = _login_and_load_user()
     try:
         tools = WorkspaceTools(db, user)
@@ -54,6 +63,8 @@ def test_execute_read_tool_dispatches_every_declared_read_tool():
         assert isinstance(execute_read_tool("get_users", {}, tools), list)
         assert isinstance(execute_read_tool("get_notifications", {}, tools), list)
         assert isinstance(execute_read_tool("get_activity", {}, tools), list)
+        assert isinstance(execute_read_tool("get_direct_reports", {}, tools), list)
+        assert execute_read_tool("search_documents", {"query": "permit"}, tools) == [{"document_id": "doc-1"}]
         result = execute_read_tool("search", {"query": "Launch"}, tools)
         assert any(p["code"] == "LAUNCH" for p in result["projects"])
         try:
@@ -150,6 +161,45 @@ def test_tool_calling_loop_reports_unknown_and_out_of_scope_tool_errors_without_
         ])
         result = _service_with(provider).plan("Do something unsupported", tools)
         assert result["reply"] == "I could not complete that request."
+        first_result_message = provider.seen_messages[1][-1]
+        assert first_result_message["is_error"] is True
+    finally:
+        db.close()
+
+
+def test_tool_calling_loop_rejects_schema_invalid_write_args_before_minting_a_confirmation():
+    # The real new safety property this increment adds: a native tool_calls entry
+    # with a shape that doesn't match the tool's own schema (missing the required
+    # "title") must never reach create_confirmation -- it gets an error tool-result
+    # and the loop continues, exactly like an unknown-tool call does today.
+    db, user = _login_and_load_user()
+    try:
+        tools = WorkspaceTools(db, user)
+        provider = _ScriptedProvider([
+            ProviderTurn(text=None, tool_calls=[{"id": "call_1", "name": "create_task", "args": {"project_id": "proj-1"}}]),
+            ProviderTurn(text="I need a title to create that task.", tool_calls=[]),
+        ])
+        result = _service_with(provider).plan("Create a task", tools)
+        assert result["reply"] == "I need a title to create that task."
+        assert result["actions"] == []
+        first_result_message = provider.seen_messages[1][-1]
+        assert first_result_message["is_error"] is True
+        assert "schema" in first_result_message["content"]
+    finally:
+        db.close()
+
+
+def test_tool_calling_loop_rejects_schema_invalid_read_args_and_does_not_execute():
+    db, user = _login_and_load_user()
+    try:
+        tools = WorkspaceTools(db, user)
+        provider = _ScriptedProvider([
+            # get_projects takes no arguments at all (additionalProperties: False).
+            ProviderTurn(text=None, tool_calls=[{"id": "call_1", "name": "get_projects", "args": {"unexpected": "value"}}]),
+            ProviderTurn(text="Done.", tool_calls=[]),
+        ])
+        result = _service_with(provider).plan("List projects", tools)
+        assert result["read_tools"] == []
         first_result_message = provider.seen_messages[1][-1]
         assert first_result_message["is_error"] is True
     finally:

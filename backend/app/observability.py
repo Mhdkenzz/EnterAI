@@ -207,16 +207,57 @@ def tool_audit(tools, entity_type, action, **detail):
         ledger.commit()
 
 
-def provider_call(tools, mode, invoke):
-    """Persist each actual invocation independently of business transaction rollback."""
+_KNOWN_ERROR_KINDS = {
+    'ProviderUnavailableError', 'ProviderTimeoutError', 'ProviderAuthError',
+    'ProviderRateLimitedError', 'ToolCallValidationError', 'LoopBudgetExceededError',
+    'DuplicateCallDetectedError', 'CopilotProviderError',
+}
+
+
+def _classify_error_kind(exc: Exception) -> str:
+    # Allowlisted, same discipline as safe_detail/legacy_detail -- never persist
+    # an arbitrary exception class name (or, worse, str(exc)) verbatim.
+    name = type(exc).__name__
+    return name if name in _KNOWN_ERROR_KINDS else 'other'
+
+
+def provider_call(tools, mode, invoke, *, provider=None, model=None, round_number=None, extract_metrics=None):
+    """Persist each actual invocation independently of business transaction rollback.
+
+    `provider`/`model`/`round_number` are known before `invoke()` runs and are
+    recorded as given. `extract_metrics`, if provided, is called on `invoke()`'s
+    successful return value and may return a dict with any of prompt_tokens/
+    completion_tokens/reasoning_tokens/adapter_used to persist alongside the
+    call -- optional (the deterministic-mode caller's plain-string return has
+    nothing to extract) and failure-tolerant (a bug in extraction can never
+    prevent the call record itself from being persisted).
+    """
     source, actor_id, initiator_id = tool_attribution(tools)
     started = time.monotonic()
     failed = False
+    error_kind = None
+    metrics: dict = {}
     try:
-        return invoke()
+        result = invoke()
+        if extract_metrics is not None:
+            try:
+                metrics = extract_metrics(result) or {}
+            except Exception:
+                metrics = {}
+        return result
     except Exception as exc:
         failed = True
+        error_kind = _classify_error_kind(exc)
+        from .ai.errors import AIError
         from .copilot import CopilotProviderError
+        # A provider/loop failure that already carries a specific, typed reason
+        # (e.g. "AI_API_KEY is not configured") is re-raised unchanged -- only a
+        # genuinely unexpected exception (a bare RuntimeError, a network library's
+        # own exception type, etc.) gets collapsed into the generic message below.
+        # This is what lets a future caller distinguish retryable from
+        # non-retryable failures instead of every provider error looking identical.
+        if isinstance(exc, (AIError, CopilotProviderError)):
+            raise
         raise CopilotProviderError("The configured AI provider is unavailable. Try again later.") from None
     finally:
         duration_ms = max(0, int((time.monotonic()-started)*1000))
@@ -224,7 +265,10 @@ def provider_call(tools, mode, invoke):
             call = ProviderCall(organization_id=tools.user.organization_id,
                 actor_id=actor_id, initiator_id=initiator_id, source=source,
                 agent_id=tools.user.id if tools.user.kind == 'agent' else None,
-                provider_mode=mode, failed=failed, duration_ms=duration_ms, run_id=_run_id.get())
+                provider_mode=mode, failed=failed, duration_ms=duration_ms, run_id=_run_id.get(),
+                provider=provider, model=model, rounds=round_number, error_kind=error_kind,
+                prompt_tokens=metrics.get('prompt_tokens'), completion_tokens=metrics.get('completion_tokens'),
+                reasoning_tokens=metrics.get('reasoning_tokens'), adapter_used=metrics.get('adapter_used'))
             ledger.add(call); ledger.flush()
             call_id = call.id
             audit(ledger, call.organization_id, actor_id, 'provider_call', call.id,

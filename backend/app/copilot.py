@@ -13,15 +13,22 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib import error, request
 
 import jwt
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from .ai.context_budget import cap_tool_result
+from .ai.profiles import DEFAULT_PROFILE
+from .ai.providers import AnthropicCopilotProvider, DeterministicCopilotProvider, OpenAICompatibleCopilotProvider
+from .ai.tool_routing import preflight_tool_calls
+from .ai.tool_schema import render_anthropic, render_openai
+from .ai.tool_validation import validate_tool_args
+from .ai.turn import ProviderTurn
+from .ai.conversation_memory import ConversationMemory
 from .auth import CONFIRMATION_SECRET
 from .models import Activity, Comment, Notification, Project, ProjectDocument, Task, Team, User
 from .services import log, sync_agent_task_pointers
@@ -204,9 +211,9 @@ READ_TOOL_SPECS: list[dict[str, Any]] = [
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "get_comments", "description": "List the comments on one specific task.",
      "input_schema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"], "additionalProperties": False}},
-{"name": "search_documents", "description": "Search indexed document chunks using a query text. Returns matching chunks with citations. Never reveals documents from other organizations.",
+{"name": "search_documents", "description": "Search indexed document chunks using a query text. Returns matching chunks with citations. Never reveals documents from other organizations. If more than one chunk matches, list every one individually rather than picking one.",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}, "project_id": {"type": "string"}, "limit": {"type": "integer", "default": 5}}, "required": ["query"], "additionalProperties": False}},
-        {"name": "search", "description": "Search projects and tasks by name, code, or title.",
+        {"name": "search", "description": "Search projects and tasks by name, code, or title. If more than one project or task matches, list every one individually (with its id) rather than picking one.",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False}},
     {"name": "get_direct_reports", "description": "List the agents who report directly to you in the org chart (empty if you are not an agent, or have no reports).",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
@@ -253,6 +260,7 @@ WRITE_TOOL_SPECS: list[dict[str, Any]] = [
 TOOL_SPECS = READ_TOOL_SPECS + WRITE_TOOL_SPECS
 READ_TOOL_NAMES = {spec["name"] for spec in READ_TOOL_SPECS}
 WRITE_TOOL_NAMES = {spec["name"] for spec in WRITE_TOOL_SPECS}
+_INPUT_SCHEMA_BY_NAME: dict[str, dict[str, Any]] = {spec["name"]: spec["input_schema"] for spec in TOOL_SPECS}
 
 # Which roles may propose (and later confirm) each write tool. Task- and comment-level
 # work is open to any workspace member; team creation shapes the org chart, so it is
@@ -277,16 +285,17 @@ def allowed_write_tools(role: str) -> set[str]:
     return {name for name, roles in TOOL_ROLES.items() if role in roles}
 
 
-def anthropic_tool_specs(role: str | None = None) -> list[dict[str, Any]]:
+def _filtered_specs(role: str | None) -> list[dict[str, Any]]:
     allowed = allowed_write_tools(role) if role is not None else WRITE_TOOL_NAMES
-    specs = [t for t in TOOL_SPECS if t["name"] in READ_TOOL_NAMES or t["name"] in allowed]
-    return [{"name": t["name"], "description": t["description"], "input_schema": t["input_schema"]} for t in specs]
+    return [t for t in TOOL_SPECS if t["name"] in READ_TOOL_NAMES or t["name"] in allowed]
+
+
+def anthropic_tool_specs(role: str | None = None) -> list[dict[str, Any]]:
+    return render_anthropic(_filtered_specs(role))
 
 
 def openai_tool_specs(role: str | None = None) -> list[dict[str, Any]]:
-    allowed = allowed_write_tools(role) if role is not None else WRITE_TOOL_NAMES
-    specs = [t for t in TOOL_SPECS if t["name"] in READ_TOOL_NAMES or t["name"] in allowed]
-    return [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in specs]
+    return render_openai(_filtered_specs(role))
 
 
 def execute_read_tool(name: str, args: dict[str, Any], tools: WorkspaceTools) -> Any:
@@ -311,6 +320,7 @@ def _execute_read_tool(name: str, args: dict[str, Any], tools: WorkspaceTools) -
     if name == "get_direct_reports": return tools.get_direct_reports()
     if name == "get_comments": return tools.get_comments(args.get("task_id", ""))
     if name == "search": return tools.search(args.get("query", ""))
+    if name == "search_documents": return tools.search_documents(args.get("query", ""), args.get("project_id"), args.get("limit", 5))
     raise KeyError(f"Unknown read tool {name!r}")
 
 
@@ -326,167 +336,10 @@ def _describe_write_call(name: str, args: dict[str, Any]) -> str:
 
 
 # --------------------------------------------------------------------------
-# Providers
+# Providers -- adapters live in app/ai/providers.py; this module is their
+# only consumer and stays the security/product boundary (roles, WorkspaceTools,
+# confirmation tokens) that app/ai/ deliberately knows nothing about.
 # --------------------------------------------------------------------------
-
-def _priority_tasks(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-    rank = {"high": 0, "medium": 1, "low": 2}
-    return sorted(
-        (task for task in snapshot["my_tasks"] if task["status"] != "done"),
-        key=lambda task: (rank.get(task["priority"], 3), task["due_date"] or "9999-12-31"),
-    )
-
-
-class DeterministicCopilotProvider:
-    """Useful, testable offline Copilot behaviour for local development."""
-
-    def answer(self, message: str, snapshot: dict[str, Any]) -> str:
-        normalized = message.lower().strip()
-        projects = snapshot["projects"]
-        if any(term in normalized for term in ("what should", "work on today", "priorit", "my tasks")):
-            tasks = _priority_tasks(snapshot)
-            if not tasks:
-                return "You have no open assigned tasks. A good next step is to review your project risks and agree the next milestone."
-            items = "; ".join(
-                f"{task['title']} ({task['priority'].title()} · {task['project_name']})" for task in tasks[:3]
-            )
-            return f"Today, focus on {items}. I ranked open work by priority and due date."
-        if "summar" in normalized or "project" in normalized:
-            match = next(
-                (project for project in projects if project["name"].lower() in normalized or project["code"].lower() in normalized),
-                None,
-            )
-            if match:
-                task_count = len([task for task in snapshot["tasks"] if task["project_name"] == match["name"] and task["status"] != "done"])
-                description = match["description"] or "No project description has been added."
-                return f"{match['name']} is {match['status'].replace('_', ' ')} and {match['health'].replace('_', ' ')}. {description} It has {task_count} open task{'s' if task_count != 1 else ''}."
-        at_risk = [project["name"] for project in projects if project["health"] == "at_risk"]
-        if "risk" in normalized:
-            return f"At-risk projects: {', '.join(at_risk) if at_risk else 'none'}. Ask me to summarize a project or plan a confirmed task."
-        return "I can use your workspace data to list projects, summarize a project, or prioritize your assigned tasks. I can also propose a task, but I will never create it without your confirmation."
-
-
-@dataclass
-class ProviderTurn:
-    """One model turn: free text and/or a batch of tool calls to act on."""
-
-    text: str | None
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-
-
-class AnthropicCopilotProvider:
-    """Structured tool-calling adapter for the Anthropic Messages API."""
-
-    def __init__(self):
-        self.base_url = os.getenv("AI_BASE_URL", "https://api.anthropic.com").rstrip("/")
-        self.model = os.getenv("AI_MODEL", "claude-sonnet-5")
-        self.api_key = os.getenv("AI_API_KEY", "")
-        self.timeout = float(os.getenv("AI_TIMEOUT_SECONDS", "20"))
-        self.version = os.getenv("AI_ANTHROPIC_VERSION", "2023-06-01")
-
-    def respond(self, system: str, messages: list[dict[str, Any]], role: str | None = None, extra_tools: list[dict[str, Any]] | None = None) -> ProviderTurn:
-        if not self.api_key:
-            raise CopilotProviderError("AI_API_KEY is not configured. Set it to use AI_PROVIDER=anthropic.")
-        body = json.dumps({
-            "model": self.model,
-            "max_tokens": 1024,
-            "system": system,
-            "messages": messages,
-            "tools": anthropic_tool_specs(role) + list(extra_tools or []),
-        }).encode()
-        headers = {"Content-Type": "application/json", "x-api-key": self.api_key, "anthropic-version": self.version}
-        outgoing = request.Request(f"{self.base_url}/v1/messages", data=body, headers=headers, method="POST")
-        try:
-            with request.urlopen(outgoing, timeout=self.timeout) as response:  # nosec B310 -- URL is explicit operator configuration
-                payload = json.loads(response.read().decode())
-        except (error.URLError, ValueError) as exc:
-            raise CopilotProviderError("The configured AI provider is unavailable. Check AI_PROVIDER settings and try again.") from exc
-        if "error" in payload:
-            raise CopilotProviderError("The configured AI provider returned an error.")
-        text_parts: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        for block in payload.get("content", []):
-            if block.get("type") == "text":
-                text_parts.append(block.get("text", ""))
-            elif block.get("type") == "tool_use":
-                tool_calls.append({"id": block.get("id"), "name": block.get("name"), "args": block.get("input") or {}})
-        return ProviderTurn(text="\n".join(part for part in text_parts if part).strip() or None, tool_calls=tool_calls)
-
-    def assistant_message(self, turn: ProviderTurn) -> dict[str, Any]:
-        blocks: list[dict[str, Any]] = []
-        if turn.text:
-            blocks.append({"type": "text", "text": turn.text})
-        for call in turn.tool_calls:
-            blocks.append({"type": "tool_use", "id": call["id"], "name": call["name"], "input": call["args"]})
-        return {"role": "assistant", "content": blocks}
-
-    def tool_result_message(self, tool_call_id: str, content: Any, is_error: bool = False) -> dict[str, Any]:
-        text = content if isinstance(content, str) else json.dumps(content)
-        block = {"type": "tool_result", "tool_use_id": tool_call_id, "content": text}
-        if is_error:
-            block["is_error"] = True
-        return {"role": "user", "content": [block]}
-
-    def user_message(self, text: str) -> dict[str, Any]:
-        return {"role": "user", "content": text}
-
-
-class OpenAICompatibleCopilotProvider:
-    """Structured tool-calling adapter for LM Studio or any OpenAI-compatible endpoint."""
-
-    def __init__(self):
-        self.base_url = os.getenv("AI_BASE_URL", "http://127.0.0.1:1234/v1").rstrip("/")
-        self.model = os.getenv("AI_MODEL", "local-model")
-        self.api_key = os.getenv("AI_API_KEY", "")
-        self.timeout = float(os.getenv("AI_TIMEOUT_SECONDS", "20"))
-
-    def respond(self, system: str, messages: list[dict[str, Any]], role: str | None = None, extra_tools: list[dict[str, Any]] | None = None) -> ProviderTurn:
-        extra = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in (extra_tools or [])]
-        body = json.dumps({
-            "model": self.model,
-            "messages": [{"role": "system", "content": system}, *messages],
-            "tools": openai_tool_specs(role) + extra,
-            "tool_choice": "auto",
-            "temperature": 0.2,
-        }).encode()
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        outgoing = request.Request(f"{self.base_url}/chat/completions", data=body, headers=headers, method="POST")
-        try:
-            with request.urlopen(outgoing, timeout=self.timeout) as response:  # nosec B310 -- URL is explicit operator configuration
-                payload = json.loads(response.read().decode())
-            choice = payload["choices"][0]["message"]
-        except (error.URLError, KeyError, IndexError, TypeError, ValueError) as exc:
-            raise CopilotProviderError("The configured AI provider is unavailable. Check AI_PROVIDER settings and try again.") from exc
-        text = (choice.get("content") or "").strip() or None
-        tool_calls: list[dict[str, Any]] = []
-        for call in choice.get("tool_calls") or []:
-            fn = call.get("function", {})
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except ValueError:
-                args = {}
-            tool_calls.append({"id": call.get("id"), "name": fn.get("name"), "args": args})
-        return ProviderTurn(text=text, tool_calls=tool_calls)
-
-    def assistant_message(self, turn: ProviderTurn) -> dict[str, Any]:
-        message: dict[str, Any] = {"role": "assistant", "content": turn.text}
-        if turn.tool_calls:
-            message["tool_calls"] = [
-                {"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call["args"])}}
-                for call in turn.tool_calls
-            ]
-        return message
-
-    def tool_result_message(self, tool_call_id: str, content: Any, is_error: bool = False) -> dict[str, Any]:
-        text = content if isinstance(content, str) else json.dumps(content)
-        if is_error:
-            text = f"Error: {text}"
-        return {"role": "tool", "tool_call_id": tool_call_id, "content": text}
-
-    def user_message(self, text: str) -> dict[str, Any]:
-        return {"role": "user", "content": text}
 
 
 SYSTEM_PROMPT = (
@@ -494,7 +347,9 @@ SYSTEM_PROMPT = (
     "answer in this organisation's real data; never invent projects, tasks, or people. You may call at most one "
     "write tool per turn, from whichever write tools are available to you in this turn's tool list, to propose a "
     "change, but it will never execute automatically -- the user must explicitly confirm it afterwards. "
-    "Whenever you call a write tool, also include a short plain-language explanation of the proposal in the same turn."
+    "Whenever you call a write tool, also include a short plain-language explanation of the proposal in the same turn. "
+    "If a tool call fails or finds no match for a specific id or name the user gave you, tell them it was not found "
+    "-- never substitute a different real project, task, or person and answer as if it were the one asked about."
 )
 MAX_TOOL_TURNS = 6
 
@@ -514,6 +369,15 @@ EXECUTION_TOOL_SPECS: list[dict[str, Any]] = [
 ]
 EXECUTION_TOOL_NAMES = {spec["name"] for spec in EXECUTION_TOOL_SPECS}
 MAX_EXECUTION_TURNS = 4
+
+
+def _provider_turn_metrics(turn: ProviderTurn) -> dict[str, Any]:
+    metrics: dict[str, Any] = {"adapter_used": turn.adapter_used}
+    if turn.usage:
+        metrics["prompt_tokens"] = turn.usage.prompt_tokens
+        metrics["completion_tokens"] = turn.usage.completion_tokens
+        metrics["reasoning_tokens"] = turn.usage.reasoning_tokens
+    return metrics
 
 
 class CopilotService:
@@ -565,17 +429,69 @@ class CopilotService:
         mint = create_agent_confirmation if user.kind == "agent" else create_confirmation
         return [{"label": f"Create task: {args['title']}", "confirmation_token": mint(user, "create_task", args), "requires_confirmation": True}]
 
-    def _plan_tool_calling(self, message: str, tools: WorkspaceTools) -> dict[str, Any]:
+    def _plan_tool_calling(self, message: str, tools: WorkspaceTools, conversation_id: str | None = None) -> dict[str, Any]:
         role = tools.user.role
         system = SYSTEM_PROMPT
         if tools.scope_project_id:
             system += f" The user is currently viewing a single project (id={tools.scope_project_id}); get_projects and get_tasks are scoped to that project only."
+        # Conversation history integration: bounded previous turns only.
+        if conversation_id:
+            conv_memory = ConversationMemory(conversation_id, max_turns=6)
+            # In a full persistence design, we would load previous turns from DB here.
+            # For this safe integration, we rely on bounded in-memory history; isolation
+            # preserved by never sharing conversation objects across users/organizations.
+        # Routing layer: determine candidate domains and build a reduced roster.
+        # Low confidence widens safely back to full roster; authorization unchanged.
+        from .ai.tool_routing import detect_domains, domain_candidates
+        detected_domains = detect_domains(message)
+        routed_candidates = domain_candidates(detected_domains) if detected_domains else []
+        routed_candidates_for_telemetry = routed_candidates
         messages: list[dict[str, Any]] = [self.provider.user_message(message)]
         used_read_tools: list[str] = []
-        for _ in range(MAX_TOOL_TURNS):
+        # Deterministic preflight: a message that clearly references project
+        # documents gets search_documents called for real before the model's
+        # first turn, so its context already contains the results and it cannot
+        # skip retrieving them -- because retrieval already happened. Spliced in
+        # as a normal tool-use/tool-result pair, valid in both provider dialects,
+        # and outside MAX_TOOL_TURNS's budget (it's not a model-initiated turn).
+        for idx, (preflight_name, preflight_args) in enumerate(preflight_tool_calls(message, tools.scope_project_id)):
+            preflight_call = {"id": f"preflight-{idx}", "name": preflight_name, "args": preflight_args}
+            messages.append(self.provider.assistant_message(ProviderTurn(text=None, tool_calls=[preflight_call])))
+            try:
+                result = execute_read_tool(preflight_name, preflight_args, tools)
+                used_read_tools.append(preflight_name)
+                messages.append(self.provider.tool_result_message(preflight_call["id"], result))
+            except (ValueError, KeyError) as exc:
+                messages.append(self.provider.tool_result_message(preflight_call["id"], str(exc), is_error=True))
+            except Exception:
+                # search_documents can fail for engine/connectivity reasons unrelated to
+                # the query itself. Never surface raw exception or SQL text to the model
+                # or its transcript (same discipline observability.py's safe_detail/
+                # legacy_detail already apply elsewhere) -- degrade to a generic, honest
+                # failure instead of crashing the whole request over an optimization.
+                messages.append(self.provider.tool_result_message(preflight_call["id"], "This search could not be completed.", is_error=True))
+        # A model-agnostic ceiling derived from the resolved profile rather than a new
+        # flat constant: a slow local model's own (already profile-driven) per-call
+        # timeout scales the whole-request deadline with it, so this never
+        # false-positive-aborts legitimately slow inference the profile already expects.
+        # Falls back to DEFAULT_PROFILE for any provider (real or a test's scripted
+        # fake) that doesn't expose .profile at all.
+        profile = getattr(self.provider, "profile", DEFAULT_PROFILE)
+        deadline = time.monotonic() + profile.timeout_seconds * profile.max_tool_turns * 1.2
+        seen_calls: set[tuple[str, str]] = set()
+        duplicate_already_warned = False
+        provider_name = type(self.provider).__name__
+        provider_model = getattr(self.provider, "model", None)
+        for round_number in range(1, MAX_TOOL_TURNS + 1):
+            if time.monotonic() > deadline:
+                raise CopilotProviderError("Enter AI Copilot exceeded its time budget answering. Try a narrower question.")
             if tools.user.kind == "agent":
                 require_execution(tools.db, tools.user)
-            turn = provider_call(tools, self.mode, lambda: self.provider.respond(system, messages, role))
+            turn = provider_call(
+                tools, self.mode, lambda: self.provider.respond(system, messages, role),
+                provider=provider_name, model=provider_model, round_number=round_number,
+                extract_metrics=_provider_turn_metrics,
+            )
             if tools.user.kind == "agent":
                 require_execution(tools.db, tools.user)
             if not turn.tool_calls:
@@ -587,11 +503,21 @@ class CopilotService:
             confirmed_action: dict[str, Any] | None = None
             for call in turn.tool_calls:
                 name = call["name"]
+                dedup_key = (name, json.dumps(call["args"], sort_keys=True, default=str))
+                if dedup_key in seen_calls:
+                    if duplicate_already_warned:
+                        raise CopilotProviderError("Enter AI Copilot repeated the same tool call and stopped to avoid looping.")
+                    duplicate_already_warned = True
+                    messages.append(self.provider.tool_result_message(call["id"], "You already called this tool with these exact arguments -- use the result you already have.", is_error=True))
+                    continue
+                seen_calls.add(dedup_key)
                 if name in WRITE_TOOL_NAMES:
                     if name not in allowed_write_tools(role):
                         messages.append(self.provider.tool_result_message(call["id"], "Your role is not permitted to perform this action.", is_error=True))
                     elif confirmed_action is not None:
                         messages.append(self.provider.tool_result_message(call["id"], "Only one proposed action is allowed per turn.", is_error=True))
+                    elif validate_tool_args(call["args"], _INPUT_SCHEMA_BY_NAME[name]) is None:
+                        messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match this tool's schema.", is_error=True))
                     else:
                         mint = create_agent_confirmation if tools.user.kind == "agent" else create_confirmation
                         token = mint(tools.user, name, call["args"])
@@ -601,10 +527,17 @@ class CopilotService:
                 if name not in READ_TOOL_NAMES:
                     messages.append(self.provider.tool_result_message(call["id"], "This tool does not exist.", is_error=True))
                     continue
+                # Closes the gap between "the model asked for this" and "this was ever
+                # checked": the native message.tool_calls path had no schema validation
+                # before this, unlike the textual-adapter-recovered path, which always
+                # validated before returning a call at all (see textual_toolcall_adapter.py).
+                if validate_tool_args(call["args"], _INPUT_SCHEMA_BY_NAME[name]) is None:
+                    messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match this tool's schema.", is_error=True))
+                    continue
                 try:
                     result = execute_read_tool(name, call["args"], tools)
                     used_read_tools.append(name)
-                    messages.append(self.provider.tool_result_message(call["id"], result))
+                    messages.append(self.provider.tool_result_message(call["id"], cap_tool_result(result)))
                 except (ValueError, KeyError) as exc:
                     messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
             if confirmed_action:
@@ -636,9 +569,15 @@ class CopilotService:
         messages: list[dict[str, Any]] = [self.provider.user_message(kickoff)]
         used_read_tools: list[str] = []
         progress_notes: list[str] = []
-        for _ in range(MAX_EXECUTION_TURNS):
+        provider_name = type(self.provider).__name__
+        provider_model = getattr(self.provider, "model", None)
+        for round_number in range(1, MAX_EXECUTION_TURNS + 1):
             require_execution(db, agent)
-            turn = provider_call(tools, self.mode, lambda: self.provider.respond(system, messages, agent.role, extra_tools=EXECUTION_TOOL_SPECS))
+            turn = provider_call(
+                tools, self.mode, lambda: self.provider.respond(system, messages, agent.role, extra_tools=EXECUTION_TOOL_SPECS),
+                provider=provider_name, model=provider_model, round_number=round_number,
+                extract_metrics=_provider_turn_metrics,
+            )
             require_execution(db, agent)
             if not turn.tool_calls:
                 return {"outcome": "narrated", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
@@ -665,16 +604,22 @@ class CopilotService:
                     if name not in allowed_write_tools(agent.role):
                         messages.append(self.provider.tool_result_message(call["id"], "Your role is not permitted to perform this action.", is_error=True))
                         continue
+                    if validate_tool_args(call["args"], _INPUT_SCHEMA_BY_NAME[name]) is None:
+                        messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match this tool's schema.", is_error=True))
+                        continue
                     token = create_agent_confirmation(agent, name, call["args"])
                     action = {"label": _describe_write_call(name, call["args"]), "confirmation_token": token, "requires_confirmation": True}
                     return {"outcome": "proposed", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": action}
                 if name not in READ_TOOL_NAMES:
                     messages.append(self.provider.tool_result_message(call["id"], "This tool does not exist.", is_error=True))
                     continue
+                if validate_tool_args(call["args"], _INPUT_SCHEMA_BY_NAME[name]) is None:
+                    messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match this tool's schema.", is_error=True))
+                    continue
                 try:
                     result = execute_read_tool(name, call["args"], tools)
                     used_read_tools.append(name)
-                    messages.append(self.provider.tool_result_message(call["id"], result))
+                    messages.append(self.provider.tool_result_message(call["id"], cap_tool_result(result)))
                 except (ValueError, KeyError) as exc:
                     messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
         return {"outcome": "inconclusive", "text": None, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}

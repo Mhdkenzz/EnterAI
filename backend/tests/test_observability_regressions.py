@@ -53,6 +53,54 @@ def test_failed_provider_calls_keep_distinct_initiators_after_rollback():
             assert 'PRIVATE-' not in str([e.detail for e in events])
 
 
+def test_provider_call_preserves_specific_ai_error_instead_of_collapsing_to_generic_message():
+    from app.ai.errors import ProviderAuthError
+    from app.copilot import WorkspaceTools, CopilotProviderError
+    from app.observability import audit_context, provider_call
+
+    def raises_typed_error():
+        raise ProviderAuthError("AI_API_KEY is not configured for this provider")
+
+    def raises_specific_copilot_error():
+        raise CopilotProviderError("AI_API_KEY is not configured. Set it to use AI_PROVIDER=anthropic.")
+
+    def raises_unexpected_error():
+        raise RuntimeError("PRIVATE-ERROR: a connection library's own internal detail")
+
+    with TestClient(app) as c:
+        h, data = workspace(c)
+        agent_id, _ = identity(data['organization']['id'], 'admin', 'agent')
+        with SessionLocal() as db:
+            tools = WorkspaceTools(db, db.get(User, agent_id))
+            with audit_context('agent', agent_id, agent_id):
+                # A typed AIError subclass survives with its own message intact.
+                try:
+                    provider_call(tools, 'tool_calling', raises_typed_error)
+                    assert False, "expected ProviderAuthError to propagate"
+                except ProviderAuthError as exc:
+                    assert str(exc) == "AI_API_KEY is not configured for this provider"
+
+                # An already-specific CopilotProviderError also survives unchanged --
+                # this is the actual bug fixed here: before this, EVERY exception
+                # (including one already carrying a precise reason) was replaced with
+                # the same generic "provider is unavailable" message.
+                try:
+                    provider_call(tools, 'tool_calling', raises_specific_copilot_error)
+                    assert False, "expected the specific CopilotProviderError to propagate"
+                except CopilotProviderError as exc:
+                    assert str(exc) == "AI_API_KEY is not configured. Set it to use AI_PROVIDER=anthropic."
+
+                # A genuinely unexpected exception is still collapsed to the generic,
+                # private-detail-free message -- unchanged from before this increment.
+                try:
+                    provider_call(tools, 'tool_calling', raises_unexpected_error)
+                    assert False, "expected a generic CopilotProviderError to propagate"
+                except CopilotProviderError as exc:
+                    assert str(exc) == "The configured AI provider is unavailable. Try again later."
+                    assert "PRIVATE-" not in str(exc)
+            db.rollback()
+
+
 def test_failed_chat_keeps_human_message_audit(monkeypatch):
     from app.copilot import DeterministicCopilotProvider
     from app.models import AgentMessage
