@@ -49,6 +49,9 @@ def pytest_configure(config):
         from alembic import command
         from alembic.config import Config
         alembic_cfg = Config()
-        alembic_cfg.set_main_option("script_location", "alembic")
+        # Derive absolute script_location from this file's location (backend/tests/conftest.py -> backend/alembic)
+        import pathlib
+        script_location = str(pathlib.Path(__file__).parent.parent / "alembic")
+        alembic_cfg.set_main_option("script_location", script_location)
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
         command.upgrade(alembic_cfg, "head")
