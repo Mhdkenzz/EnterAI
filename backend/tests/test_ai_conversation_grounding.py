@@ -8,7 +8,7 @@ def test_conversation_memory_isolated_and_bounded():
     c1.add_user_turn("Project A")
     c1.add_assistant_turn("Found it")
     c1.add_tool_result("t1", {"name": "Project A"})
-    assert len(c1.turns) == 3
+    assert len(c1.turns) == 2  # user + assistant turns; tool result embedded in assistant turn
     c2 = ConversationMemory("conv-2", max_turns=3)
     assert c2.turns == []
     # Isolation: different IDs don't share turns
