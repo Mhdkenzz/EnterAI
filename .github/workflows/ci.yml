@@ -177,7 +177,10 @@ jobs:
           echo $! > /tmp/enter-ai-api.pid
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
       - name: Schemathesis
-        run: schemathesis run http://127.0.0.1:8000/openapi.json --checks all --exclude-checks allow_header_conformance,positive_data_acceptance --phases examples,coverage,fuzzing
+        # These are browser-navigation handoffs to an external IdP. Schemathesis
+        # correctly discovers their redirects but cannot exercise the external
+        # provider; dedicated OIDC and Playwright tests cover them instead.
+        run: schemathesis run http://127.0.0.1:8000/openapi.json --checks all --exclude-checks allow_header_conformance,positive_data_acceptance --phases examples,coverage,fuzzing --exclude-path-regex '^/api/auth/sso/(start|callback)$'
       - uses: grafana/setup-k6-action@v1
       - name: K6 smoke
         run: k6 run qa/k6/smoke.js
