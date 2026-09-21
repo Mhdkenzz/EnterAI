@@ -12,6 +12,8 @@ pwdlib[argon2]==0.2.1
 python-multipart==0.0.32
 pytest==9.1.1
 httpx==0.28.1
+# Starlette's TestClient imports this package directly as of Starlette 1.x.
+httpx2==2.13.0
 fakeredis[lua]==2.38.0
 moto[s3]==5.2.3
 # Phase 10.1 - RAG

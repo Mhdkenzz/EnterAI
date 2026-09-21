@@ -71,6 +71,7 @@ def test_mutation_audit_coverage_attribution_and_safe_errors(monkeypatch, caplog
     from app.models import Notification, AuditEvent, Activity
     from app.copilot import CopilotProviderError, create_confirmation
     from app.services import log
+    from app.main import _issue_confirmation
     import pytest
     with TestClient(app) as c:
         h, data = workspace(c)
@@ -82,7 +83,9 @@ def test_mutation_audit_coverage_attribution_and_safe_errors(monkeypatch, caplog
         c.delete(f"/api/tasks/{task['id']}", headers=h)
         with SessionLocal() as db:
             n = Notification(user_id=uid, title='PRIVATE-NOTIFICATION'); db.add(n); db.commit(); nid=n.id
-            token = create_confirmation(db.get(User, uid), 'create_team', {'name': 'PRIVATE-TEAM'})
+            issuer = db.get(User, uid)
+            token = create_confirmation(issuer, 'create_team', {'name': 'PRIVATE-TEAM'})
+            _issue_confirmation(token, issuer, db); db.commit()
         c.patch(f'/api/notifications/{nid}/read', headers=h)
         c.post('/api/ai/confirm', headers=h, json={'confirmation_token': token})
         agent_id, _ = identity(org, 'admin', 'agent')
@@ -110,11 +113,14 @@ def test_mutation_audit_coverage_attribution_and_safe_errors(monkeypatch, caplog
 def test_legacy_activity_redacts_free_text_but_keeps_before_after_contract():
     from app.models import Activity
     from app.copilot import create_confirmation
+    from app.main import _issue_confirmation
     with TestClient(app) as c:
         h, data = workspace(c)
         project = c.post('/api/projects', headers=h, json={'name': 'PRIVATE-NAME', 'code': 'P'}).json()
         with SessionLocal() as db:
-            token = create_confirmation(db.get(User, data['user']['id']), 'update_project', {'project_id': project['id'], 'health': 'off_track', 'description': 'PRIVATE-DESCRIPTION'})
+            issuer = db.get(User, data['user']['id'])
+            token = create_confirmation(issuer, 'update_project', {'project_id': project['id'], 'health': 'off_track', 'description': 'PRIVATE-DESCRIPTION'})
+            _issue_confirmation(token, issuer, db); db.commit()
         assert c.post('/api/ai/confirm', headers=h, json={'confirmation_token': token}).status_code == 200
         with SessionLocal() as db:
             rows = db.scalars(select(Activity).where(Activity.organization_id == data['organization']['id'])).all()

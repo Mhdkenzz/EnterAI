@@ -32,7 +32,7 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         failures.append(name)
 
 
-def request(method: str, path: str, token: str | None = None, body=None, files=None):
+def request(method: str, path: str, token: str | None = None, body=None, files=None, *, base: str = BASE):
     """Returns (status, headers, parsed-body-or-text)."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     if files is not None:
@@ -49,7 +49,7 @@ def request(method: str, path: str, token: str | None = None, body=None, files=N
         headers["Content-Type"] = "application/json"
     else:
         payload = None
-    req = urllib.request.Request(f"{BASE}{path}", data=payload, headers=headers, method=method)
+    req = urllib.request.Request(f"{base.rstrip('/')}{path}", data=payload, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
             raw = response.read().decode()
@@ -78,6 +78,22 @@ def compose(*args: str, replica: int | None = None) -> str:
 def replica_containers() -> list[str]:
     result = subprocess.run(COMPOSE + ["ps", "-q", "api"], capture_output=True, text=True, timeout=60)
     return [line for line in result.stdout.split() if line]
+
+
+def replica_base_url(container: str) -> str | None:
+    """Return the API's private bridge address for one named replica.
+
+    This is used only by the CI harness, which runs on the Docker host.  It
+    lets the confirmation check deliberately send its proposal and redemption
+    to different containers instead of merely hoping the load balancer happens
+    to alternate requests.
+    """
+    result = subprocess.run(
+        ["docker", "inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", container],
+        capture_output=True, text=True, timeout=60,
+    )
+    address = result.stdout.strip()
+    return f"http://{address}:8000" if result.returncode == 0 and address else None
 
 
 def requests_served_per_replica(containers: list[str], pattern: str) -> list[int]:
@@ -122,6 +138,41 @@ def shared_rate_limit(token: str) -> None:
     check("shared rate limit is not multiplied by replica count", allowed <= limit,
           f"{allowed} calls allowed against a limit of {limit}")
     check("throttling actually engages", throttled > 0, f"{throttled} requests were rejected")
+
+
+def shared_confirmation_replay_guard(token: str, containers: list[str]) -> None:
+    """A signed write proposal may be redeemed only once across replicas.
+
+    An in-process set would let the second request through when the load
+    balancer sends it to the other API container; the durable redemption record
+    must make that retry return 409 instead.
+    """
+    if len(containers) != 2:
+        check("two explicit replicas are available for confirmation replay", False, f"found {len(containers)}")
+        return
+    replica_a, replica_b = (replica_base_url(container) for container in containers)
+    if not replica_a or not replica_b:
+        check("replica private addresses are available for confirmation replay", False, f"{replica_a=}, {replica_b=}")
+        return
+    status, _headers, project = request("POST", "/api/projects", token=token,
+                                        base=replica_a,
+                                        body={"name": f"Replay Guard {uuid4().hex[:8]}", "code": uuid4().hex[:6].upper()})
+    if status >= 400:
+        check("project created for confirmation replay check", False, f"{status} {project}")
+        return
+    status, _headers, proposal = request("POST", "/api/ai/plan", token=token, base=replica_a,
+                                         body={"message": "Create task shared confirmation replay check"})
+    actions = proposal.get("actions", []) if isinstance(proposal, dict) else []
+    token_value = actions[0].get("confirmation_token") if actions else None
+    if status >= 400 or not token_value:
+        check("Copilot returned a write confirmation", False, f"{status} {proposal}")
+        return
+    first, _headers, _body = request("POST", "/api/ai/confirm", token=token, base=replica_b,
+                                     body={"confirmation_token": token_value})
+    second, _headers, _body = request("POST", "/api/ai/confirm", token=token, base=replica_a,
+                                      body={"confirmation_token": token_value})
+    check("replica B accepts confirmation proposed through replica A", first < 400, str(first))
+    check("replica A rejects replica B's replay", second == 409, str(second))
 
 
 def exactly_once_agent_stepping() -> None:
@@ -213,6 +264,7 @@ def main() -> int:
 
     uploads_are_visible_from_either_replica(token, containers)
     exactly_once_agent_stepping()
+    shared_confirmation_replay_guard(token, containers)
     # Last, because it deliberately exhausts this account's allowance.
     shared_rate_limit(token)
 

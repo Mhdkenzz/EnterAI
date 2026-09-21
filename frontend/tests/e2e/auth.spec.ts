@@ -58,6 +58,35 @@ test("a visitor can create a workspace and lands in it as its first admin", asyn
   await expect(page.getByRole("button", { name: "Send invite" })).toBeVisible();
 });
 
+test("the SSO callback keeps a session token client-side and clears it after sign-in", async ({ page }) => {
+  const key = unique("sso");
+  const account = await registerWorkspace(page.request, key, `SSO Org ${key}`);
+  await page.goto(`/sso/callback#sso_token=${account.token}`);
+  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  expect(page.url()).not.toContain("sso_token=");
+  expect(page.url()).not.toContain("?");
+});
+
+test("the SSO callback shows a generic error and clears its fragment", async ({ page }) => {
+  await page.goto("/sso/callback#sso_error=1");
+  await expect(page.getByRole("main").getByRole("alert")).toContainText("SSO sign-in failed");
+  expect(page.url()).not.toContain("sso_error=");
+});
+
+test("sign out removes the local session and does not restore the workspace", async ({ page }) => {
+  const key = unique("logout");
+  const account = await registerWorkspace(page.request, key, `Logout Org ${key}`);
+  await page.goto("/");
+  await page.evaluate(value => localStorage.setItem("enter-token", value), account.token);
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await page.getByRole("button", { name: "Sign out" }).click();
+  await expect(page.getByRole("heading", { name: "Enter AI" })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("enter-token"))).toBeNull();
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "Enter AI" })).toBeVisible();
+});
+
 test("forgot password never reveals whether an address has an account", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Forgot your password?" }).click();

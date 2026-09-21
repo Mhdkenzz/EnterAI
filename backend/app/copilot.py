@@ -16,6 +16,7 @@ import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from uuid import uuid4
 
 import jwt
 from sqlalchemy import or_, select
@@ -636,7 +637,7 @@ def _provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 def create_confirmation(user: User, tool: str, args: dict[str, Any]) -> str:
     return jwt.encode(
-        {"kind": "copilot_confirmation", "sub": user.id, "org": user.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
+        {"kind": "copilot_confirmation", "jti": uuid4().hex, "sub": user.id, "org": user.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
         CONFIRMATION_SECRET,
         algorithm="HS256",
     )
@@ -660,7 +661,7 @@ def create_agent_confirmation(agent: User, tool: str, args: dict[str, Any]) -> s
     the human chatting -- a distinct `kind` so the two token families can never be
     confused, since an agent can't click "confirm" for itself; a human in its org must."""
     return jwt.encode(
-        {"kind": "agent_copilot_confirmation", "sub": agent.id, "org": agent.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
+        {"kind": "agent_copilot_confirmation", "jti": uuid4().hex, "sub": agent.id, "org": agent.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
         CONFIRMATION_SECRET,
         algorithm="HS256",
     )

@@ -40,6 +40,16 @@ def _api_base_url() -> str:
 def _app_base_url() -> str:
     return os.getenv("APP_BASE_URL", "http://localhost:3000").rstrip("/")
 
+
+def _sso_failure_redirect() -> RedirectResponse:
+    """Return a browser-safe failure handoff without exposing OIDC internals.
+
+    The login endpoints are navigated to directly by a browser, not fetched by
+    application code.  A fragment is never sent in the next HTTP request, so it
+    keeps this generic UI signal out of frontend/proxy access logs as well.
+    """
+    return RedirectResponse(f"{_app_base_url()}/sso/callback#sso_error=1", status_code=302)
+
 # SCIM calls come from the IdP's provisioning engine, not a browser -- they carry
 # their own dedicated bearer token (see sso_auth.issue_scim_token), never a normal
 # user session JWT. A separate HTTPBearer instance (vs. auth.bearer) keeps that
@@ -229,13 +239,13 @@ def sso_login_start(email: EmailStr, db: Session = Depends(get_db)):
         IdentityProvider.domain_binding == domain, IdentityProvider.protocol == 'oidc',
         IdentityProvider.active == True))
     if not idp:
-        raise HTTPException(404, 'No SSO identity provider is configured for this email domain')
+        return _sso_failure_redirect()
     redirect_uri = f'{_api_base_url()}/api/auth/sso/callback'
     try:
         authorization_url = sso_oidc.build_authorization_url(db, idp, redirect_uri)
         db.commit()  # discover() may have cached a freshly-fetched discovery document
-    except sso_oidc.OIDCError as error:
-        raise HTTPException(503, str(error)) from error
+    except sso_oidc.OIDCError:
+        return _sso_failure_redirect()
     return RedirectResponse(authorization_url, status_code=302)
 
 
@@ -251,15 +261,17 @@ def sso_login_callback(request: Request, db: Session = Depends(get_db)):
     params = request.query_params
     state = params.get('state')
     if not state:
-        raise HTTPException(400, 'Missing SSO state')
+        return _sso_failure_redirect()
     try:
-        user, token = sso_oidc.handle_callback(
+        _user, token = sso_oidc.handle_callback(
             db, code=params.get('code'), state=state, idp_error=params.get('error'))
-    except sso_oidc.OIDCError as error:
-        query = urlencode({'error': str(error)})
-        return RedirectResponse(f'{_app_base_url()}/sso/callback?{query}', status_code=302)
-    query = urlencode({'token': token, 'organization_id': user.organization_id})
-    return RedirectResponse(f'{_app_base_url()}/sso/callback?{query}', status_code=302)
+    except sso_oidc.OIDCError:
+        return _sso_failure_redirect()
+    # A fragment is kept entirely client-side.  The session token therefore
+    # never appears in a frontend/proxy request URL, browser referrer, or the
+    # callback route's server-side logs before the frontend stores it.
+    fragment = urlencode({'sso_token': token})
+    return RedirectResponse(f'{_app_base_url()}/sso/callback#{fragment}', status_code=302)
 
 
 # --- SCIM endpoints ---

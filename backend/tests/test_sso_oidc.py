@@ -361,13 +361,18 @@ def test_sso_start_redirects_to_the_real_authorization_endpoint(fake_idp):
         assert response.headers["location"].startswith(f"{fake_idp.base_url}/authorize?")
 
 
-def test_sso_start_404s_for_an_unconfigured_domain():
+def test_sso_start_hands_an_unconfigured_domain_back_to_the_generic_ui_error():
     with TestClient(backend_app) as c:
-        response = c.get("/api/auth/sso/start", params={"email": f"nobody@{uuid4().hex}.example"})
-        assert response.status_code == 404
+        response = c.get("/api/auth/sso/start", params={"email": f"nobody@{uuid4().hex}.example"},
+                         follow_redirects=False)
+        assert response.status_code == 302
+        redirected = urlparse(response.headers["location"])
+        assert redirected.path == "/sso/callback"
+        assert parse_qs(redirected.fragment) == {"sso_error": ["1"]}
+        assert "provider" not in response.headers["location"].lower()
 
 
-def test_sso_callback_route_completes_a_real_login_and_redirects_with_a_token(fake_idp):
+def test_sso_callback_route_completes_a_real_login_with_a_client_only_token_fragment(fake_idp):
     with TestClient(backend_app) as c, SessionLocal() as db:
         org, idp = _org_and_idp(db, fake_idp, domain="callbackroute.example")
         start = c.get("/api/auth/sso/start", params={"email": f"u@callbackroute.example"}, follow_redirects=False)
@@ -381,9 +386,21 @@ def test_sso_callback_route_completes_a_real_login_and_redirects_with_a_token(fa
             "code": callback_qs["code"][0], "state": callback_qs["state"][0],
         }, follow_redirects=False)
         assert callback.status_code == 302
-        redirect_qs = parse_qs(urlparse(callback.headers["location"]).query)
-        assert "token" in redirect_qs
-        assert redirect_qs["organization_id"][0] == org.id
+        redirected = urlparse(callback.headers["location"])
+        redirect_fragment = parse_qs(redirected.fragment)
+        assert redirected.path == "/sso/callback"
+        assert redirected.query == ""
+        assert "sso_token" in redirect_fragment
+        assert "organization_id" not in redirect_fragment
 
-        me = c.get("/api/me", headers={"Authorization": f"Bearer {redirect_qs['token'][0]}"})
+        me = c.get("/api/me", headers={"Authorization": f"Bearer {redirect_fragment['sso_token'][0]}"})
         assert me.status_code == 200
+
+
+def test_sso_callback_with_missing_state_redirects_to_a_generic_ui_error():
+    with TestClient(backend_app) as c:
+        response = c.get("/api/auth/sso/callback", follow_redirects=False)
+    assert response.status_code == 302
+    redirected = urlparse(response.headers["location"])
+    assert redirected.path == "/sso/callback"
+    assert parse_qs(redirected.fragment) == {"sso_error": ["1"]}

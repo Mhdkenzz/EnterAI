@@ -251,6 +251,24 @@ class AuthToken(Base):
     used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
+class CopilotConfirmation(Base):
+    """Durable issued-and-consumed state for Copilot write proposals.
+
+    A token must be registered here when the server issues it, before it is
+    returned to a client.  The unique hash then lets every API replica atomically
+    move the same proposal from pending to consumed without retaining the raw
+    signed token or its arguments.
+    """
+    __tablename__ = "copilot_confirmations"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    subject_id: Mapped[str] = mapped_column(String, index=True)
+    organization_id: Mapped[str] = mapped_column(String, index=True)
+    tool: Mapped[str] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
 class Invite(Base):
     """An invitation to join one specific organization, at one specific role.
 

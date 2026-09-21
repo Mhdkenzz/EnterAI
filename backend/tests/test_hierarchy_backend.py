@@ -8,7 +8,7 @@ from app.copilot import ProviderTurn, WorkspaceTools, read_agent_confirmation
 from app.copilot import CopilotService
 from app.database import SessionLocal
 from app.hierarchy import MAX_HIERARCHY_AGENTS, desired_counts
-from app.main import app
+from app.main import _issue_confirmation, app
 from app.models import Organization, User
 
 
@@ -264,6 +264,7 @@ def test_delegate_task_tool_end_to_end_agent_proposes_human_confirms():
         ])
         result = _service_with(provider).plan("Delegate this to my VP", tools)
         token = result["actions"][0]["confirmation_token"]
+        _issue_confirmation(token, ceo_row, db); db.commit()
         import pytest
         with pytest.raises(ValueError, match="active human"):
             read_agent_confirmation(token, ceo_row, db)

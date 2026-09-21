@@ -16,7 +16,7 @@ from app.copilot import (
     read_confirmation,
 )
 from app.database import SessionLocal
-from app.main import app
+from app.main import _issue_confirmation, app
 from app.models import User
 
 
@@ -240,20 +240,24 @@ def test_confirm_endpoint_executes_every_generalised_write_tool():
         # /api/ai/confirm dispatches to the target route function directly, so the response
         # carries the confirm route's own status code (200), not the target route's decorator.
         team_token = create_confirmation(user, "create_team", {"name": "Tool-Calling Test Team " + suffix})
+        _issue_confirmation(team_token, user, db); db.commit()
         created_team = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": team_token})
         assert created_team.status_code == 200
         assert created_team.json()["name"] == "Tool-Calling Test Team " + suffix
 
         project_token = create_confirmation(user, "create_project", {"name": "Tool-Calling Test Project " + suffix, "code": "TC" + suffix[:4].upper()})
+        _issue_confirmation(project_token, user, db); db.commit()
         created_project = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": project_token})
         assert created_project.status_code == 200
 
         update_token = create_confirmation(user, "update_project", {"project_id": project_id, "health": "at_risk"})
+        _issue_confirmation(update_token, user, db); db.commit()
         updated_project = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": update_token})
         assert updated_project.status_code == 200
         assert updated_project.json()["health"] == "at_risk"
 
         comment_token = create_confirmation(user, "add_comment", {"task_id": task_id, "body": "Checked in via Copilot"})
+        _issue_confirmation(comment_token, user, db); db.commit()
         added_comment = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": comment_token})
         assert added_comment.status_code == 200
         assert added_comment.json()["body"] == "Checked in via Copilot"

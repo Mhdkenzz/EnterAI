@@ -1,17 +1,19 @@
 import os
-import time
+import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
+import jwt
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from .auth import create_token, current_user, hash_password, verify_password
+from .auth import CONFIRMATION_SECRET, create_token, current_user, hash_password, verify_password
 from .database import Base, engine, get_db
-from .models import Activity, AgentMessage, Attachment, Comment, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
+from .models import Activity, AgentMessage, Attachment, Comment, CopilotConfirmation, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
 from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
 from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging
 from . import execution
@@ -571,14 +573,22 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
     try:
         with audit_context("agent", agent.id, user.id):
             result = CopilotService().plan(data.message, WorkspaceTools(db, agent, scope_project_id=scope_project_id))
+        _issue_result_confirmations(result, agent, db)
     except CopilotProviderError as error:
         db.commit()
         raise HTTPException(503, "The configured AI provider is unavailable. Try again later.") from error
+    except (ValueError, IntegrityError) as error:
+        db.rollback()
+        raise HTTPException(503, "Unable to issue the Copilot proposal. Try again later.") from error
     with audit_context("agent", agent.id, user.id):
         audit(db,user.organization_id,agent.id,"agent",agent.id,"message_sent")
     db.add(AgentMessage(agent_id=agent.id, author_id=None, role="agent", body=result["reply"]))
     _record_ai_usage(db, user.organization_id)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(503, "Unable to issue the Copilot proposal. Try again later.") from error
     return result
 @app.get("/api/notifications")
 def notifications(user:User=Depends(current_user),db:Session=Depends(get_db)): return [{"id":n.id,"title":n.title,"body":n.body,"href":n.href,"read":n.read,"created_at":n.created_at} for n in db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc())).all()]
@@ -622,12 +632,16 @@ def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(ge
     try:
         with audit_context("copilot", user.id, user.id):
             result = CopilotService().plan(data.message, WorkspaceTools(db, user, scope_project_id=data.project_id))
+            _issue_result_confirmations(result, user, db)
             audit(db,user.organization_id,user.id,"copilot",user.id,"planned")
         _record_ai_usage(db, user.organization_id)
         db.commit()
         return result
     except CopilotProviderError as error:
         raise HTTPException(503, "The configured AI provider is unavailable. Try again later.") from error
+    except (ValueError, IntegrityError) as error:
+        db.rollback()
+        raise HTTPException(503, "Unable to issue the Copilot proposal. Try again later.") from error
 def _without(args: dict[str, Any], *keys: str) -> dict[str, Any]:
     return {key: value for key, value in args.items() if key not in keys}
 
@@ -651,20 +665,72 @@ def _audit_before_state(tool: str, args: dict[str, Any], db: Session) -> dict[st
         return project_out(p, db) if p else None
     return None
 
-# Confirmation tokens are meant to be used once. This in-memory set (bounded by the
-# token's own 10-minute expiry, pruned on every call) stops the same proposal from being
-# replayed twice by a network retry or a malicious actor who intercepts the token.
-_CONSUMED_CONFIRMATIONS: dict[str, float] = {}
-_CONFIRMATION_TTL_SECONDS = 600
+def _issue_confirmation(token: str, issuer: User, db: Session) -> None:
+    """Persist one server-issued confirmation before returning it to a client.
 
-def _consume_confirmation_once(token: str) -> bool:
-    now = time.monotonic()
-    for expired in [t for t, expires_at in _CONSUMED_CONFIRMATIONS.items() if expires_at < now]:
-        _CONSUMED_CONFIRMATIONS.pop(expired, None)
-    if token in _CONSUMED_CONFIRMATIONS:
-        return False
-    _CONSUMED_CONFIRMATIONS[token] = now + _CONFIRMATION_TTL_SECONDS
-    return True
+    The raw token and its arguments remain only in the signed client token.  The
+    database keeps the minimum shared state needed to prove that exact token was
+    issued by this server and to consume it once across API replicas.
+    """
+    try:
+        claim = jwt.decode(token, CONFIRMATION_SECRET, algorithms=["HS256"], options={"require": ["exp", "kind", "sub", "org", "tool"]})
+    except jwt.PyJWTError as error:
+        raise ValueError("Generated an invalid Copilot confirmation") from error
+    expected_kind = "agent_copilot_confirmation" if issuer.kind == "agent" else "copilot_confirmation"
+    subject_id, organization_id, tool = claim.get("sub"), claim.get("org"), claim.get("tool")
+    expires_at = claim.get("exp")
+    if (claim.get("kind") != expected_kind or subject_id != issuer.id or organization_id != issuer.organization_id
+            or not isinstance(tool, str) or tool not in WRITE_TOOL_HANDLERS or not isinstance(expires_at, (int, float))):
+        raise ValueError("Generated an invalid Copilot confirmation")
+    db.add(CopilotConfirmation(
+        token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        subject_id=subject_id,
+        organization_id=organization_id,
+        tool=tool,
+        expires_at=datetime.fromtimestamp(expires_at, timezone.utc).replace(tzinfo=None),
+    ))
+    # Flush now: no token is returned if its pending state cannot be persisted.
+    db.flush()
+
+
+def _issue_result_confirmations(result: dict[str, Any], issuer: User, db: Session) -> None:
+    for action in result.get("actions", []):
+        token = action.get("confirmation_token") if isinstance(action, dict) else None
+        if token is not None:
+            if not isinstance(token, str) or not action.get("requires_confirmation"):
+                raise ValueError("Generated an invalid Copilot proposal")
+            _issue_confirmation(token, issuer, db)
+
+
+def _consume_confirmation_once(token: str, subject_id: str, organization_id: str, tool: str, db: Session) -> str:
+    """Atomically transition an issued, matching proposal from pending to consumed."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    consumed = db.execute(
+        update(CopilotConfirmation)
+        .where(
+            CopilotConfirmation.token_hash == token_hash,
+            CopilotConfirmation.subject_id == subject_id,
+            CopilotConfirmation.organization_id == organization_id,
+            CopilotConfirmation.tool == tool,
+            CopilotConfirmation.expires_at >= now,
+            CopilotConfirmation.consumed_at.is_(None),
+        )
+        .values(consumed_at=now)
+    )
+    if consumed.rowcount == 1:
+        db.commit()
+        return "consumed"
+
+    state = db.scalar(select(CopilotConfirmation).where(CopilotConfirmation.token_hash == token_hash))
+    if state is None:
+        db.rollback()
+        return "missing"
+    if state.consumed_at is not None:
+        db.rollback()
+        return "used"
+    db.rollback()
+    return "unavailable"
 
 @app.post("/api/ai/confirm")
 def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -685,8 +751,13 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
         raise HTTPException(400, "Unsupported action")
     if user.role not in TOOL_ROLES.get(tool, frozenset()):
         raise HTTPException(403, "Your role cannot perform this Copilot action.")
-    if not _consume_confirmation_once(data.confirmation_token):
+    confirmation_state = _consume_confirmation_once(
+        data.confirmation_token, proposer_agent_id or user.id, user.organization_id, tool, db
+    )
+    if confirmation_state == "used":
         raise HTTPException(409, "This Copilot proposal has already been used. Ask again for a new proposal.")
+    if confirmation_state != "consumed":
+        raise HTTPException(400, "This Copilot proposal is not available. Ask again for a new proposal.")
     before = _audit_before_state(tool, args, db)
     try:
         with audit_context("agent" if proposer_agent_id else "copilot", proposer_agent_id or user.id, user.id):
