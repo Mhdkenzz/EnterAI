@@ -189,9 +189,9 @@ jobs:
         run: |
           kill "$(cat /tmp/enter-ai-api.pid)"
           for attempt in $(seq 1 30); do ! curl -sS http://127.0.0.1:8000/health >/dev/null 2>&1 && break || sleep 1; done
-          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SEED_ADMIN_PASSWORD=ci-only-seed-admin-password EMAIL_PROVIDER=smtp SMTP_HOST=127.0.0.1 EMAIL_FROM=ci@enterai.test APP_BASE_URL=http://127.0.0.1:3000 AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
-          for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
-          curl -fsS http://127.0.0.1:8000/health || { echo "::error::API failed to come back up in production mode"; cat /tmp/enter-ai-api-zap.log; exit 1; }
+          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SEED_ADMIN_EMAIL=admin@staging.example.test SEED_ADMIN_PASSWORD=ci-only-seed-admin-password EMAIL_PROVIDER=smtp SMTP_HOST=127.0.0.1 EMAIL_FROM=ci@enterai.test APP_BASE_URL=https://staging.example.test API_BASE_URL=https://api.staging.example.test CORS_ALLOWED_ORIGINS=https://staging.example.test TRUSTED_HOSTS=staging.example.test,api.staging.example.test TRUST_PROXY_HEADERS=true AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
+          for attempt in $(seq 1 30); do curl -fsS -H 'Host: api.staging.example.test' http://127.0.0.1:8000/health && break || sleep 1; done
+          curl -fsS -H 'Host: api.staging.example.test' http://127.0.0.1:8000/health || { echo "::error::API failed to come back up in production mode"; cat /tmp/enter-ai-api-zap.log; exit 1; }
       - uses: zaproxy/action-baseline@v0.14.0
         with:
           target: http://127.0.0.1:8000/

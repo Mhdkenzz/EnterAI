@@ -63,7 +63,7 @@ services:
   # at boot, which two of them would otherwise do concurrently on one database.
   migrate:
     image: ${ENTERAI_BACKEND_IMAGE:?set ENTERAI_BACKEND_IMAGE to an immutable image digest}
-    command: ["sh", "-ec", "alembic upgrade head && alembic current --check"]
+    command: ["sh", "-ec", "alembic upgrade head && current=\"$$(alembic current)\" && heads=\"$$(alembic heads)\" && test \"$$current\" = \"$$heads\""]
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
