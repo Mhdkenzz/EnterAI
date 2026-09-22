@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import subprocess
 import sys
 import time
@@ -20,7 +21,11 @@ import urllib.error
 import urllib.request
 from uuid import uuid4
 
-BASE = "http://127.0.0.1:8000"
+# The production Compose topology publishes only the TLS load balancer.  CI
+# creates a short-lived self-signed certificate for it, so requests through the
+# public path need this local-only trust override.
+BASE = "https://127.0.0.1"
+CI_TLS_CONTEXT = ssl._create_unverified_context()
 COMPOSE = ["docker", "compose", "-f", "docker-compose.prod.yml"]
 
 failures: list[str] = []
@@ -51,7 +56,7 @@ def request(method: str, path: str, token: str | None = None, body=None, files=N
         payload = None
     req = urllib.request.Request(f"{base.rstrip('/')}{path}", data=payload, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=30) as response:
+        with urllib.request.urlopen(req, timeout=30, context=CI_TLS_CONTEXT) as response:
             raw = response.read().decode()
             status, response_headers = response.status, dict(response.headers)
     except urllib.error.HTTPError as error:
