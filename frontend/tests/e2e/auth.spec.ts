@@ -80,6 +80,7 @@ test("sign out removes the local session and does not restore the workspace", as
   await page.evaluate(value => localStorage.setItem("enter-token", value), account.token);
   await page.reload();
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await page.getByRole("button", { name: "Open menu" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Enter AI" })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("enter-token"))).toBeNull();
