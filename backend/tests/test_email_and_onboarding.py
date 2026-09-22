@@ -63,6 +63,9 @@ def _boot(env_overrides):
     boot_db = Path(tempfile.mkdtemp()) / "boot.db"
     env = {**os.environ, "DATABASE_URL": f"sqlite:///{boot_db}", "JWT_SECRET": "a" * 32,
            "REDIS_URL": "redis://127.0.0.1:6379/0", "SEED_ADMIN_PASSWORD": "a-genuinely-unique-password-123",
+           "API_BASE_URL": "https://api.example.com", "CORS_ALLOWED_ORIGINS": "https://app.example.com",
+           "TRUSTED_HOSTS": "app.example.com,api.example.com", "TRUST_PROXY_HEADERS": "true",
+           "SEED_ADMIN_EMAIL": "admin@example.com",
            **env_overrides}
     script = ("import alembic.config, alembic.command\n"
               "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"

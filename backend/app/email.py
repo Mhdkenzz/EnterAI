@@ -20,6 +20,7 @@ import os
 import smtplib
 from dataclasses import dataclass
 from email.message import EmailMessage as MIMEMessage
+from .deployment_config import is_deployment_environment
 
 logger = logging.getLogger("enterai.email")
 
@@ -77,7 +78,7 @@ class SMTPEmailProvider:
 def _build_provider():
     environment = os.getenv("ENVIRONMENT", "development").strip().lower()
     configured = os.getenv("EMAIL_PROVIDER", "").strip().lower()
-    if environment == "production":
+    if is_deployment_environment(environment):
         if configured != "smtp":
             raise RuntimeError(
                 "EMAIL_PROVIDER must be set to 'smtp' in production. Password reset,"

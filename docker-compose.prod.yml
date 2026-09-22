@@ -3,7 +3,9 @@
 # migration as a one-shot release step rather than something every replica races
 # to run at boot.
 #
-#   docker compose -f docker-compose.prod.yml up -d --build
+# Images are supplied by the guarded release workflow as immutable digest
+# references.  This file intentionally has no `build:` entries: a host must
+# never rebuild an unreviewed working tree during deployment.
 #
 # Every secret below has no default on purpose: this file must not be startable
 # with credentials that are published in this repository.
@@ -60,8 +62,8 @@ services:
   # Runs once and exits. Replicas wait for it rather than each running migrations
   # at boot, which two of them would otherwise do concurrently on one database.
   migrate:
-    build: ./backend
-    command: ["alembic", "upgrade", "head"]
+    image: ${ENTERAI_BACKEND_IMAGE:?set ENTERAI_BACKEND_IMAGE to an immutable image digest}
+    command: ["sh", "-ec", "alembic upgrade head && alembic current --check"]
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
@@ -69,29 +71,29 @@ services:
       db: {condition: service_healthy}
 
   api:
-    build: ./backend
+    image: ${ENTERAI_BACKEND_IMAGE:?set ENTERAI_BACKEND_IMAGE to an immutable image digest}
     restart: unless-stopped
     # No bind mount: the image is the artifact. Mounting ./backend over /app would
     # ship whatever happens to be in the working tree instead of what was built,
     # and would put a writable source tree inside a production container.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
-      ENVIRONMENT: production
+      ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT to staging or production}
       ENABLE_API_DOCS: "false"
       ENABLE_DEMO_SEED: "false"
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
-      EMAIL_PROVIDER: ${EMAIL_PROVIDER:-smtp}
+      REDIS_URL: ${REDIS_URL:?set REDIS_URL}
+      EMAIL_PROVIDER: ${EMAIL_PROVIDER:?set EMAIL_PROVIDER}
       SMTP_HOST: ${SMTP_HOST:?set SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_PORT: ${SMTP_PORT:?set SMTP_PORT}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       EMAIL_FROM: ${EMAIL_FROM:?set EMAIL_FROM}
       APP_BASE_URL: ${APP_BASE_URL:?set APP_BASE_URL}
       # Only required for OIDC login (Phase 14.2): the redirect_uri registered
       # with an IdP must resolve to this backend, not the frontend/APP_BASE_URL.
-      API_BASE_URL: ${API_BASE_URL:-}
+      API_BASE_URL: ${API_BASE_URL:?set API_BASE_URL}
       # Only required once an OIDC identity provider's client_secret is stored
       # (app/secrets_store.py fails closed in production if unset and one is).
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
@@ -99,9 +101,10 @@ services:
       # The API only ever sees the load balancer's address, so rate limiting has to
       # read the client from the header nginx appends.
       TRUST_PROXY_HEADERS: "true"
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:?set TRUSTED_HOSTS}
       SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?set SEED_ADMIN_EMAIL}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS}
       STORAGE_BACKEND: s3
       STORAGE_BUCKET: ${STORAGE_BUCKET:?set STORAGE_BUCKET}
       STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
@@ -133,6 +136,8 @@ services:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       BACKUP_DIR: /var/backups/enterai
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_OFFSITE_HOOK: ${BACKUP_OFFSITE_HOOK:-}
     volumes:
       - ./scripts/backup.sh:/backup.sh:ro
       - backup_data:/var/backups/enterai
@@ -144,16 +149,16 @@ services:
   lb:
     image: nginx:1.27-alpine
     restart: unless-stopped
-    ports: ["8000:8000"]
-    volumes: [./deploy/nginx.conf:/etc/nginx/nginx.conf:ro]
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${TLS_CERT_PATH:?set TLS_CERT_PATH}:/etc/nginx/tls/tls.crt:ro
+      - ${TLS_KEY_PATH:?set TLS_KEY_PATH}:/etc/nginx/tls/tls.key:ro
     depends_on: [api]
 
   web:
-    build: ./frontend
+    image: ${ENTERAI_FRONTEND_IMAGE:?set ENTERAI_FRONTEND_IMAGE to an immutable image digest}
     restart: unless-stopped
-    environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api}
-    ports: ["3000:3000"]
     depends_on: [lb]
 
 volumes:

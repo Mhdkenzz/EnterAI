@@ -354,8 +354,9 @@ def test_two_orgs_logins_stay_isolated_even_via_the_same_fake_idp(db_session, fa
 
 def test_sso_start_redirects_to_the_real_authorization_endpoint(fake_idp):
     with TestClient(backend_app) as c, SessionLocal() as db:
-        org, idp = _org_and_idp(db, fake_idp, domain="startroute.example")
-        response = c.get("/api/auth/sso/start", params={"email": "someone@startroute.example"},
+        domain = f"startroute-{uuid4().hex}.example"
+        org, idp = _org_and_idp(db, fake_idp, domain=domain)
+        response = c.get("/api/auth/sso/start", params={"email": f"someone@{domain}"},
                          follow_redirects=False)
         assert response.status_code == 302
         assert response.headers["location"].startswith(f"{fake_idp.base_url}/authorize?")
@@ -374,8 +375,9 @@ def test_sso_start_hands_an_unconfigured_domain_back_to_the_generic_ui_error():
 
 def test_sso_callback_route_completes_a_real_login_with_a_client_only_token_fragment(fake_idp):
     with TestClient(backend_app) as c, SessionLocal() as db:
-        org, idp = _org_and_idp(db, fake_idp, domain="callbackroute.example")
-        start = c.get("/api/auth/sso/start", params={"email": f"u@callbackroute.example"}, follow_redirects=False)
+        domain = f"callbackroute-{uuid4().hex}.example"
+        org, idp = _org_and_idp(db, fake_idp, domain=domain)
+        start = c.get("/api/auth/sso/start", params={"email": f"u@{domain}"}, follow_redirects=False)
         authorization_url = start.headers["location"]
         with httpx.Client() as raw:
             idp_redirect = raw.get(authorization_url, follow_redirects=False)

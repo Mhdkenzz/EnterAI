@@ -1,18 +1,30 @@
-# Restore Runbook
+# Backup and restore drill
 
-## Backup schedule
-`docker-compose.prod.yml`'s `backup` service runs `scripts/backup.sh` on a loop
-(default: every `BACKUP_INTERVAL_SECONDS`, 86400s/daily), writing timestamped
-`pg_dump -Fc` archives to the `backup_data` volume and verifying each one with
-`pg_restore --list`. It is not part of `lb`'s dependency chain, so a plain
-`docker compose -f docker-compose.prod.yml up -d` (no target) is required to
-start it -- `up -d --build lb` (used by CI's multi-replica test) does not.
-Copy the volume off-host on whatever cadence your retention policy requires;
-this service only guarantees a backup *exists* on the host, not off it.
+`backup.sh` creates a compressed PostgreSQL archive, verifies it with
+`pg_restore --list`, retains archives for `BACKUP_RETENTION_DAYS` (14 by default),
+and exits nonzero on dump, verification, or optional off-host-copy failure. It
+accepts SQLAlchemy `postgresql+psycopg://` URLs but converts only that driver prefix
+to libpq `postgresql://` before calling PostgreSQL tools. It never logs a URL.
 
-## Restore
-1. Identify latest valid backup (.dump file).
-2. Stop the application (prevent writes during restore).
-3. Restore: `pg_restore --clean --if-exists --dbname=<DB_URL> <backup.dump>`
-4. Verify: run migrations (`alembic upgrade head`), check schema, run smoke tests.
-5. Restart services.
+The local Compose volume is not an off-host backup. Configure `BACKUP_OFFSITE_HOOK`
+as a root-owned executable that receives the verified archive path and uploads it
+to an approved S3-compatible or other off-host destination. Alert on nonzero exit
+and test restore access, not merely object existence.
+
+## Required disposable restore drill
+
+Never restore automatically over the active staging database. Create a separately
+named disposable database with credentials different from the active service, then:
+
+```bash
+RESTORE_DATABASE_URL='postgresql+psycopg://…/enterai_restore_drill' \
+RESTORE_ARCHIVE=/secure/backups/enterai_YYYYMMDD_HHMMSS.dump \
+RESTORE_CONFIRM=RESTORE_TO_DISPOSABLE_DATABASE \
+./scripts/verify_restore.sh
+```
+
+The script refuses to run without the exact confirmation value. It restores the
+archive, runs `alembic upgrade head`, verifies `alembic current --check`, and issues
+a basic SQL smoke query. Record archive identifier, revision, duration, and result.
+Destroy the disposable database only after evidence is retained; that deletion is a
+separate, explicitly authorized operation.

@@ -211,6 +211,10 @@ jobs:
       POSTGRES_PASSWORD: enterai_ci_password
       DATABASE_URL: postgresql+psycopg://enterai:enterai_ci_password@db:5432/enterai
       JWT_SECRET: ci-only-secret-that-is-long-enough-for-the-production-check
+      ENTERAI_BACKEND_IMAGE: enterai-backend:ci
+      ENTERAI_FRONTEND_IMAGE: enterai-frontend:ci
+      ENVIRONMENT: ci
+      REDIS_URL: redis://redis:6379/0
       SEED_ADMIN_EMAIL: admin@ci.enterai.test
       SEED_ADMIN_PASSWORD: ci-only-seed-admin-password
       STORAGE_BUCKET: enterai-uploads
@@ -219,17 +223,29 @@ jobs:
       SMTP_HOST: 127.0.0.1
       EMAIL_FROM: ci@enterai.test
       APP_BASE_URL: http://127.0.0.1:3000
+      API_BASE_URL: http://127.0.0.1:8000
+      CORS_ALLOWED_ORIGINS: http://127.0.0.1:3000
+      TRUSTED_HOSTS: localhost,127.0.0.1
+      EMAIL_PROVIDER: smtp
+      SMTP_PORT: "587"
+      TLS_CERT_PATH: /tmp/enterai-ci.crt
+      TLS_KEY_PATH: /tmp/enterai-ci.key
       AI_PLAN_RATE_LIMIT_PER_MINUTE: "3"
     steps:
       - uses: actions/checkout@v4
+      - name: Build immutable-artifact stand-ins and test TLS certificate
+        run: |
+          docker build -t "$ENTERAI_BACKEND_IMAGE" ./backend
+          docker build -t "$ENTERAI_FRONTEND_IMAGE" ./frontend
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TLS_KEY_PATH" -out "$TLS_CERT_PATH" -days 1 -subj '/CN=localhost'
       - name: Start two API replicas behind a load balancer
         # `up lb` pulls in the API replicas and their dependencies but not the web
         # image, which this job does not exercise.
-        run: docker compose -f docker-compose.prod.yml up -d --build lb
+        run: docker compose -f docker-compose.prod.yml up -d lb
       - name: Wait for the load balancer
         run: |
-          for attempt in $(seq 1 60); do curl -fsS http://127.0.0.1:8000/health && break || sleep 2; done
-          curl -fsS http://127.0.0.1:8000/health || { echo "::error::the stack never became reachable"; exit 1; }
+          for attempt in $(seq 1 60); do curl -kfsS https://127.0.0.1/health && break || sleep 2; done
+          curl -kfsS https://127.0.0.1/health || { echo "::error::the stack never became reachable"; exit 1; }
       - name: Confirm both replicas are running
         run: |
           docker compose -f docker-compose.prod.yml ps
@@ -243,6 +259,52 @@ jobs:
       - name: Tear down
         if: always()
         run: docker compose -f docker-compose.prod.yml down -v
+
+  container-validation:
+    runs-on: ubuntu-latest
+    env:
+      POSTGRES_DB: enterai
+      POSTGRES_USER: enterai
+      POSTGRES_PASSWORD: ci-password
+      DATABASE_URL: postgresql+psycopg://enterai:ci-password@db:5432/enterai
+      JWT_SECRET: ci-only-secret-that-is-long-enough-for-the-production-check
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: staging
+      EMAIL_PROVIDER: smtp
+      SMTP_HOST: smtp.example.test
+      SMTP_PORT: "587"
+      EMAIL_FROM: no-reply@example.test
+      APP_BASE_URL: https://staging.example.test
+      API_BASE_URL: https://api.staging.example.test
+      CORS_ALLOWED_ORIGINS: https://staging.example.test
+      TRUSTED_HOSTS: staging.example.test,api.staging.example.test
+      SEED_ADMIN_EMAIL: admin@example.test
+      SEED_ADMIN_PASSWORD: ci-only-seed-admin-password
+      STORAGE_BUCKET: enterai-uploads
+      STORAGE_ACCESS_KEY: ci-access-key
+      STORAGE_SECRET_KEY: ci-secret-key
+      TLS_CERT_PATH: /tmp/enterai-ci.crt
+      TLS_KEY_PATH: /tmp/enterai-ci.key
+      ENTERAI_BACKEND_IMAGE: enterai-backend:ci
+      ENTERAI_FRONTEND_IMAGE: enterai-frontend:ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose and nginx with temporary TLS material
+        run: |
+          openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TLS_KEY_PATH" -out "$TLS_CERT_PATH" -days 1 -subj '/CN=staging.example.test'
+          docker compose -f docker-compose.prod.yml config -q
+          docker run --rm -v "$PWD/deploy/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$TLS_CERT_PATH:/etc/nginx/tls/tls.crt:ro" -v "$TLS_KEY_PATH:/etc/nginx/tls/tls.key:ro" nginx:1.27-alpine nginx -t
+      - name: Validate hosted frontend build arguments and images
+        run: |
+          if docker build --build-arg BUILD_ENVIRONMENT=staging -t enterai-frontend:missing-api ./frontend; then echo 'missing hosted API URL unexpectedly built' >&2; exit 1; fi
+          docker build --build-arg BUILD_ENVIRONMENT=staging --build-arg NEXT_PUBLIC_API_URL=https://api.staging.example.test/api -t "$ENTERAI_FRONTEND_IMAGE" ./frontend
+          docker build -t "$ENTERAI_BACKEND_IMAGE" ./backend
+      - name: Validate release scripts and deployment invariants
+        run: |
+          bash -n scripts/backup.sh scripts/verify_restore.sh
+          docker run --rm -v "$PWD:/work:ro" koalaman/shellcheck-alpine:stable scripts/backup.sh scripts/verify_restore.sh
+          ! rg -n 'up -d --build|StrictHostKeyChecking=accept-new|:latest' .github/workflows/deploy.yml docker-compose.prod.yml
+          rg -n 'sha-\$REF|containerimage.digest|ENTERAI_BACKEND_IMAGE|ENTERAI_FRONTEND_IMAGE' .github/workflows/deploy.yml
 
   security-scans:
     runs-on: ubuntu-latest

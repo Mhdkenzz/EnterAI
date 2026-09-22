@@ -1,88 +1,155 @@
-name: Production Deploy
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
+name: Guarded Staging Deploy
 
-# Everything here is real and runs on every push: images actually build (a
-# broken Dockerfile fails this workflow, not just a "deploy" step that never
-# looked at them). Whether the deploy job then goes on to touch a real server
-# depends entirely on whether DEPLOY_HOST is configured -- see check-target
-# below. It is not configured for this repo as of this workflow: `gh secret
-# list` returns nothing. That job step is written and structurally correct,
-# but has never been exercised against a live host, and must not be reported
-# as validated until it has.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit SHA to release (defaults to this workflow SHA)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: enterai-staging-release
+  cancel-in-progress: false
+
 jobs:
-  build-images:
+  preflight:
     runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - id: ref
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          IMAGE_REGISTRY: ${{ secrets.IMAGE_REGISTRY }}
+          IMAGE_REPOSITORY: ${{ secrets.IMAGE_REPOSITORY }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          STAGING_PUBLIC_API_URL: ${{ vars.STAGING_PUBLIC_API_URL }}
+          STAGING_READINESS_URL: ${{ vars.STAGING_READINESS_URL }}
+        run: |
+          set -euo pipefail
+          for name in IMAGE_REGISTRY IMAGE_REPOSITORY REGISTRY_USERNAME REGISTRY_PASSWORD DEPLOY_HOST DEPLOY_SSH_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS DEPLOY_PATH STAGING_PUBLIC_API_URL STAGING_READINESS_URL; do
+            test -n "${!name}" || { echo "::error::Required staging setting $name is unset"; exit 1; }
+          done
+          case "$STAGING_PUBLIC_API_URL" in https://*) ;; *) echo "::error::STAGING_PUBLIC_API_URL must use HTTPS"; exit 1;; esac
+          case "$STAGING_READINESS_URL" in https://*) ;; *) echo "::error::STAGING_READINESS_URL must use HTTPS"; exit 1;; esac
+          case "$DEPLOY_PATH" in /*[!A-Za-z0-9._/-]*|/|"") echo "::error::DEPLOY_PATH must be a safe absolute path"; exit 1;; esac
+          ref="${REQUESTED_REF:-$WORKFLOW_SHA}"
+          case "$ref" in *[!0-9a-f]*|????????????????????????????????????????) echo "::error::ref must be a full lowercase SHA"; exit 1;; esac
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+  build-and-push:
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: staging
+    outputs:
+      backend_image: ${{ steps.images.outputs.backend_image }}
+      frontend_image: ${{ steps.images.outputs.frontend_image }}
     steps:
       - uses: actions/checkout@v4
-      - name: Build backend image
-        run: docker build -t enterai-backend:${{ github.sha }} ./backend
-      - name: Build frontend image
-        run: docker build -t enterai-frontend:${{ github.sha }} ./frontend
-
-  check-target:
-    runs-on: ubuntu-latest
-    outputs:
-      configured: ${{ steps.check.outputs.configured }}
-    steps:
-      - id: check
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.IMAGE_REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: Build and publish exact-SHA images
+        id: images
+        env:
+          REGISTRY: ${{ secrets.IMAGE_REGISTRY }}
+          REPOSITORY: ${{ secrets.IMAGE_REPOSITORY }}
+          REF: ${{ needs.preflight.outputs.ref }}
+          NEXT_PUBLIC_API_URL: ${{ vars.STAGING_PUBLIC_API_URL }}
         run: |
-          if [ -n "${{ secrets.DEPLOY_HOST }}" ] && [ -n "${{ secrets.DEPLOY_SSH_KEY }}" ] && [ -n "${{ secrets.DEPLOY_SSH_USER }}" ]; then
-            echo "configured=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "configured=false" >> "$GITHUB_OUTPUT"
-          fi
+          set -euo pipefail
+          backend="$REGISTRY/$REPOSITORY/backend:sha-$REF"
+          frontend="$REGISTRY/$REPOSITORY/frontend:sha-$REF"
+          docker buildx build --push --metadata-file backend.json --tag "$backend" ./backend
+          docker buildx build --push --metadata-file frontend.json --tag "$frontend" --build-arg BUILD_ENVIRONMENT=staging --build-arg NEXT_PUBLIC_API_URL="$NEXT_PUBLIC_API_URL" ./frontend
+          backend_digest=$(jq -r '."containerimage.digest"' backend.json)
+          frontend_digest=$(jq -r '."containerimage.digest"' frontend.json)
+          test "$backend_digest" != null && test "$frontend_digest" != null
+          echo "backend_image=$REGISTRY/$REPOSITORY/backend@$backend_digest" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=$REGISTRY/$REPOSITORY/frontend@$frontend_digest" >> "$GITHUB_OUTPUT"
 
   deploy:
+    needs: [preflight, build-and-push]
     runs-on: ubuntu-latest
-    needs: [build-images, check-target]
-    if: needs.check-target.outputs.configured == 'true'
-    environment: production
+    environment: staging
     steps:
       - uses: actions/checkout@v4
-      - name: Record the currently-deployed SHA for rollback
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+      - name: Pin SSH host key
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
         run: |
-          mkdir -p ~/.ssh
-          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key \
-            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "cd ${{ secrets.DEPLOY_PATH || '/opt/enterai' }} && git rev-parse HEAD" > /tmp/previous_sha.txt || echo "none" > /tmp/previous_sha.txt
-      - name: Deploy this commit
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+      - name: Upload reviewed deployment bundle and immutable image references
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          REF: ${{ needs.preflight.outputs.ref }}
+          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
         run: |
-          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key \
-            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "cd ${{ secrets.DEPLOY_PATH || '/opt/enterai' }} && \
-             git fetch origin main && git checkout ${{ github.sha }} && \
-             docker compose -f docker-compose.prod.yml up -d --build"
-      - name: Health check
+          set -euo pipefail
+          release="release-$REF"
+          mkdir "$release"
+          cp docker-compose.prod.yml "$release/"
+          mkdir "$release/deploy" "$release/scripts"
+          cp deploy/nginx.conf "$release/deploy/"
+          cp scripts/backup.sh "$release/scripts/"
+          printf 'ENTERAI_BACKEND_IMAGE=%s\nENTERAI_FRONTEND_IMAGE=%s\n' "$BACKEND_IMAGE" "$FRONTEND_IMAGE" > "$release/images.env"
+          tar -C "$release" -czf "$release.tgz" .
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$DEPLOY_SSH_USER@$DEPLOY_HOST" "install -d -m 750 '$DEPLOY_PATH/releases/$REF'"
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$release.tgz" "$DEPLOY_SSH_USER@$DEPLOY_HOST:$DEPLOY_PATH/releases/$REF/release.tgz"
+      - name: Pull, migrate once, then start staged replicas
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          REF: ${{ needs.preflight.outputs.ref }}
         run: |
-          for attempt in $(seq 1 30); do
-            curl -fsS "${{ secrets.DEPLOY_HEALTH_URL || format('https://{0}/health', secrets.DEPLOY_HOST) }}" && exit 0
-            sleep 5
-          done
-          echo "::error::New deployment did not become healthy"
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$DEPLOY_SSH_USER@$DEPLOY_HOST" "sh -s -- '$DEPLOY_PATH' '$REF'" <<'REMOTE'
+          set -euo pipefail
+          path=$1; ref=$2; release="$path/releases/$ref"
+          tar -xzf "$release/release.tgz" -C "$release"
+          cd "$release"
+          test -r "$path/.env" || { echo 'missing host .env' >&2; exit 1; }
+          cat images.env >> "$path/.env.release"
+          trap 'rm -f "$path/.env.release"' EXIT
+          docker compose --env-file "$path/.env" --env-file "$path/.env.release" pull
+          docker compose --env-file "$path/.env" --env-file "$path/.env.release" up -d db redis minio minio-init
+          docker compose --env-file "$path/.env" --env-file "$path/.env.release" run --rm migrate
+          docker compose --env-file "$path/.env" --env-file "$path/.env.release" up -d --no-build --scale api=2 api web lb
+          test "$(docker compose --env-file "$path/.env" --env-file "$path/.env.release" ps -q api | wc -l)" = 2
+          REMOTE
+      - name: Verify externally reachable readiness
+        env:
+          STAGING_READINESS_URL: ${{ vars.STAGING_READINESS_URL }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do curl --fail --silent --show-error "$STAGING_READINESS_URL" && exit 0; sleep 5; done
+          echo "::error::Staging did not become ready. Database rollback is deliberately manual."
           exit 1
-      - name: Roll back on failed health check
-        if: failure()
-        run: |
-          previous="$(cat /tmp/previous_sha.txt)"
-          if [ "$previous" = "none" ]; then
-            echo "::error::No previous SHA recorded -- cannot roll back automatically. Restore from the last known-good backup (docs/RESTORE_RUNBOOK.md)."
-            exit 1
-          fi
-          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/deploy_key \
-            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_HOST }}" \
-            "cd ${{ secrets.DEPLOY_PATH || '/opt/enterai' }} && \
-             git checkout $previous && docker compose -f docker-compose.prod.yml up -d --build"
-
-  no-target-configured:
-    runs-on: ubuntu-latest
-    needs: [build-images, check-target]
-    if: needs.check-target.outputs.configured == 'false'
-    steps:
-      - run: |
-          echo "::notice::No deployment target is configured (DEPLOY_HOST/DEPLOY_SSH_USER/DEPLOY_SSH_KEY repo secrets are unset)."
-          echo "::notice::Images for $GITHUB_SHA built successfully above. Deployment is manual -- see docs/DEPLOY.md."

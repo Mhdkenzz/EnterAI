@@ -18,6 +18,7 @@ import os
 import time
 from collections import defaultdict
 from uuid import uuid4
+from .deployment_config import is_deployment_environment
 
 logger = logging.getLogger("enterai.ratelimit")
 
@@ -106,7 +107,7 @@ def build_rate_limiter(max_calls: int, window_seconds: float, namespace: str):
     url = os.getenv("REDIS_URL", "").strip()
     environment = os.getenv("ENVIRONMENT", "development").strip().lower()
     if not url:
-        if environment == "production":
+        if is_deployment_environment(environment):
             raise RuntimeError(
                 "REDIS_URL must be set in production. Rate limits are shared state:"
                 " without Redis every replica enforces its own private allowance, so"

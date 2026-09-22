@@ -183,13 +183,14 @@ def test_stripe_webhook_route_is_actually_wired_into_the_app(monkeypatch):
     and separately could not even be imported (bare `Depends` with no import) --
     so every real Stripe webhook call would have hit a 404. Both must stay fixed."""
     from fastapi.testclient import TestClient
+    from uuid import uuid4
     from app.main import app
     monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_route_test")
     with TestClient(app) as c:
         bad = c.post("/webhooks/stripe", content=b"{}", headers={"Stripe-Signature": "t=1,v1=bad"})
         assert bad.status_code == 400
 
-        body, header = _signed_request({"id": "evt_route_1", "type": "ping"}, "whsec_route_test")
+        body, header = _signed_request({"id": f"evt_route_{uuid4().hex}", "type": "ping"}, "whsec_route_test")
         good = c.post("/webhooks/stripe", content=body, headers={"Stripe-Signature": header})
         assert good.status_code == 200
         assert good.json()["status"] == "processed"

@@ -7,6 +7,7 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -22,10 +23,11 @@ from .ratelimit import build_rate_limiter
 from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
 from .storage import get_storage
 from .indexing import index_document
+from .deployment_config import is_deployment_environment, migration_revision_status, validate_deployment_configuration
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
-demo_seed_enabled = os.getenv("ENABLE_DEMO_SEED", "false" if environment == "production" else "true").strip().lower() in {"1", "true", "yes", "on"}
-docs_enabled = os.getenv("ENABLE_API_DOCS", "false" if environment == "production" else "true").strip().lower() in {"1", "true", "yes", "on"}
+demo_seed_enabled = os.getenv("ENABLE_DEMO_SEED", "false" if is_deployment_environment(environment) else "true").strip().lower() in {"1", "true", "yes", "on"}
+docs_enabled = os.getenv("ENABLE_API_DOCS", "false" if is_deployment_environment(environment) else "true").strip().lower() in {"1", "true", "yes", "on"}
 
 app = FastAPI(
     title="Enter AI API",
@@ -124,6 +126,9 @@ _default_origins = [
 ]
 _configured_origins = os.getenv("CORS_ALLOWED_ORIGINS", "").strip()
 allowed_origins = [origin.strip() for origin in _configured_origins.split(",") if origin.strip()] or _default_origins
+_configured_hosts = [host.strip() for host in os.getenv("TRUSTED_HOSTS", "").split(",") if host.strip()]
+allowed_hosts = _configured_hosts or ["localhost", "127.0.0.1", "testserver", "[::1]"]
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
@@ -134,6 +139,7 @@ app.add_middleware(
 
 @app.on_event("startup")
 def startup():
+    validate_deployment_configuration()
     configure_logging()
     with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
     execution.start_background_loop()
@@ -214,8 +220,13 @@ def ensure_task_parent(db, project, parent_id):
 
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 
-@app.get("/health")
-def health(db: Session = Depends(get_db)):
+@app.get("/live")
+def live():
+    """Process liveness: deliberately avoids external dependencies."""
+    return {"ok": True}
+
+
+def _readiness(db: Session) -> dict[str, str]:
     """A replica that answers here but cannot reach its database or shared rate
     limiter is not actually healthy -- a load balancer or orchestrator routing
     traffic to it on a bare 200 would be routing into a wall. Both checks are a
@@ -238,11 +249,30 @@ def health(db: Session = Depends(get_db)):
             checks["redis"] = "error"
     else:
         checks["redis"] = "not_configured"
-    healthy = checks["db"] == "ok" and checks["redis"] != "error"
-    body = {"ok": healthy, **checks}
+    if checks["db"] == "ok":
+        try:
+            current, _actual, _expected = migration_revision_status(db.connection())
+            checks["migrations"] = "ok" if current else "error"
+        except Exception:
+            checks["migrations"] = "error"
+    else:
+        checks["migrations"] = "not_checked"
+    return checks
+
+
+@app.get("/ready")
+def ready(db: Session = Depends(get_db)):
+    checks = _readiness(db)
+    healthy = checks["db"] == "ok" and checks["redis"] != "error" and checks["migrations"] == "ok"
     if not healthy:
-        raise HTTPException(status_code=503, detail=body)
-    return body
+        raise HTTPException(status_code=503, detail={"ok": False, **checks})
+    return {"ok": True, **checks}
+
+
+@app.get("/health")
+def health(db: Session = Depends(get_db)):
+    """Compatibility alias for existing operational checks; use /ready for routing."""
+    return ready(db)
 
 @app.get("/")
 def root(): return {"service": "Enter AI API", "status": "ok"}

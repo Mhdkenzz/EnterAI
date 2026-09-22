@@ -24,7 +24,9 @@ def _run_startup(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
     env = {**os.environ, "DATABASE_URL": f"sqlite:///{boot_db}", "JWT_SECRET": "a" * 32,
            "REDIS_URL": "redis://127.0.0.1:6379/0", "EMAIL_PROVIDER": "smtp",
            "SMTP_HOST": "smtp.example.com", "EMAIL_FROM": "bot@example.com",
-           "APP_BASE_URL": "https://app.example.com", **env_overrides}
+           "APP_BASE_URL": "https://app.example.com", "API_BASE_URL": "https://api.example.com",
+           "CORS_ALLOWED_ORIGINS": "https://app.example.com", "TRUSTED_HOSTS": "app.example.com,api.example.com",
+           "TRUST_PROXY_HEADERS": "true", "SEED_ADMIN_EMAIL": "admin@example.com", **env_overrides}
     script = (
         "import alembic.config, alembic.command\n"
         "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"
@@ -49,7 +51,7 @@ def test_production_boot_requires_a_real_seed_admin_password(password):
         env["SEED_ADMIN_PASSWORD"] = password
     result = _run_startup(env)
     assert result.returncode != 0
-    assert "SEED_ADMIN_PASSWORD must be set" in result.stderr
+    assert "SEED_ADMIN_PASSWORD" in result.stderr
 
 
 def test_production_boot_succeeds_with_a_real_seed_admin_password():

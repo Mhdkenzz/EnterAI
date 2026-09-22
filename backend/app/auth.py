@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .database import get_db
 from .models import User
+from .deployment_config import is_deployment_environment
 
 password_hash = PasswordHash.recommended()
 bearer = HTTPBearer(auto_error=False)
@@ -31,7 +32,7 @@ def _get_jwt_secret() -> str:
     """
     secret = os.getenv("JWT_SECRET")
     environment = os.getenv("ENVIRONMENT", "development").strip().lower()
-    if environment == "production":
+    if is_deployment_environment(environment):
         stripped = (secret or "").strip()
         if not stripped:
             raise RuntimeError(
