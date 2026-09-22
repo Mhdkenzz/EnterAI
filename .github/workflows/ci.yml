@@ -303,8 +303,8 @@ jobs:
         run: |
           bash -n scripts/backup.sh scripts/verify_restore.sh
           docker run --rm -v "$PWD:/work:ro" --entrypoint shellcheck koalaman/shellcheck-alpine:stable /work/scripts/backup.sh /work/scripts/verify_restore.sh
-          ! rg -n 'up -d --build|StrictHostKeyChecking=accept-new|:latest' .github/workflows/deploy.yml docker-compose.prod.yml
-          rg -n 'sha-\$REF|containerimage.digest|ENTERAI_BACKEND_IMAGE|ENTERAI_FRONTEND_IMAGE' .github/workflows/deploy.yml
+          ! grep -En '^[^#]*(up -d --build|StrictHostKeyChecking=accept-new|:latest)' .github/workflows/deploy.yml docker-compose.prod.yml
+          grep -En 'sha-\$REF|containerimage.digest|ENTERAI_BACKEND_IMAGE|ENTERAI_FRONTEND_IMAGE' .github/workflows/deploy.yml
 
   security-scans:
     runs-on: ubuntu-latest
