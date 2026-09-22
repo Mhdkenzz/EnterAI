@@ -154,12 +154,11 @@ services:
       - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
       - ${TLS_CERT_PATH:?set TLS_CERT_PATH}:/etc/nginx/tls/tls.crt:ro
       - ${TLS_KEY_PATH:?set TLS_KEY_PATH}:/etc/nginx/tls/tls.key:ro
-    depends_on: [api]
+    depends_on: [api, web]
 
   web:
     image: ${ENTERAI_FRONTEND_IMAGE:?set ENTERAI_FRONTEND_IMAGE to an immutable image digest}
     restart: unless-stopped
-    depends_on: [lb]
 
 volumes:
   postgres_data:
