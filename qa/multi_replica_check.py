@@ -37,7 +37,8 @@ def check(name: str, condition: bool, detail: str = "") -> None:
         failures.append(name)
 
 
-def request(method: str, path: str, token: str | None = None, body=None, files=None, *, base: str = BASE):
+def request(method: str, path: str, token: str | None = None, body=None, files=None, *, base: str = BASE,
+            host: str | None = None):
     """Returns (status, headers, parsed-body-or-text)."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     if files is not None:
@@ -54,6 +55,8 @@ def request(method: str, path: str, token: str | None = None, body=None, files=N
         headers["Content-Type"] = "application/json"
     else:
         payload = None
+    if host:
+        headers["Host"] = host
     req = urllib.request.Request(f"{base.rstrip('/')}{path}", data=payload, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=30, context=CI_TLS_CONTEXT) as response:
@@ -161,11 +164,13 @@ def shared_confirmation_replay_guard(token: str, containers: list[str]) -> None:
         return
     status, _headers, project = request("POST", "/api/projects", token=token,
                                         base=replica_a,
+                                        host="127.0.0.1",
                                         body={"name": f"Replay Guard {uuid4().hex[:8]}", "code": uuid4().hex[:6].upper()})
     if status >= 400:
         check("project created for confirmation replay check", False, f"{status} {project}")
         return
     status, _headers, proposal = request("POST", "/api/ai/plan", token=token, base=replica_a,
+                                         host="127.0.0.1",
                                          body={"message": "Create task shared confirmation replay check"})
     actions = proposal.get("actions", []) if isinstance(proposal, dict) else []
     token_value = actions[0].get("confirmation_token") if actions else None
@@ -173,8 +178,10 @@ def shared_confirmation_replay_guard(token: str, containers: list[str]) -> None:
         check("Copilot returned a write confirmation", False, f"{status} {proposal}")
         return
     first, _headers, _body = request("POST", "/api/ai/confirm", token=token, base=replica_b,
+                                     host="127.0.0.1",
                                      body={"confirmation_token": token_value})
     second, _headers, _body = request("POST", "/api/ai/confirm", token=token, base=replica_a,
+                                      host="127.0.0.1",
                                       body={"confirmation_token": token_value})
     check("replica B accepts confirmation proposed through replica A", first < 400, str(first))
     check("replica A rejects replica B's replay", second == 409, str(second))
