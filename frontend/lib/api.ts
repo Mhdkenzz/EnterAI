@@ -33,13 +33,20 @@ function describe(detail: unknown, fallback: string): string {
 
 /** A 401 is not always a dead session: re-entering a wrong password to export data or
  *  delete an account is also a 401. Only sign the person out when /me agrees. */
+let sessionCheck: Promise<void> | null = null;
 function checkSession(path: string) {
   if (typeof window === "undefined" || path.startsWith("/auth/")) return;
   const expired = () => window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
   if (path === "/me") return expired();
-  fetch(`${API_BASE}/me`, { credentials: "include" })
-    .then((r) => r.status === 401 && expired())
-    .catch(() => {});
+  // A signed-out page load fails several requests at once; one check answers for all.
+  sessionCheck ??= fetch(`${API_BASE}/me`, { credentials: "include" })
+    .then((r) => {
+      if (r.status === 401) expired();
+    })
+    .catch(() => {})
+    .finally(() => {
+      sessionCheck = null;
+    });
 }
 
 async function failure(response: Response, fallback: string, path: string): Promise<ApiError> {
