@@ -166,3 +166,17 @@ def test_an_invite_cannot_grant_a_role_outside_the_allowed_set(outbox):
         headers, _account = workspace(c)
         assert c.post("/api/auth/invites", headers=headers,
                       json={"email": address("root"), "role": "superuser"}).status_code == 422
+
+
+def test_an_unverified_admin_gets_a_small_invite_allowance(outbox, monkeypatch):
+    """Anyone can sign up as an admin; invites must not be an unmetered spam relay."""
+    from app import accounts
+    from app.ratelimit import SlidingWindowRateLimiter
+    monkeypatch.setattr(accounts, "_UNVERIFIED_INVITE_LIMITER", SlidingWindowRateLimiter(2, 3600))
+    with TestClient(app) as c:
+        headers, _account = workspace(c)
+        for _ in range(2):
+            assert c.post("/api/auth/invites", headers=headers, json={"email": address("ok"), "role": "member"}).status_code == 201
+        blocked = c.post("/api/auth/invites", headers=headers, json={"email": address("spam"), "role": "member"})
+        assert blocked.status_code == 429
+        assert "Confirm your email" in blocked.json()["detail"]

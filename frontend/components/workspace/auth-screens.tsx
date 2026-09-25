@@ -104,9 +104,16 @@ export function AuthScreens({ login, busy, error, signedIn }: any) {
     />
   );
 }
+// `next dev` only: the demo login is public, and a production build must not
+// advertise it (production refuses to seed it anyway).
+const DEMO_LOGIN =
+  process.env.NODE_ENV === "development"
+    ? { email: "admin@demo.enterai.com", password: "enterai-demo" }
+    : { email: "", password: "" };
+
 export function Login({ login, busy, error, forgot, signup }: any) {
-  const [email, setEmail] = useState("admin@demo.enterai.com"),
-    [password, setPassword] = useState("enterai-demo"),
+  const [email, setEmail] = useState(DEMO_LOGIN.email),
+    [password, setPassword] = useState(DEMO_LOGIN.password),
     [ssoEmail, setSsoEmail] = useState(""),
     [sso, setSso] = useState(false);
   const startSso = () => {

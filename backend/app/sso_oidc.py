@@ -18,10 +18,13 @@ endpoint -- only OIDC actually logs anyone in. See docs/PHASE_17_LAUNCH_READINES
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
 import secrets
+import socket
+import time
 from datetime import datetime, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
@@ -30,6 +33,7 @@ from sqlalchemy.orm import Session
 
 from . import secrets_store
 from .auth import SECRET, create_token
+from .deployment_config import is_deployment_environment
 from .models import User
 from .services import log
 from .sso_auth import resolve_role_mapping
@@ -57,12 +61,46 @@ class OIDCError(Exception):
     IdP-supplied string reflected back to the browser."""
 
 
+def _private_network_allowed() -> bool:
+    """Development and tests talk to a fake IdP on localhost. A deployment may opt
+    in explicitly for an IdP on its own private network (single-tenant installs)."""
+    if not is_deployment_environment():
+        return True
+    return os.getenv("SSO_ALLOW_PRIVATE_NETWORK", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def require_public_https_url(url: str) -> None:
+    """Every URL this module fetches is chosen by an organization admin -- the issuer
+    directly, the token and JWKS endpoints through the issuer's discovery document --
+    and on a self-serve SaaS anyone can become an organization admin. Without this
+    check the API server would make requests into its own network on their behalf
+    (cloud metadata, Redis, internal admin ports).
+
+    Resolution happens here and again when the request connects, so a DNS record
+    that flips between the two is not caught; that residual risk is why deployments
+    should also block egress from the API to private ranges at the network layer."""
+    if _private_network_allowed():
+        return
+    parts = urlsplit(url)
+    if parts.scheme != "https" or not parts.hostname:
+        raise OIDCError("Identity provider URLs must use https")
+    try:
+        infos = socket.getaddrinfo(parts.hostname, parts.port or 443, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError) as error:
+        raise OIDCError("Could not resolve this identity provider's host") from error
+    for info in infos:
+        address = ipaddress.ip_address(info[4][0].split("%", 1)[0])
+        if not address.is_global:
+            raise OIDCError("Identity provider URLs must resolve to public addresses")
+
+
 def _http_client() -> httpx.Client:
     """A single seam tests override (see conftest_oidc fixtures / test_sso_oidc.py)
     to point at a local fake IdP instead of the real network. Production always
     gets a plain client with a short timeout -- discovery/token calls block a
-    request thread and must never hang indefinitely."""
-    return httpx.Client(timeout=HTTP_TIMEOUT_SECONDS)
+    request thread and must never hang indefinitely. Redirects are never followed:
+    a public URL must not be able to bounce the request somewhere private."""
+    return httpx.Client(timeout=HTTP_TIMEOUT_SECONDS, follow_redirects=False)
 
 
 def mint_state(idp_id: str, *, nonce: str, code_verifier: str, redirect_uri: str) -> str:
@@ -107,6 +145,7 @@ def discover(db: Session, idp: IdentityProvider, *, force: bool = False) -> dict
     if not force and not stale:
         return idp.oidc_discovery_json
     issuer = idp.oidc_issuer.rstrip("/")
+    require_public_https_url(issuer)
     try:
         with _http_client() as client:
             response = client.get(f"{issuer}/.well-known/openid-configuration")
@@ -161,6 +200,7 @@ def _client_secret(idp: IdentityProvider) -> str:
 def exchange_code(document: dict, idp: IdentityProvider, code: str,
                   redirect_uri: str, code_verifier: str) -> dict:
     client_secret = _client_secret(idp)
+    require_public_https_url(document["token_endpoint"])
     try:
         with _http_client() as client:
             response = client.post(document["token_endpoint"], data={
@@ -180,15 +220,39 @@ def exchange_code(document: dict, idp: IdentityProvider, code: str,
     return body
 
 
-_jwks_clients: dict[str, jwt.PyJWKClient] = {}
+JWKS_TTL_SECONDS = 3600
+_jwks_cache: dict[str, tuple[float, jwt.PyJWKSet]] = {}
 
 
-def _jwks_client(jwks_uri: str) -> jwt.PyJWKClient:
-    client = _jwks_clients.get(jwks_uri)
-    if client is None:
-        client = jwt.PyJWKClient(jwks_uri, timeout=HTTP_TIMEOUT_SECONDS)
-        _jwks_clients[jwks_uri] = client
-    return client
+def _fetch_jwks(jwks_uri: str) -> jwt.PyJWKSet:
+    # Fetched through the same guarded, non-redirecting client as discovery rather
+    # than PyJWKClient, whose urllib fetch follows redirects.
+    require_public_https_url(jwks_uri)
+    try:
+        with _http_client() as client:
+            response = client.get(jwks_uri, headers={"Accept": "application/json"})
+            response.raise_for_status()
+            keys = jwt.PyJWKSet.from_dict(response.json())
+    except (httpx.HTTPError, ValueError, jwt.PyJWTError) as error:
+        raise OIDCError("Could not load this identity provider's signing keys") from error
+    _jwks_cache[jwks_uri] = (time.monotonic(), keys)
+    return keys
+
+
+def _signing_key(jwks_uri: str, id_token: str) -> jwt.PyJWK:
+    kid = jwt.get_unverified_header(id_token).get("kid")
+    cached = _jwks_cache.get(jwks_uri)
+    fresh = cached is not None and time.monotonic() - cached[0] < JWKS_TTL_SECONDS
+    keys = cached[1] if fresh else _fetch_jwks(jwks_uri)
+    for attempt in range(2):
+        matches = [key for key in keys.keys if kid is None or key.key_id == kid]
+        if matches:
+            return matches[0]
+        if attempt == 0 and fresh:
+            keys = _fetch_jwks(jwks_uri)  # the IdP may have rotated its keys since we cached them
+        else:
+            break
+    raise OIDCError("This identity provider's login token was signed with an unknown key")
 
 
 def verify_id_token(document: dict, id_token: str, *, client_id: str, nonce: str) -> dict:
@@ -197,7 +261,7 @@ def verify_id_token(document: dict, id_token: str, *, client_id: str, nonce: str
     no opinion on it; it is this flow's replay defense, not a JWT-standard
     claim)."""
     try:
-        signing_key = _jwks_client(document["jwks_uri"]).get_signing_key_from_jwt(id_token)
+        signing_key = _signing_key(document["jwks_uri"], id_token)
         claims = jwt.decode(
             id_token, signing_key.key, algorithms=["RS256", "ES256"],
             audience=client_id, issuer=document["issuer"],

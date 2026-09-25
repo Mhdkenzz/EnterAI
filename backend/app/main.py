@@ -154,8 +154,10 @@ def shutdown():
     from . import observability as _observability
     _observability.stop_aggregation_background_loop()
 
-class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str
-class Register(BaseModel): organization_name: str = Field(min_length=2); name: str; email: EmailStr; password: str = Field(min_length=8)
+# Upper bounds matter as much as lower ones: an unbounded password is hashed with
+# Argon2 in full on every attempt, and names past the column width fail as a 500.
+class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str = Field(max_length=200)
+class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200)
 class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
 class ProjectUpdate(BaseModel): name: str | None = None; code: str | None = None; description: str | None = None; status: str | None = None; health: str | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
 class TaskIn(BaseModel): project_id: str; title: str; description: str | None = None; parent_id: str | None = None; status: str = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []

@@ -44,6 +44,12 @@ _LOGIN_LIMITER = build_rate_limiter(int(os.getenv("AUTH_LOGIN_RATE_LIMIT_PER_MIN
 _SIGNUP_LIMITER = build_rate_limiter(int(os.getenv("AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE", "5")), 60, "auth-signup")
 _RECOVERY_LIMITER = build_rate_limiter(int(os.getenv("AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE", "5")), 60, "auth-recovery")
 _TOKEN_LIMITER = build_rate_limiter(int(os.getenv("AUTH_TOKEN_RATE_LIMIT_PER_MINUTE", "20")), 60, "auth-token")
+# Invites send mail from our domain to any address an admin types, and anyone can
+# become an admin by signing up -- without a cap this is a free spam relay that
+# burns the sending domain's reputation. Admins who have not confirmed their own
+# address yet get a much smaller allowance, enough to bring in a first few teammates.
+_INVITE_LIMITER = build_rate_limiter(int(os.getenv("INVITE_RATE_LIMIT_PER_HOUR", "50")), 3600, "invite")
+_UNVERIFIED_INVITE_LIMITER = build_rate_limiter(int(os.getenv("UNVERIFIED_INVITE_RATE_LIMIT_PER_HOUR", "5")), 3600, "invite-unverified")
 
 GENERIC_TOKEN_ERROR = "This link is invalid or has expired. Request a new one."
 GENERIC_RECOVERY_REPLY = {"detail": "If that address has an account, we've sent it an email."}
@@ -172,6 +178,11 @@ def resend_verification(data: EmailOnly, request: Request, db: Session = Depends
 @router.post("/api/auth/invites", status_code=201)
 def create_invite(data: InviteIn, user: User = Depends(human_admin), db: Session = Depends(get_db)):
     address = normalize(data.email)
+    limiter = _INVITE_LIMITER if user.email_verified_at else _UNVERIFIED_INVITE_LIMITER
+    if not limiter.allow(user.organization_id):
+        detail = ("Too many invitations this hour. Try again later." if user.email_verified_at
+                  else "Confirm your email address to send more invitations.")
+        raise HTTPException(429, detail)
     existing = db.scalar(select(User).where(func.lower(User.email) == address))
     if existing:
         # Not an enumeration concern: the caller is an authenticated admin, and an

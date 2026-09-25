@@ -407,3 +407,31 @@ def test_sso_callback_with_missing_state_redirects_to_a_generic_ui_error():
     redirected = urlparse(response.headers["location"])
     assert redirected.path == "/sso/callback"
     assert parse_qs(redirected.fragment) == {"sso_error": ["1"]}
+
+
+@pytest.mark.parametrize("url", [
+    "https://127.0.0.1/.well-known/openid-configuration",
+    "https://169.254.169.254/latest/meta-data",  # cloud metadata
+    "https://10.0.0.5",
+    "https://[::1]",
+    "http://8.8.8.8",  # public, but not https
+])
+def test_deployments_refuse_idp_urls_that_reach_private_networks(monkeypatch, url):
+    """Any self-serve org admin chooses these URLs; the API must not fetch its own network for them."""
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("SSO_ALLOW_PRIVATE_NETWORK", raising=False)
+    with pytest.raises(sso_oidc.OIDCError):
+        sso_oidc.require_public_https_url(url)
+
+
+def test_deployments_accept_public_https_idp_urls_and_can_opt_into_private_ones(monkeypatch):
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("SSO_ALLOW_PRIVATE_NETWORK", raising=False)
+    sso_oidc.require_public_https_url("https://8.8.8.8/.well-known/openid-configuration")
+    monkeypatch.setenv("SSO_ALLOW_PRIVATE_NETWORK", "true")
+    sso_oidc.require_public_https_url("https://10.0.0.5")
+
+
+def test_the_oidc_client_never_follows_redirects():
+    with sso_oidc._http_client() as client:
+        assert client.follow_redirects is False

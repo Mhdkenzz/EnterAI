@@ -82,9 +82,10 @@ class BillingService:
     def process_webhook(self, payload: bytes, sig_header: str) -> dict:
         """Verify Stripe webhook signature and process event idempotently."""
         import stripe  # optional import; fails gracefully if unavailable
-        environment = os.getenv("ENVIRONMENT", "development").strip().lower()
+        from .deployment_config import is_deployment_environment
         webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET", "").strip()
-        if environment == "production" and not webhook_secret:
+        # Staging is internet-facing too, so it gets the same rule as production.
+        if is_deployment_environment() and not webhook_secret:
             # "whsec_test" is a public, well-known placeholder. Falling back to it
             # in production would let anyone who knows that convention forge
             # signed billing events (fake "subscription active", etc.).

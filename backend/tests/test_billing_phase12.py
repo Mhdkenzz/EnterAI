@@ -169,9 +169,11 @@ def test_webhook_accepts_a_validly_signed_event_and_is_idempotent(db_session, mo
     assert second["status"] == "skipped"  # same event id replayed -- not double-applied
 
 
-def test_webhook_fails_closed_in_production_without_a_configured_secret(db_session, monkeypatch):
+@pytest.mark.parametrize("environment", ["production", "staging"])
+def test_webhook_fails_closed_in_deployments_without_a_configured_secret(db_session, monkeypatch, environment):
+    """Staging is internet-facing too; the public whsec_test placeholder must not verify there."""
     from app.billing_service import BillingService
-    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.setenv("ENVIRONMENT", environment)
     monkeypatch.delenv("STRIPE_WEBHOOK_SECRET", raising=False)
     service = BillingService(db_session)
     with pytest.raises(RuntimeError, match="STRIPE_WEBHOOK_SECRET must be set"):

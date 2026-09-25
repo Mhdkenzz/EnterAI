@@ -7,7 +7,12 @@ than anything it is testing. Raising them here keeps the control switched on --
 hundreds of logins in a run through.
 """
 import os
+import tempfile
 
+# Without an explicit DATABASE_URL the app falls back to ./enterai.db, the local
+# development database; a test run would fill it with hundreds of throwaway orgs.
+# Default to a fresh file per run instead. CI and Postgres runs set their own.
+os.environ.setdefault("DATABASE_URL", "sqlite:///" + os.path.join(tempfile.mkdtemp(prefix="enterai-tests-"), "test.db"))
 os.environ.setdefault("AUTH_LOGIN_RATE_LIMIT_PER_MINUTE", "100000")
 os.environ.setdefault("AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE", "100000")
 os.environ.setdefault("AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE", "100000")
