@@ -5,11 +5,12 @@ Every export and every deletion request re-checks the caller's password even
 though they are already signed in -- a stolen bearer token should not be enough
 to walk off with a full data export or start an account deletion clock.
 """
+import os
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import current_user, verify_password
@@ -23,7 +24,8 @@ from . import privacy_service
 router = APIRouter(prefix="/api/privacy", tags=["privacy"])
 admin_router = APIRouter(prefix="/api/admin/privacy", tags=["admin", "privacy"])
 
-CURRENT_TOS_VERSION = "2026-01-01"
+# Bump TERMS_VERSION when the published terms change; acceptance is recorded per version.
+CURRENT_TOS_VERSION = os.getenv("TERMS_VERSION", "2026-01-01").strip()[:20]
 
 
 class Reauth(BaseModel):
@@ -58,6 +60,15 @@ def export_my_data(data: Reauth, user: User = Depends(current_user), db: Session
 @router.post("/delete-account", status_code=201)
 def delete_my_account(data: Reauth, user: User = Depends(current_user), db: Session = Depends(get_db)):
     _reauth(user, data)
+    if user.role == "admin":
+        # Same rule as demotion in admin.py: a workspace must never be left without
+        # a human who can administer it (billing, members, deletion).
+        others = db.scalar(select(func.count()).select_from(User).where(
+            User.organization_id == user.organization_id, User.kind == "human", User.active.is_(True),
+            User.role == "admin", User.id != user.id)) or 0
+        if not others:
+            raise HTTPException(409, "You are this workspace's only administrator. Make someone else an "
+                                     "administrator first, or delete the whole workspace instead.")
     request = privacy_service.request_deletion(
         db, organization_id=user.organization_id, requested_by=user.id,
         target_type="user", target_id=user.id, reason=data.reason)

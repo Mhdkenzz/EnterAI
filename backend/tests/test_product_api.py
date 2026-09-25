@@ -121,3 +121,36 @@ def test_a_normal_docx_still_imports():
     from app.services import extract_document_text
     doc = _zip({"word/document.xml": b"<w:p><w:t>Launch plan</w:t></w:p>"})
     assert extract_document_text("brief.docx", doc) == "Launch plan"
+
+
+def _pdf(text_lines: list[str]) -> bytes:
+    """A real PDF whose text lives in a compressed content stream, as in any exported brief."""
+    import io
+    from pypdf import PdfWriter
+    from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
+    writer = PdfWriter()
+    page = writer.add_blank_page(612, 792)
+    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),
+                             NameObject("/BaseFont"): NameObject("/Helvetica")})
+    page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})})
+    ops = " 0 -20 Td ".join(f"({line}) Tj" for line in text_lines)
+    stream = DecodedStreamObject()
+    stream.set_data(f"BT /F1 12 Tf 72 720 Td {ops} ET".encode())
+    page[NameObject("/Contents")] = writer._add_object(stream)
+    page.compress_content_streams()
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
+
+
+def test_pdf_briefs_import_their_real_text():
+    from app.services import extract_document_text
+    text = extract_document_text("brief.pdf", _pdf(["Project: Website relaunch", "Migrate the checkout flow"]))
+    assert text == "Project: Website relaunch\nMigrate the checkout flow"
+
+
+def test_a_damaged_pdf_is_a_clean_rejection():
+    import pytest
+    from app.services import extract_document_text
+    with pytest.raises(ValueError, match="could not be read"):
+        extract_document_text("brief.pdf", b"%PDF-1.4 not really a pdf")

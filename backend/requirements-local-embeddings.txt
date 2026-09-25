@@ -1,0 +1,4 @@
+# EMBEDDING_PROVIDER=local only: runs the embedding model inside the API process.
+# Pulls in PyTorch (several GB with CUDA), so the image installs it only when built
+# with --build-arg LOCAL_EMBEDDINGS=true.
+sentence-transformers==3.0.1

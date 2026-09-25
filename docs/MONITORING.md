@@ -1,7 +1,9 @@
 # Minimum staging monitoring
 
-Use any approved monitoring system; this repository deliberately does not add a
-vendor agent. Configure alerts for:
+Use any approved monitoring system. For application errors the API speaks the
+Sentry protocol when `SENTRY_DSN` is set -- Sentry itself or a self-hosted
+GlitchTip -- with cookies, auth headers, IPs and request bodies stripped from every
+event. It is off by default. Configure alerts for:
 
 - HTTPS endpoint unavailable and public `/ready` non-200;
 - API/nginx/container restart loops and sustained elevated 5xx responses;

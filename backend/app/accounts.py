@@ -48,6 +48,45 @@ _TOKEN_LIMITER = build_rate_limiter(int(os.getenv("AUTH_TOKEN_RATE_LIMIT_PER_MIN
 # become an admin by signing up -- without a cap this is a free spam relay that
 # burns the sending domain's reputation. Admins who have not confirmed their own
 # address yet get a much smaller allowance, enough to bring in a first few teammates.
+# Per-address budget for failed sign-ins, on top of the per-IP limiter: credential
+# stuffing spread across many IPs still hits one account at a time. Keyed by the
+# address whether or not an account exists, so the limit itself reveals nothing.
+# Deliberately generous and short so it cannot be used to lock a real user out for long.
+_ACCOUNT_LOGIN_FAILURES = build_rate_limiter(int(os.getenv("AUTH_ACCOUNT_FAILURES_PER_15_MIN", "20")), 900, "auth-account-failures")
+
+
+# The passwords credential-stuffing lists try first. Length alone (8+) lets all of
+# these through; a short explicit list stops the worst without a dependency.
+_COMMON_PASSWORDS = frozenset("""
+password password1 password12 password123 passw0rd p@ssw0rd 12345678 123456789 1234567890 0123456789
+87654321 11111111 00000000 12341234 11223344 qwertyui qwerty12 qwerty123 qwertyuiop 1q2w3e4r 1qaz2wsx
+zaq12wsx asdfghjk asdf1234 abcd1234 abc12345 iloveyou letmein1 welcome1 welcome123 admin123 administrator
+changeme trustno1 sunshine princess football baseball superman starwars dragon12 monkey12 master12
+""".split())
+
+
+def password_problem(password: str, email: str = "") -> str | None:
+    lowered = password.lower()
+    local = email.split("@", 1)[0].lower()
+    if lowered in _COMMON_PASSWORDS or len(set(lowered)) <= 2:
+        return "That password is too common. Choose something harder to guess."
+    if local and len(local) >= 4 and local in lowered:
+        return "Your password should not contain your email address."
+    return None
+
+
+def require_strong_password(password: str, email: str = "") -> None:
+    problem = password_problem(password, email)
+    if problem:
+        raise HTTPException(422, problem)
+
+
+def enforce_account_login_budget(address: str) -> None:
+    """Called only after a failed attempt; each call spends one unit of the budget."""
+    if not _ACCOUNT_LOGIN_FAILURES.allow(address):
+        raise HTTPException(429, "Too many failed sign-in attempts for this account. Wait 15 minutes, or reset your password.")
+
+
 _INVITE_LIMITER = build_rate_limiter(int(os.getenv("INVITE_RATE_LIMIT_PER_HOUR", "50")), 3600, "invite")
 _UNVERIFIED_INVITE_LIMITER = build_rate_limiter(int(os.getenv("UNVERIFIED_INVITE_RATE_LIMIT_PER_HOUR", "5")), 3600, "invite-unverified")
 
@@ -101,6 +140,16 @@ class AcceptInvite(BaseModel):
     token: str = Field(min_length=20, max_length=500)
     name: str = Field(min_length=1, max_length=160)
     password: str = Field(min_length=8, max_length=200)
+    accept_terms: bool = False
+
+
+def record_terms_acceptance(user: User, accepted: bool) -> None:
+    """Signup and invite acceptance are where people agree to the terms (the form
+    requires the box whenever terms are published), so record it there, per version."""
+    if accepted:
+        from .privacy import CURRENT_TOS_VERSION
+        user.tos_accepted_at = datetime.utcnow()
+        user.tos_version = CURRENT_TOS_VERSION
 
 
 def issue_verification(db: Session, user: User) -> str:
@@ -135,6 +184,7 @@ def reset_password(data: ResetPassword, request: Request, db: Session = Depends(
     user = db.get(User, token.user_id)
     if not user or not user.active or user.kind != "human":
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
+    require_strong_password(data.password, user.email)
     user.password_hash = hash_password(data.password)
     # Whoever triggered this reset may be holding a stolen session; retiring the
     # epoch invalidates every token minted before now, including their own.
@@ -146,6 +196,33 @@ def reset_password(data: ResetPassword, request: Request, db: Session = Depends(
     log(db, user.organization_id, user.id, "user", user.id, "password_reset_completed")
     db.commit()
     return {"detail": "Your password has been changed. Sign in with your new password."}
+
+
+class ChangePassword(BaseModel):
+    current_password: str = Field(max_length=200)
+    new_password: str = Field(min_length=8, max_length=200)
+
+
+@router.post("/api/me/password")
+def change_password(data: ChangePassword, request: Request, response: Response,
+                    user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Change the password while signed in. Every other session ends (as with a reset);
+    this one continues on a fresh token, so the person is not signed out mid-task."""
+    from .auth import verify_password
+    if user.kind != "human":
+        raise HTTPException(403, "Only people have passwords")
+    if not verify_password(data.current_password, user.password_hash):
+        enforce_account_login_budget(normalize(user.email))
+        raise HTTPException(400, "Your current password is incorrect.")
+    require_strong_password(data.new_password, user.email)
+    user.password_hash = hash_password(data.new_password)
+    user.session_epoch = (user.session_epoch or 0) + 1
+    invalidate_auth_tokens(db, user.id, PASSWORD_RESET)
+    log(db, user.organization_id, user.id, "user", user.id, "password_changed")
+    db.commit()
+    token = create_token(user)
+    set_session_cookie(response, token)
+    return {"detail": "Password changed. Other sessions have been signed out.", "token": token}
 
 
 @router.post("/api/auth/verify-email")
@@ -179,6 +256,10 @@ def resend_verification(data: EmailOnly, request: Request, db: Session = Depends
 def create_invite(data: InviteIn, user: User = Depends(human_admin), db: Session = Depends(get_db)):
     address = normalize(data.email)
     limiter = _INVITE_LIMITER if user.email_verified_at else _UNVERIFIED_INVITE_LIMITER
+    from .billing_service import BillingService
+    seat_problem = BillingService(db).seat_problem(user.organization_id, reinviting=address)
+    if seat_problem:
+        raise HTTPException(402, seat_problem)
     if not limiter.allow(user.organization_id):
         detail = ("Too many invitations this hour. Try again later." if user.email_verified_at
                   else "Confirm your email address to send more invitations.")
@@ -256,11 +337,13 @@ def accept_invite(data: AcceptInvite, request: Request, response: Response, db: 
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
     if db.scalar(select(User).where(func.lower(User.email) == invite.email)):
         raise HTTPException(409, "An account already exists for this address. Sign in instead.")
+    require_strong_password(data.password, invite.email)
     # Organization and role come from the invite row, never from the request body.
     user = User(organization_id=invite.organization_id, name=data.name.strip(), email=invite.email,
                 password_hash=hash_password(data.password), role=invite.role,
                 avatar="".join(part[0] for part in data.name.split() if part)[:2].upper() or "EA",
                 email_verified_at=datetime.utcnow())
+    record_terms_acceptance(user, data.accept_terms)
     db.add(user)
     invite.accepted_at = datetime.utcnow()
     db.flush()

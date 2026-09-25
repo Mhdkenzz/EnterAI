@@ -30,7 +30,7 @@ The API docs are available for local development at `http://localhost:8000/docs`
 
 Frontend: `cd frontend && npm install && npm run dev`.
 
-Backend: `cd backend && python -m venv .venv && .venv/bin/pip install -r requirements.txt && .venv/bin/uvicorn app.main:app --reload`.
+Backend: `cd backend && python -m venv .venv && .venv/bin/pip install -r requirements-dev.txt && .venv/bin/uvicorn app.main:app --reload`.
 
 Set `DATABASE_URL=sqlite:///./enterai.db` for a local no-Docker backend; Docker Compose uses PostgreSQL automatically.
 

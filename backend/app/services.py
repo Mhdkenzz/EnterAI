@@ -174,6 +174,32 @@ class _ZipBudget:
         return data
 
 
+MAX_PDF_PAGES = 200
+
+
+def _pdf_text(content: bytes) -> str:
+    """Real text extraction: PDF page text is almost always inside compressed content
+    streams, so scanning the raw bytes for printable runs (the previous approach)
+    returned mostly font names and object syntax. Pages and total text are bounded
+    for the same reason as MAX_EXTRACTED_BYTES; pypdf also caps each stream it inflates."""
+    from pypdf import PdfReader
+    from pypdf.errors import PdfReadError
+    try:
+        reader = PdfReader(BytesIO(content))
+        if reader.is_encrypted:
+            raise ValueError("This PDF is password-protected. Remove the password and upload it again.")
+        parts, total = [], 0
+        for page in reader.pages[:MAX_PDF_PAGES]:
+            text = page.extract_text() or ""
+            total += len(text)
+            if total > MAX_EXTRACTED_BYTES:
+                raise ValueError("This document expands to more text than can be imported.")
+            parts.append(text)
+    except PdfReadError as error:
+        raise ValueError("This PDF could not be read. Check that the file is not damaged.") from error
+    return "\n".join(part.strip() for part in parts if part.strip())
+
+
 def extract_document_text(filename: str, content: bytes) -> str:
     """Raises ValueError (answered as 415) for anything it cannot read, including a
     corrupt or truncated Office archive, rather than letting it surface as a 500."""
@@ -190,14 +216,18 @@ def _extract_document_text(filename: str, content: bytes) -> str:
     if suffix == ".docx":
         with ZipFile(BytesIO(content)) as archive:
             xml = _ZipBudget(archive).read("word/document.xml").decode("utf-8", errors="replace")
-        return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", xml)).strip()
+        # Keep paragraph breaks -- the draft's name and suggested tasks come from lines --
+        # and join text runs without a space: Word splits single words across runs.
+        xml = re.sub(r"</w:p>|<w:br\s*/>", "\n", xml)
+        xml = re.sub(r"<w:tab\s*/>", " ", xml)
+        text = html.unescape(re.sub(r"<[^>]+>", "", xml))
+        lines = (re.sub(r"[ \t\r\f\v]+", " ", line).strip() for line in text.split("\n"))
+        return "\n".join(line for line in lines if line)
     if suffix == ".doc":
         printable = content.decode("latin-1", errors="ignore")
         return " ".join(re.findall(r"[A-Za-z][A-Za-z0-9 ,.;:()/'-]{8,}", printable))
     if suffix == ".pdf":
-        # Optional dependency-free fallback keeps uploads safe even without a PDF parser.
-        printable = content.decode("latin-1", errors="ignore")
-        return " ".join(re.findall(r"[A-Za-z][A-Za-z0-9 ,.;:()/'-]{8,}", printable))
+        return _pdf_text(content)
     if suffix == ".xlsx":
         with ZipFile(BytesIO(content)) as archive:
             budget = _ZipBudget(archive)

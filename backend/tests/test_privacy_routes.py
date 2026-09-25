@@ -41,7 +41,9 @@ def test_export_with_correct_password_returns_a_scoped_download():
 
 def test_delete_account_requires_reauth_then_creates_a_cancelable_pending_request():
     with TestClient(app) as c:
-        headers, account = workspace(c)
+        _admin, account = workspace(c)
+        # A member: the only administrator may not delete themselves (see test_collaboration).
+        _user, headers = _member(account["organization"]["id"], "test-password")
         denied = c.post("/api/privacy/delete-account", json={"password": "wrong"}, headers=headers)
         assert denied.status_code == 401
 

@@ -262,3 +262,21 @@ def test_scheduler_loop_failure_is_logged_and_audited(monkeypatch, caplog):
         assert any(getattr(r, 'event', None) == 'scheduler_error' for r in caplog.records)
         assert 'PRIVATE-' not in caplog.text
 
+
+
+def test_error_reporting_is_off_without_a_dsn_and_scrubs_secrets_when_on(monkeypatch):
+    import sentry_sdk
+    from app import observability
+    monkeypatch.delenv("SENTRY_DSN", raising=False)
+    assert observability.configure_error_reporting() is False
+
+    captured = {}
+    monkeypatch.setenv("SENTRY_DSN", "https://public@example.invalid/1")
+    monkeypatch.setattr(sentry_sdk, "init", lambda **options: captured.update(options))
+    assert observability.configure_error_reporting() is True
+    assert captured["send_default_pii"] is False and captured["max_request_body_size"] == "never"
+    event = {"request": {"cookies": {"enterai_session": "jwt"}, "data": {"password": "p"},
+                         "headers": {"Authorization": "Bearer jwt", "Accept": "application/json"}}}
+    scrubbed = captured["before_send"](event, None)["request"]
+    assert "cookies" not in scrubbed and "data" not in scrubbed
+    assert scrubbed["headers"] == {"Authorization": "[filtered]", "Accept": "application/json"}

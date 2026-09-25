@@ -1,9 +1,11 @@
 import os
 import hashlib
+import re
+import secrets
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 import jwt
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,11 +14,11 @@ from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from .auth import CONFIRMATION_SECRET, CSRF_HEADER, clear_session_cookie, create_token, current_user, hash_password, set_session_cookie, verify_password
+from .auth import CONFIRMATION_SECRET, CSRF_HEADER, SESSION_COOKIE, clear_session_cookie, revoke_session_token, create_token, current_user, hash_password, set_session_cookie, verify_password
 from .database import Base, engine, get_db
 from .models import Activity, AgentMessage, Attachment, Comment, CopilotConfirmation, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
 from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
-from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging
+from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging, configure_error_reporting
 from . import execution
 from .hierarchy import MAX_HIERARCHY_AGENTS, desired_counts, reconcile_agents
 from .ratelimit import build_rate_limiter
@@ -28,6 +30,8 @@ from .deployment_config import is_deployment_environment, migration_revision_sta
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
 demo_seed_enabled = os.getenv("ENABLE_DEMO_SEED", "false" if is_deployment_environment(environment) else "true").strip().lower() in {"1", "true", "yes", "on"}
 docs_enabled = os.getenv("ENABLE_API_DOCS", "false" if is_deployment_environment(environment) else "true").strip().lower() in {"1", "true", "yes", "on"}
+# Before the app is built, so the SDK's FastAPI integration hooks every request.
+configure_error_reporting()
 
 app = FastAPI(
     title="Enter AI API",
@@ -104,6 +108,7 @@ from .admin import router as admin_router, human_admin
 from . import accounts, email as mailer
 from .accounts import router as accounts_router, enforce, _LOGIN_LIMITER, _SIGNUP_LIMITER
 from .billing_webhook import router as billing_webhook_router
+from .billing_routes import router as billing_router
 from .privacy import router as privacy_router, admin_router as admin_privacy_router
 from . import privacy_service
 from .sso_routes import router_admin as sso_admin_router, router_login as sso_login_router, router_scim as scim_router
@@ -115,6 +120,7 @@ app.include_router(scim_router)
 app.include_router(enterprise_router)
 app.include_router(accounts_router)
 app.include_router(billing_webhook_router)
+app.include_router(billing_router)
 app.include_router(privacy_router)
 app.include_router(admin_privacy_router)
 app.openapi = custom_openapi
@@ -142,10 +148,13 @@ def startup():
     validate_deployment_configuration()
     configure_logging()
     with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
+    from .billing_service import sync_plans_from_env
+    with next(get_db()) as db: sync_plans_from_env(db)
     execution.start_background_loop()
     privacy_service.start_background_loop()
     from . import observability as _observability
     _observability.start_aggregation_background_loop()
+    mailer.start_retry_loop()
 
 @app.on_event("shutdown")
 def shutdown():
@@ -153,15 +162,16 @@ def shutdown():
     privacy_service.stop_background_loop()
     from . import observability as _observability
     _observability.stop_aggregation_background_loop()
+    mailer.stop_retry_loop()
 
 # Upper bounds matter as much as lower ones: an unbounded password is hashed with
 # Argon2 in full on every attempt, and names past the column width fail as a 500.
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str = Field(max_length=200)
-class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200)
+class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200); accept_terms: bool = False
 class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
 class ProjectUpdate(BaseModel): name: str | None = None; code: str | None = None; description: str | None = None; status: str | None = None; health: str | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
-class TaskIn(BaseModel): project_id: str; title: str; description: str | None = None; parent_id: str | None = None; status: str = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []
-class TaskUpdate(BaseModel): title: str | None = None; description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
+class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; status: str = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []
+class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
 class CommentIn(BaseModel): body: str = Field(min_length=1)
 class TeamIn(BaseModel): name: str; description: str | None = None
 class AIRequest(BaseModel): message: str = Field(min_length=1, max_length=4000); project_id: str | None = None
@@ -183,6 +193,17 @@ def project_out(p: Project, db: Session):
 def task_out(t: Task, db: Session):
     assignee = db.get(User,t.assignee_id) if t.assignee_id else None
     return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"title":t.title,"description":t.description,"status":t.status,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"due_date":t.due_date,"labels":t.labels,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
+def notify(db, recipient_id: str | None, actor: User, title: str, body: str | None = None, href: str | None = None) -> None:
+    """Tell a person about something someone else did to their work. Never the actor
+    themselves, and never an agent (agents have no inbox to read)."""
+    if not recipient_id or recipient_id == actor.id:
+        return
+    recipient = db.get(User, recipient_id)
+    if recipient is None or recipient.kind != "human" or not recipient.active or recipient.organization_id != actor.organization_id:
+        return
+    db.add(Notification(user_id=recipient_id, title=title[:220], body=body, href=href))
+
+
 def ensure_project(db, user, project_id):
     project = db.get(Project, project_id)
     if not project or project.organization_id != user.organization_id: raise HTTPException(404,"Project not found")
@@ -289,21 +310,24 @@ def register(data: Register, request: Request, response: Response, db: Session =
 
     A taken email address is answered with the same message as any other rejected
     signup, and the notice that an account already exists goes to the address
-    itself rather than to whoever submitted the form. An organization name clash is
-    reported plainly -- names are chosen, not secret, and the person needs to know
-    to pick another one.
+    itself rather than to whoever submitted the form. Organization names need not be
+    unique -- refusing a taken name would reveal who is already a customer -- so the
+    slug gets a random suffix when the plain one is in use.
     """
     enforce(_SIGNUP_LIMITER, request)
     address = accounts.normalize(data.email)
-    slug = data.organization_name.lower().replace(" ","-")[:70]
+    accounts.require_strong_password(data.password, address)
+    slug = re.sub(r"[^a-z0-9]+", "-", data.organization_name.lower()).strip("-")[:70] or "workspace"
     existing = db.scalar(select(User).where(func.lower(User.email) == address))
     if existing:
         organization = db.get(Organization, existing.organization_id)
         mailer.send_existing_account_notice(address, organization.name if organization else "Enter AI")
         raise HTTPException(409, "We couldn't create an account with those details.")
-    if db.scalar(select(Organization).where(Organization.slug == slug)): raise HTTPException(409,"Organization already exists")
+    while db.scalar(select(Organization.id).where(Organization.slug == slug)):
+        slug = f"{slug[:70]}-{secrets.token_hex(3)}"
     org = Organization(name=data.organization_name, slug=slug); db.add(org); db.flush()
     user = User(organization_id=org.id,name=data.name,email=address,password_hash=hash_password(data.password),role="admin",avatar="".join(x[0] for x in data.name.split())[:2].upper()); db.add(user)
+    accounts.record_terms_acceptance(user, data.accept_terms)
     ensure_hierarchy_config(db, org.id)
     from .billing_service import ensure_trial_subscription
     ensure_trial_subscription(db, org.id)
@@ -323,8 +347,11 @@ def login(data: SignIn, request: Request, response: Response, db: Session = Depe
         # of the time a real one takes, which turns the login form into an account
         # enumeration oracle no matter how generic the message is.
         verify_password(data.password, _ABSENT_USER_HASH)
+        accounts.enforce_account_login_budget(accounts.normalize(data.email))
         raise HTTPException(401,"Incorrect email or password")
-    if not verify_password(data.password,user.password_hash): raise HTTPException(401,"Incorrect email or password")
+    if not verify_password(data.password,user.password_hash):
+        accounts.enforce_account_login_budget(accounts.normalize(data.email))
+        raise HTTPException(401,"Incorrect email or password")
     if not user.active: raise HTTPException(401,"Incorrect email or password")
     from .enterprise_models import SessionPolicy
     policy = db.scalar(select(SessionPolicy).where(SessionPolicy.organization_id == user.organization_id))
@@ -335,9 +362,13 @@ def login(data: SignIn, request: Request, response: Response, db: Session = Depe
     return {"token":token,"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 
 @app.post("/api/auth/logout", status_code=204)
-def logout(response: Response):
-    """Ends the browser's cookie session. A bearer token held by the CLI is not
-    affected; revoking every session is what a password reset (epoch bump) is for."""
+def logout(request: Request, response: Response, db: Session = Depends(get_db)):
+    """Ends the calling session -- the browser's cookie, or the bearer token the CLI
+    sends -- and revokes that token server-side, so a copy of it stops working too.
+    Other sessions are untouched; ending all of them is what a password reset is for."""
+    header = request.headers.get("authorization", "")
+    raw = header[7:].strip() if header.lower().startswith("bearer ") else request.cookies.get(SESSION_COOKIE)
+    revoke_session_token(db, raw)
     clear_session_cookie(response)
 
 @app.get("/api/me")
@@ -435,7 +466,9 @@ async def add_project_document(project_id:str,file:UploadFile=File(...),user:Use
 def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     p=ensure_project(db,user,data.project_id)
     ensure_org_assignee(db,user,data.assignee_id); ensure_task_parent(db,p,data.parent_id)
-    t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title); db.commit(); return task_out(t,db)
+    t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title)
+    notify(db, t.assignee_id, user, f"{user.name} assigned you “{t.title}”", p.name, f"project:{p.id}")
+    db.commit(); return task_out(t,db)
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
@@ -452,6 +485,8 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
     if "status" in data.model_fields_set and data.status != before:
         t.completed_at = datetime.now(timezone.utc) if data.status == "done" else None
     sync_agent_task_pointers(db, t, before_assignee_id)
+    if t.assignee_id != before_assignee_id:
+        notify(db, t.assignee_id, user, f"{user.name} assigned you “{t.title}”", p.name, f"project:{p.id}")
     log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status); db.commit(); return task_out(t,db)
 def detach_task_references(db, task):
     """PostgreSQL enforces the foreign keys SQLite ignores, so every row pointing at
@@ -485,7 +520,10 @@ def comments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_
 def add_comment(task_id:str,data:CommentIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented"); db.commit(); return {"id":c.id,"body":c.body}
+    p=ensure_project(db,user,t.project_id); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented")
+    for recipient in {t.assignee_id, t.reporter_id} - {None}:
+        notify(db, recipient, user, f"{user.name} commented on “{t.title}”", data.body[:280], f"project:{p.id}")
+    db.commit(); return {"id":c.id,"body":c.body}
 @app.post("/api/tasks/{task_id}/attachments",status_code=201)
 async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
@@ -494,6 +532,49 @@ async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends
     raw=await file.read()
     if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Attachments must be 5 MB or smaller")
     path=get_storage().save("task-attachments", file.filename or "attachment", raw); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename or "attachment",path=path,content_type=file.content_type); db.add(a); log(db,user.organization_id,user.id,"task",task_id,"attachment_uploaded"); db.commit(); return {"id":a.id,"file_name":a.file_name}
+
+def _download(identifier: str, file_name: str) -> Response:
+    """Uploaded files are served as downloads, never rendered: an uploaded .html or
+    .svg shown inline would run as script on the API's origin."""
+    try:
+        content = get_storage().read(identifier)
+    except (FileNotFoundError, OSError):
+        raise HTTPException(404, "This file is no longer available") from None
+    except Exception as error:
+        if type(error).__name__ in {"NoSuchKey", "ClientError"}:
+            raise HTTPException(404, "This file is no longer available") from None
+        raise
+    from urllib.parse import quote
+    safe = re.sub(r'[^A-Za-z0-9._ -]', "_", file_name)[:150] or "download"
+    return Response(content, media_type="application/octet-stream", headers={
+        "Content-Disposition": f"attachment; filename=\"{safe}\"; filename*=UTF-8''{quote(file_name[:150])}",
+    })
+
+
+@app.get("/api/tasks/{task_id}/attachments")
+def list_attachments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    t=db.get(Task,task_id)
+    if not t: raise HTTPException(404,"Task not found")
+    ensure_project(db,user,t.project_id)
+    rows=db.scalars(select(Attachment).where(Attachment.task_id==task_id).order_by(Attachment.created_at)).all()
+    return [{"id":a.id,"file_name":a.file_name,"content_type":a.content_type,"created_at":a.created_at} for a in rows]
+
+
+@app.get("/api/attachments/{attachment_id}/download")
+def download_attachment(attachment_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    a=db.get(Attachment,attachment_id)
+    t=db.get(Task,a.task_id) if a else None
+    if not a or not t: raise HTTPException(404,"Attachment not found")
+    ensure_project(db,user,t.project_id)
+    return _download(a.path, a.file_name)
+
+
+@app.get("/api/project-documents/{document_id}/download")
+def download_project_document(document_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    d=db.get(ProjectDocument,document_id)
+    if not d or d.organization_id!=user.organization_id: raise HTTPException(404,"Document not found")
+    return _download(d.path, d.file_name)
+
 
 @app.get("/api/teams")
 def teams(user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -631,7 +712,9 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
         raise HTTPException(503, "Unable to issue the Copilot proposal. Try again later.") from error
     return result
 @app.get("/api/notifications")
-def notifications(user:User=Depends(current_user),db:Session=Depends(get_db)): return [{"id":n.id,"title":n.title,"body":n.body,"href":n.href,"read":n.read,"created_at":n.created_at} for n in db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc())).all()]
+def notifications(user:User=Depends(current_user),db:Session=Depends(get_db)):
+    # The newest 100: an inbox that returns every notification ever sent grows without bound.
+    return [{"id":n.id,"title":n.title,"body":n.body,"href":n.href,"read":n.read,"created_at":n.created_at} for n in db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc()).limit(100)).all()]
 @app.patch("/api/notifications/{notification_id}/read")
 def read_notification(notification_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     n=db.get(Notification,notification_id)
@@ -641,8 +724,13 @@ def read_notification(notification_id:str,user:User=Depends(current_user),db:Ses
 def activity(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [{"id":a.id,"action":a.action,"entity_type":a.entity_type,"detail":legacy_detail(a.detail or {}),"created_at":a.created_at,"actor":user_out(db.get(User,a.actor_id)) if a.actor_id else None} for a in db.scalars(select(Activity).where(Activity.organization_id==user.organization_id).order_by(Activity.created_at.desc()).limit(50)).all()]
 @app.get("/api/search")
-def search(q:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    term=f"%{q}%"; ps=db.scalars(select(Project).where(Project.organization_id==user.organization_id,or_(Project.name.ilike(term),Project.code.ilike(term)))).all(); ts=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id,Task.title.ilike(term))).all(); return {"projects":[project_out(p,db) for p in ps],"tasks":[task_out(t,db) for t in ts]}
+def search(q:str=Query(min_length=1, max_length=200),user:User=Depends(current_user),db:Session=Depends(get_db)):
+    # `%` and `_` are LIKE wildcards: escaped, "100%" finds "100%" rather than everything.
+    # Capped, because a one-letter query would otherwise serialize every task in the org.
+    term="%"+q.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%"
+    ps=db.scalars(select(Project).where(Project.organization_id==user.organization_id,or_(Project.name.ilike(term,escape="\\"),Project.code.ilike(term,escape="\\"))).limit(20)).all()
+    ts=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id,Task.title.ilike(term,escape="\\")).limit(30)).all()
+    return {"projects":[project_out(p,db) for p in ps],"tasks":[task_out(t,db) for t in ts]}
 @app.get("/api/risks")
 def risks(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id,Project.health=="at_risk")).all()]
@@ -653,8 +741,9 @@ AI_PLAN_RATE_LIMITER = build_rate_limiter(
 
 def _enforce_ai_usage_limit(db: Session, organization_id: str) -> None:
     from .billing_service import BillingService
-    if not BillingService(db).enforce_plan_limit(organization_id, "ai_calls", 1):
-        raise HTTPException(402, "This workspace's AI usage limit has been reached for the current plan.")
+    problem = BillingService(db).entitlement_problem(organization_id, "ai_calls", 1)
+    if problem:
+        raise HTTPException(402, problem)
 
 
 def _record_ai_usage(db: Session, organization_id: str) -> None:

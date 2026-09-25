@@ -65,6 +65,38 @@ class AccessQueryFilter(logging.Filter):
         return True
 
 
+def configure_error_reporting() -> bool:
+    """Send unhandled exceptions to a Sentry-protocol endpoint when SENTRY_DSN is set
+    (Sentry itself, or a self-hosted GlitchTip). Off by default. Personal data stays
+    out of events: no cookies, auth headers, IPs or request bodies -- bodies carry
+    passwords and single-use tokens, and cookies carry the session."""
+    dsn = os.getenv("SENTRY_DSN", "").strip()
+    if not dsn:
+        return False
+    import sentry_sdk
+
+    def _scrub(event, _hint):
+        request = event.get("request") or {}
+        request.pop("cookies", None)
+        request.pop("data", None)
+        headers = request.get("headers") or {}
+        for name in list(headers):
+            if name.lower() in {"authorization", "cookie", "x-enterai-client", "stripe-signature"}:
+                headers[name] = "[filtered]"
+        return event
+
+    sentry_sdk.init(
+        dsn=dsn,
+        environment=os.getenv("ENVIRONMENT", "development"),
+        release=os.getenv("RELEASE_SHA") or None,
+        send_default_pii=False,
+        max_request_body_size="never",
+        traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0")),
+        before_send=_scrub,
+    )
+    return True
+
+
 def configure_logging():
     # Preserve operator-provided handlers/levels; configure only the default case.
     if not logger.handlers:

@@ -11,6 +11,22 @@ as a root-owned executable that receives the verified archive path and uploads i
 to an approved S3-compatible or other off-host destination. Alert on nonzero exit
 and test restore access, not merely object existence.
 
+## Uploaded files
+
+The database dump does not contain uploaded documents and attachments; those live in
+object storage. The `objectstore-backup` service in `docker-compose.prod.yml` runs
+`python -m app.backup_objects --loop`, mirroring `STORAGE_BUCKET` to
+`BACKUP_OBJECTS_BUCKET` every `BACKUP_INTERVAL_SECONDS`. Objects are immutable (each
+upload gets a new key), so the mirror copies new keys and removes keys deleted at the
+source -- which is what makes an account or organization deletion reach the backup.
+Point-in-time recovery comes from the destination bucket: enable versioning with a
+noncurrent-version expiry equal to `BACKUP_RETENTION_DAYS`.
+
+To restore, copy the objects back from the backup bucket (or a prior version of it)
+into a fresh `STORAGE_BUCKET`, restore the matching database archive, then spot-check
+that a few `project_documents.path` / `attachments.path` values resolve. Restore the
+files and the database from the same point in time, or rows will reference missing files.
+
 ## Required disposable restore drill
 
 Never restore automatically over the active staging database. Create a separately

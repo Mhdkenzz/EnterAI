@@ -15,9 +15,11 @@ can accidentally put a raw token into a subject line or a log.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import smtplib
+from datetime import timedelta
 from dataclasses import dataclass
 from email.message import EmailMessage as MIMEMessage
 from .deployment_config import is_deployment_environment
@@ -127,12 +129,118 @@ def send(message: EmailMessage) -> None:
     """Delivery failures never propagate to the caller. Every send sits behind an
     endpoint that must not reveal whether an address exists, and an exception would
     turn a 202 into a 500 for real addresses only -- an enumeration oracle built
-    out of error handling."""
+    out of error handling.
+
+    A failed first attempt is queued in `email_outbox` and retried with backoff by
+    the background loop below, so a brief relay outage delays a verification or
+    reset email instead of silently losing it."""
     try:
         get_email_provider().send(message)
     except Exception as error:
         logger.warning("email_send_failed", extra={"event": "email_send_failed",
                                                    "error": type(error).__name__})
+        _enqueue(message, error)
+
+
+# Retry schedule: 1, 2, 4 ... minutes, capped at an hour. Messages older than the
+# longest-lived link they can carry (a 7-day invite) are abandoned rather than sent late.
+MAX_ATTEMPTS = int(os.getenv("EMAIL_MAX_ATTEMPTS", "12"))
+MAX_AGE = timedelta(days=7)
+RETRY_INTERVAL_SECONDS = float(os.getenv("EMAIL_RETRY_INTERVAL_SECONDS", "60"))
+_RETRY_LOCK_NAMESPACE = 0x454D4C  # "EML"
+
+
+def _backoff(attempts: int) -> timedelta:
+    return timedelta(minutes=min(2 ** max(attempts - 1, 0), 60))
+
+
+def _enqueue(message: EmailMessage, error: Exception) -> None:
+    from .database import SessionLocal
+    from .models import EmailOutbox, utc_naive
+    try:
+        with SessionLocal() as db:
+            db.add(EmailOutbox(recipient=message.to, subject=message.subject[:300], body=message.body,
+                               attempts=1, next_attempt_at=utc_naive() + _backoff(1),
+                               last_error=type(error).__name__[:200]))
+            db.commit()
+    except Exception as queue_error:  # the caller's request must still succeed
+        logger.error("email_enqueue_failed", extra={"event": "email_enqueue_failed",
+                                                    "error": type(queue_error).__name__})
+
+
+def retry_pending(limit: int = 50) -> int:
+    """Attempt every queued message that is due. Returns how many were delivered."""
+    from sqlalchemy import select
+    from .database import SessionLocal
+    from .models import EmailOutbox, utc_naive
+    delivered = 0
+    with SessionLocal() as db:
+        now = utc_naive()
+        due = db.scalars(select(EmailOutbox).where(EmailOutbox.status == "pending",
+                                                   EmailOutbox.next_attempt_at <= now)
+                         .order_by(EmailOutbox.next_attempt_at).limit(limit)).all()
+        for row in due:
+            if row.attempts >= MAX_ATTEMPTS or now - row.created_at > MAX_AGE or row.body is None:
+                row.status, row.body = "abandoned", None
+                logger.error("email_abandoned", extra={"event": "email_abandoned", "attempts": row.attempts,
+                                                       "subject": row.subject})
+                continue
+            try:
+                get_email_provider().send(EmailMessage(row.recipient, row.subject, row.body))
+            except Exception as error:
+                row.attempts += 1
+                row.next_attempt_at = now + _backoff(row.attempts)
+                row.last_error = type(error).__name__[:200]
+                continue
+            row.status, row.body = "sent", None
+            delivered += 1
+        db.commit()
+    return delivered
+
+
+def _with_retry_lock(fn) -> None:
+    """One replica drains the queue at a time, so a message is never sent twice."""
+    from sqlalchemy import text
+    from .database import engine
+    if engine.dialect.name != "postgresql":
+        fn()
+        return
+    connection = engine.connect()
+    acquired = False
+    try:
+        acquired = bool(connection.execute(text("SELECT pg_try_advisory_lock(:ns, 1)"),
+                                           {"ns": _RETRY_LOCK_NAMESPACE}).scalar())
+        if acquired:
+            fn()
+    finally:
+        if acquired:
+            connection.execute(text("SELECT pg_advisory_unlock(:ns, 1)"), {"ns": _RETRY_LOCK_NAMESPACE})
+        connection.close()
+
+
+_retry_task: asyncio.Task | None = None
+
+
+async def _retry_loop() -> None:
+    while True:
+        try:
+            await asyncio.to_thread(_with_retry_lock, retry_pending)
+        except Exception:
+            logger.exception("email_retry_tick_failed")
+        await asyncio.sleep(RETRY_INTERVAL_SECONDS)
+
+
+def start_retry_loop() -> None:
+    global _retry_task
+    if _retry_task is None and RETRY_INTERVAL_SECONDS > 0:
+        _retry_task = asyncio.ensure_future(_retry_loop())
+
+
+def stop_retry_loop() -> None:
+    global _retry_task
+    if _retry_task is not None:
+        _retry_task.cancel()
+        _retry_task = None
 
 
 def send_verification(to: str, name: str, token: str) -> None:

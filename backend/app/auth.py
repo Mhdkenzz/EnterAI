@@ -1,6 +1,7 @@
 import hashlib
 import ipaddress
 import os
+import secrets
 from datetime import datetime, timedelta, timezone
 import jwt
 from fastapi import Depends, HTTPException, Request, Response, status
@@ -71,8 +72,31 @@ def create_token(user: User):
     # reset bumps the user's epoch, which retires every token issued before it --
     # the only way to end a stolen session when sessions are stateless JWTs.
     now = datetime.now(timezone.utc)
+    # `jti` lets sign-out revoke this one token without ending the user's other sessions.
     return jwt.encode({"kind": SESSION_TOKEN_KIND, "sub": user.id, "epoch": user.session_epoch or 0,
+                       "jti": secrets.token_urlsafe(16),
                        "iat": int(now.timestamp()), "exp": now + timedelta(days=7)}, SECRET, algorithm="HS256")
+
+
+def revoke_session_token(db: Session, raw_token: str | None) -> None:
+    """Record a signed-out session so it stops authenticating now rather than at its
+    expiry. Invalid, foreign or pre-`jti` tokens are ignored: sign-out never fails."""
+    from .models import RevokedSession, utc_naive
+    if not raw_token:
+        return
+    try:
+        payload = jwt.decode(raw_token, SECRET, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        return
+    jti = payload.get("jti")
+    if payload.get("kind") != SESSION_TOKEN_KIND or not jti:
+        return
+    expires_at = datetime.fromtimestamp(int(payload["exp"]), timezone.utc).replace(tzinfo=None)
+    # Rows are only needed until the token would have expired anyway.
+    db.query(RevokedSession).filter(RevokedSession.expires_at < utc_naive()).delete(synchronize_session=False)
+    if db.get(RevokedSession, jti) is None:
+        db.add(RevokedSession(jti=jti, expires_at=expires_at))
+    db.commit()
 
 
 # The browser dashboard holds its session in an httpOnly cookie rather than in
@@ -171,6 +195,10 @@ def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db
     try: payload = jwt.decode(raw_token, SECRET, algorithms=["HS256"])
     except jwt.PyJWTError: raise HTTPException(status_code=401, detail="Invalid session")
     if payload.get("kind") != SESSION_TOKEN_KIND: raise HTTPException(status_code=401, detail="Invalid session")
+    if payload.get("jti"):
+        from .models import RevokedSession
+        if db.scalar(select(RevokedSession.jti).where(RevokedSession.jti == payload["jti"])) is not None:
+            raise HTTPException(status_code=401, detail="Invalid session")
     user = db.scalar(select(User).where(User.id == payload.get("sub")))
     if not user or not user.active: raise HTTPException(status_code=401, detail="User unavailable")
     # Tokens minted before this file existed carry no epoch; treating that as 0

@@ -1,14 +1,52 @@
 from __future__ import annotations
-import os, logging, hashlib, hmac
-from datetime import datetime, timezone
+import json, os, logging, hashlib, hmac
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from .models import Organization, User
+from .models import Organization, User, utc_naive
 from .database import get_db
 
 log = logging.getLogger(__name__)
+
+# What an organization gets before it pays. Operators tune these per deployment;
+# paid plans come from BILLING_PLANS (see sync_plans_from_env).
+TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "14"))
+TRIAL_AI_CALL_LIMIT = int(os.getenv("TRIAL_AI_CALL_LIMIT", "200"))
+TRIAL_SEAT_LIMIT = int(os.getenv("TRIAL_SEAT_LIMIT", "0")) or None  # 0 = no seat cap during the trial
+# past_due keeps access while Stripe retries the card (its dunning window); an
+# organization is only cut off once Stripe gives up and cancels.
+ENTITLED_STATUSES = ("trial", "active", "past_due")
+
+
+def sync_plans_from_env(db: Session) -> None:
+    """Upsert the plan catalog from BILLING_PLANS, a JSON list such as
+    [{"name": "Team", "stripe_price_id": "price_123", "price_cents": 2900,
+      "currency": "USD", "seat_limit": 25, "ai_usage_limit": 2000}].
+    Limits are per billing period; omit one to leave it uncapped. Malformed
+    configuration stops startup rather than silently selling the wrong plan."""
+    from .billing_models import BillingPlan
+    raw = os.getenv("BILLING_PLANS", "").strip()
+    if not raw:
+        return
+    try:
+        plans = json.loads(raw)
+        assert isinstance(plans, list)
+        for entry in plans:
+            price_id = str(entry["stripe_price_id"]).strip()
+            plan = db.scalar(select(BillingPlan).where(BillingPlan.stripe_plan_id == price_id))
+            if plan is None:
+                plan = BillingPlan(stripe_plan_id=price_id)
+                db.add(plan)
+            plan.name = str(entry["name"])[:120]
+            plan.price_cents = int(entry.get("price_cents", 0))
+            plan.currency = str(entry.get("currency", "USD"))[:3].upper()
+            plan.seat_limit = entry.get("seat_limit")
+            plan.ai_usage_limit = entry.get("ai_usage_limit")
+    except (AssertionError, KeyError, TypeError, ValueError) as error:
+        raise RuntimeError("BILLING_PLANS must be a JSON list of plans with name and stripe_price_id") from error
+    db.commit()
 
 
 def ensure_trial_subscription(db: Session, organization_id: str):
@@ -16,18 +54,26 @@ def ensure_trial_subscription(db: Session, organization_id: str):
     at registration (see main.py's register()). Without this, enforce_plan_limit
     denies every org outright -- it treats "no subscription row" as "not entitled
     to any usage" -- so every newly registered org would be locked out of AI
-    features from the first request. A trial row with no plan_id is uncapped
-    (enforce_plan_limit's "plan without a limit" rule), matching today's
-    unmetered behavior until a real plan is actually assigned."""
+    features from the first request. The trial runs for TRIAL_DAYS with
+    TRIAL_AI_CALL_LIMIT AI calls; after that an admin has to choose a plan."""
     from .billing_models import OrganizationSubscription
     existing = db.scalars(select(OrganizationSubscription).where(
         OrganizationSubscription.organization_id == organization_id)).first()
     if existing:
         return existing
-    sub = OrganizationSubscription(organization_id=organization_id, status="trial")
+    sub = OrganizationSubscription(organization_id=organization_id, status="trial",
+                                   trial_ends_at=utc_naive() + timedelta(days=TRIAL_DAYS))
     db.add(sub)
     db.flush()
     return sub
+
+
+class BillingNotConfigured(Exception):
+    """No Stripe secret key: checkout and the customer portal are unavailable."""
+
+
+class NoBillingCustomer(Exception):
+    """The organization has never completed a checkout, so Stripe has no customer for it."""
 
 
 class BillingService:
@@ -48,36 +94,114 @@ class BillingService:
         from .billing_models import UsageRecord
         self.db.add(UsageRecord(organization_id=organization_id, metric=metric, quantity=quantity))
 
-    def enforce_plan_limit(self, organization_id: str, metric: str, usage_quantity: int) -> bool:
-        """Enforce server-side plan limits before allowing additional usage.
+    def subscription(self, organization_id: str):
+        from .billing_models import OrganizationSubscription
+        return self.db.scalars(select(OrganizationSubscription).where(
+            OrganizationSubscription.organization_id == organization_id)).first()
 
-        Denies when the org has no active/trial subscription, or when this usage
-        would push the metric's running total past the plan's configured limit.
-        A plan without a limit set for this metric is treated as uncapped for it,
-        since not every plan caps every metric.
-        """
-        from .billing_models import OrganizationSubscription, BillingPlan, UsageRecord
-        sub = self.db.scalars(select(OrganizationSubscription).where(
-            OrganizationSubscription.organization_id == organization_id,
-            OrganizationSubscription.status.in_(["trial", "active"])
-        )).first()
-        if not sub:
-            return False
-        # Usage tied to existing ProviderCall / ExecutionRun metrics
-        total_usage = self.db.scalars(select(UsageRecord).where(
-            UsageRecord.organization_id == organization_id,
-            UsageRecord.metric == metric
-        )).all()
-        total = sum(u.quantity for u in total_usage)
-        if not sub.plan_id:
-            return True
-        plan = self.db.get(BillingPlan, sub.plan_id)
-        if plan is None:
-            return True
-        limit = {"ai_calls": plan.ai_usage_limit, "seats": plan.seat_limit}.get(metric)
+    @staticmethod
+    def period_start(sub) -> datetime:
+        """Usage limits are per billing period: the whole trial while trialing, the
+        current Stripe period once paying (or a rolling 30 days if Stripe has not
+        reported one yet)."""
+        if sub.status == "trial":
+            return (sub.created_at.replace(tzinfo=None) if sub.created_at else utc_naive() - timedelta(days=TRIAL_DAYS))
+        if sub.current_period_start:
+            return sub.current_period_start.replace(tzinfo=None)
+        return utc_naive() - timedelta(days=30)
+
+    def limit_for(self, sub, metric: str) -> int | None:
+        from .billing_models import BillingPlan
+        plan = self.db.get(BillingPlan, sub.plan_id) if sub.plan_id else None
+        if plan is not None:
+            return {"ai_calls": plan.ai_usage_limit, "seats": plan.seat_limit}.get(metric)
+        if sub.status == "trial":
+            return {"ai_calls": TRIAL_AI_CALL_LIMIT, "seats": TRIAL_SEAT_LIMIT}.get(metric)
+        return None  # active without a mapped plan: set up by hand, not metered
+
+    def usage_since(self, organization_id: str, metric: str, since: datetime) -> int:
+        from .billing_models import UsageRecord
+        return int(self.db.scalar(select(func.coalesce(func.sum(UsageRecord.quantity), 0)).where(
+            UsageRecord.organization_id == organization_id, UsageRecord.metric == metric,
+            UsageRecord.created_at >= since)) or 0)
+
+    def entitlement_problem(self, organization_id: str, metric: str, usage_quantity: int) -> str | None:
+        """Why this usage is not allowed, in words an end user can act on -- or None."""
+        sub = self.subscription(organization_id)
+        if sub is None or sub.status not in ENTITLED_STATUSES:
+            return "This workspace has no active plan. An administrator can choose one in the Admin console."
+        if sub.status == "trial" and sub.trial_ends_at and utc_naive() >= sub.trial_ends_at.replace(tzinfo=None):
+            return "This workspace's free trial has ended. An administrator can choose a plan in the Admin console."
+        limit = self.limit_for(sub, metric)
         if limit is None:
-            return True
-        return total + usage_quantity <= limit
+            return None
+        if self.usage_since(organization_id, metric, self.period_start(sub)) + usage_quantity > limit:
+            period = "trial" if sub.status == "trial" else "billing period"
+            return f"This workspace has used its {limit} AI requests for this {period}. An administrator can upgrade the plan in the Admin console."
+        return None
+
+    def enforce_plan_limit(self, organization_id: str, metric: str, usage_quantity: int) -> bool:
+        """Server-side entitlement check before allowing additional usage: denies
+        without an entitled subscription, after the trial ends, or when this usage
+        would push the current period's total past the plan's limit. A plan without
+        a limit for this metric is uncapped for it."""
+        return self.entitlement_problem(organization_id, metric, usage_quantity) is None
+
+    def seat_problem(self, organization_id: str, adding: int = 1, reinviting: str | None = None) -> str | None:
+        """Seats are people, not metered events: count active humans and outstanding
+        invitations against the plan's seat limit before inviting another. A re-invite
+        replaces that address's pending invitation, so it is not counted twice."""
+        from .models import Invite
+        sub = self.subscription(organization_id)
+        limit = self.limit_for(sub, "seats") if sub else None
+        if limit is None:
+            return None
+        people = self.db.scalar(select(func.count()).select_from(User).where(
+            User.organization_id == organization_id, User.kind == "human", User.active == True)) or 0
+        pending = self.db.scalar(select(func.count()).select_from(Invite).where(
+            Invite.organization_id == organization_id, Invite.accepted_at.is_(None),
+            Invite.revoked_at.is_(None), Invite.expires_at > utc_naive(),
+            func.lower(Invite.email) != (reinviting or "").lower())) or 0
+        if people + pending + adding > limit:
+            return f"Your plan includes {limit} seats and they are all in use or invited. Upgrade the plan to add more people."
+        return None
+
+    def _stripe(self):
+        if not self.stripe_key:
+            raise BillingNotConfigured()
+        import stripe
+        stripe.api_key = self.stripe_key
+        return stripe
+
+    def create_checkout_url(self, organization_id: str, plan, customer_email: str, return_base: str) -> str:
+        """Stripe-hosted Checkout for a subscription. client_reference_id carries the
+        organization through to the checkout.session.completed webhook, which links
+        the resulting customer and subscription back to it."""
+        stripe = self._stripe()
+        sub = self.subscription(organization_id)
+        params = {
+            "mode": "subscription",
+            "line_items": [{"price": plan.stripe_plan_id, "quantity": 1}],
+            "client_reference_id": organization_id,
+            "success_url": f"{return_base}/?billing=success",
+            "cancel_url": f"{return_base}/?billing=canceled",
+            "allow_promotion_codes": True,
+            "metadata": {"organization_id": organization_id},
+        }
+        if sub is not None and sub.stripe_customer_id:
+            params["customer"] = sub.stripe_customer_id
+        else:
+            params["customer_email"] = customer_email
+        return stripe.checkout.Session.create(**params).url
+
+    def create_portal_url(self, organization_id: str, return_base: str) -> str:
+        """Stripe's customer portal: change plan, update the card, download invoices, cancel."""
+        stripe = self._stripe()
+        sub = self.subscription(organization_id)
+        if sub is None or not sub.stripe_customer_id:
+            raise NoBillingCustomer()
+        return stripe.billing_portal.Session.create(customer=sub.stripe_customer_id,
+                                                    return_url=f"{return_base}/").url
 
     def process_webhook(self, payload: bytes, sig_header: str) -> dict:
         """Verify Stripe webhook signature and process event idempotently."""
@@ -149,7 +273,8 @@ class BillingService:
         from .billing_models import OrganizationSubscription
 
         def _from_unix(ts) -> datetime | None:
-            return datetime.fromtimestamp(ts, tz=timezone.utc) if ts else None
+            # Naive UTC, like every column this is compared against (see models.utc_naive).
+            return datetime.fromtimestamp(ts, tz=timezone.utc).replace(tzinfo=None) if ts else None
 
         if event_type == "checkout.session.completed":
             # Checkout's client_reference_id is the standard way to carry our
@@ -197,9 +322,17 @@ class BillingService:
             sub.status = "canceled" if event_type == "customer.subscription.deleted" else stripe_status
         period_start = _from_unix(obj.get("current_period_start"))
         period_end = _from_unix(obj.get("current_period_end"))
+        price_id = ((((obj.get("items") or {}).get("data") or [{}])[0].get("price") or {}).get("id"))
+        if price_id:
+            from .billing_models import BillingPlan
+            plan = self.db.scalar(select(BillingPlan).where(BillingPlan.stripe_plan_id == price_id))
+            if plan is not None:
+                sub.plan_id = plan.id  # plan changes made in the customer portal land here too
+            else:
+                log.warning("Stripe price %s is not in BILLING_PLANS; subscription left unmetered", price_id)
         if period_start:
             sub.current_period_start = period_start
         if period_end:
             sub.current_period_end = period_end
         if event_type == "customer.subscription.deleted":
-            sub.canceled_at = datetime.now(timezone.utc)
+            sub.canceled_at = utc_naive()

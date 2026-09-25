@@ -17,6 +17,7 @@ os.environ.setdefault("AUTH_LOGIN_RATE_LIMIT_PER_MINUTE", "100000")
 os.environ.setdefault("AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE", "100000")
 os.environ.setdefault("AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE", "100000")
 os.environ.setdefault("AUTH_TOKEN_RATE_LIMIT_PER_MINUTE", "100000")
+os.environ.setdefault("AUTH_ACCOUNT_FAILURES_PER_15_MIN", "100000")
 
 import re
 

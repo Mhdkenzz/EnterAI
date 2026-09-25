@@ -186,7 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--name")
     register.add_argument("--email")
     register.add_argument("--password")
-    auth_commands.add_parser("logout", help="Remove the saved token")
+    auth_commands.add_parser("logout", help="Revoke and remove the saved token")
     auth_commands.add_parser("whoami", help="Show the active account")
 
     commands.add_parser("dashboard", help="Show dashboard data")
@@ -270,6 +270,13 @@ def execute(args: argparse.Namespace, client: Client) -> Any:
             persist_token(result["token"], client.base_url)
             return {"message": f"Created {result['organization']['name']} and signed in", "user": result["user"]["name"]}
         if args.auth_command == "logout":
+            # Revoke the token on the server too, so a copy of the saved config stops
+            # working; forget it locally even if the API cannot be reached.
+            if client.token:
+                try:
+                    client.request("POST", "/auth/logout")
+                except CLIError:
+                    pass
             config = load_config(); config.pop("token", None); save_config(config)
             return {"message": "Signed out."}
         return client.request("GET", "/me")

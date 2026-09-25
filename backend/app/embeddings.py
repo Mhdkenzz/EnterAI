@@ -105,7 +105,9 @@ class LocalEmbeddingProvider(BaseEmbeddingProvider):
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         if SentenceTransformer is None:
-            raise RuntimeError("sentence-transformers package not installed. Run: pip install sentence-transformers")
+            raise RuntimeError("EMBEDDING_PROVIDER=local needs sentence-transformers, which the default image "
+                               "leaves out. Build the backend image with --build-arg LOCAL_EMBEDDINGS=true, "
+                               "or install requirements-local-embeddings.txt.")
         self._model = SentenceTransformer(model_name)
         self._dimension = self._model.get_sentence_embedding_dimension()
 

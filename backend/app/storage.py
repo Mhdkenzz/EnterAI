@@ -19,6 +19,7 @@ from uuid import uuid4
 
 class Storage(Protocol):
     def save(self, folder: str, filename: str, content: bytes) -> str: ...
+    def read(self, identifier: str) -> bytes: ...
     def delete(self, identifier: str) -> None: ...
 
 
@@ -38,6 +39,12 @@ class LocalStorage:
         target = target_dir / f"{uuid4()}-{_safe_name(filename)}"
         target.write_bytes(content)
         return str(target)
+
+    def read(self, identifier: str) -> bytes:
+        target = Path(identifier).resolve()
+        if self.root.resolve() not in target.parents:
+            raise FileNotFoundError(identifier)  # same confinement as delete()
+        return target.read_bytes()
 
     def delete(self, identifier: str) -> None:
         target = Path(identifier).resolve()
@@ -59,6 +66,12 @@ class S3Storage:
         key = f"{folder}/{uuid4()}-{_safe_name(filename)}"
         self._client.put_object(Bucket=self.bucket, Key=key, Body=content)
         return f"s3://{self.bucket}/{key}"
+
+    def read(self, identifier: str) -> bytes:
+        prefix = f"s3://{self.bucket}/"
+        if not identifier.startswith(prefix):
+            raise FileNotFoundError(identifier)
+        return self._client.get_object(Bucket=self.bucket, Key=identifier[len(prefix):])["Body"].read()
 
     def delete(self, identifier: str) -> None:
         prefix = f"s3://{self.bucket}/"

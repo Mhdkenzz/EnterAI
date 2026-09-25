@@ -1,3 +1,5 @@
+# Runtime dependencies only -- this is what the production image installs.
+# Tests: requirements-dev.txt. Optional on-box embeddings: requirements-local-embeddings.txt.
 fastapi==0.141.1
 uvicorn[standard]==0.32.1
 sqlalchemy==2.0.36
@@ -10,17 +12,15 @@ boto3==1.43.97
 PyJWT==2.13.0
 pwdlib[argon2]==0.2.1
 python-multipart==0.0.32
-pytest==9.1.1
+# Project brief import: real PDF text extraction.
+pypdf==6.19.0
 httpx==0.28.1
-# Starlette's TestClient imports this package directly as of Starlette 1.x.
-httpx2==2.13.0
-fakeredis[lua]==2.38.0
-moto[s3]==5.2.3
 # Phase 10.1 - RAG
 pgvector==0.2.5
 openai==1.35.0
-sentence-transformers==3.0.1
 tiktoken==0.7.0
+# Optional error reporting (SENTRY_DSN; Sentry or self-hosted GlitchTip).
+sentry-sdk==2.70.0
 # Phase 12 - Billing
 stripe==12.3.0
 # Phase 14.2 - OIDC login + at-rest secret encryption (was only a transitive

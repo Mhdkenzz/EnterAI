@@ -7,11 +7,16 @@ from .database import Base
 
 def uid() -> str: return str(uuid4())
 def now() -> datetime: return datetime.now(timezone.utc)
+# Naive UTC for plain DateTime columns that are compared in queries: an aware
+# value would be shifted by the server's zone on PostgreSQL sessions not set to UTC.
+def utc_naive() -> datetime: return datetime.now(timezone.utc).replace(tzinfo=None)
 
 class Organization(Base):
     __tablename__ = "organizations"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
-    name: Mapped[str] = mapped_column(String(160), unique=True)
+    # Not unique: two unrelated customers may share a name, and a uniqueness error
+    # would tell anyone signing up which companies are already customers.
+    name: Mapped[str] = mapped_column(String(160))
     slug: Mapped[str] = mapped_column(String(80), unique=True)
     execution_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     onboarded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -312,3 +317,30 @@ class DocumentChunk(Base):
     embedding_model: Mapped[str | None] = mapped_column(String(120), nullable=True)
     embedding_dim: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class EmailOutbox(Base):
+    """Mail that could not be delivered on the first attempt, awaiting retry.
+
+    Only failures land here: a message that sends straight away is never stored,
+    because bodies carry single-use links and the database otherwise keeps nothing
+    but hashes of those. A row's body is cleared the moment it is delivered or
+    given up on (the links inside have expired by then anyway)."""
+    __tablename__ = "email_outbox"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    recipient: Mapped[str] = mapped_column(String(320))
+    subject: Mapped[str] = mapped_column(String(300))
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending", index=True)  # pending | sent | abandoned
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    last_error: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: utc_naive())
+
+
+class RevokedSession(Base):
+    """Session tokens ended by sign-out before their natural expiry. A stolen copy of
+    a signed-out token must stop working, not live on for the rest of its 7 days."""
+    __tablename__ = "revoked_sessions"
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)

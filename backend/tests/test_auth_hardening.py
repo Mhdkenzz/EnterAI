@@ -6,13 +6,17 @@ a request takes.
 """
 import time
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
 from app.accounts import client_key, enforce
+from app.database import SessionLocal
 from app.main import app
+from app.models import Organization
 from app.ratelimit import SlidingWindowRateLimiter
 
 from test_observability import workspace
@@ -182,3 +186,81 @@ def test_session_cookie_is_secure_in_deployment_environments(monkeypatch):
     response = Response()
     set_session_cookie(response, "t")
     assert "Secure" not in response.headers["set-cookie"]
+
+
+def test_sign_out_revokes_the_token_itself_not_just_the_cookie():
+    """Clearing a cookie leaves any copied token valid for days; sign-out must end it server-side."""
+    with TestClient(app) as c:
+        _headers, account = workspace(c)
+        first = c.post("/api/auth/login", json={"email": account["user"]["email"], "password": "test-password"}).json()["token"]
+        c.cookies.clear()
+        second = c.post("/api/auth/login", json={"email": account["user"]["email"], "password": "test-password"}).json()["token"]
+        c.cookies.clear()
+        stolen = {"Authorization": f"Bearer {first}"}
+        assert c.get("/api/me", headers=stolen).status_code == 200
+        assert c.post("/api/auth/logout", headers=stolen).status_code == 204
+        assert c.get("/api/me", headers=stolen).status_code == 401
+        # Other sessions of the same user keep working.
+        assert c.get("/api/me", headers={"Authorization": f"Bearer {second}"}).status_code == 200
+
+
+def test_sign_out_with_a_bad_token_still_succeeds():
+    with TestClient(app) as c:
+        assert c.post("/api/auth/logout", headers={"Authorization": "Bearer not-a-jwt"}).status_code == 204
+
+
+def test_two_organizations_may_share_a_name_without_revealing_the_first():
+    """A 'name taken' error would tell anyone which companies are already customers."""
+    with TestClient(app) as c:
+        name = f"Acme {uuid4().hex[:6]}"
+        slugs = set()
+        for _ in range(2):
+            key = uuid4().hex
+            response = c.post("/api/auth/register", json={"organization_name": name, "name": "Owner",
+                                                          "email": f"{key}@example.com", "password": "test-password"})
+            assert response.status_code == 200
+            assert response.json()["organization"]["name"] == name
+        with SessionLocal() as db:
+            slugs = {o.slug for o in db.scalars(select(Organization).where(Organization.name == name))}
+        assert len(slugs) == 2
+
+
+def test_signup_records_which_terms_version_was_accepted():
+    from app.models import User
+    from app.privacy import CURRENT_TOS_VERSION
+    with TestClient(app) as c:
+        key = uuid4().hex
+        c.post("/api/auth/register", json={"organization_name": f"Terms {key}", "name": "Owner", "email": f"{key}@example.com",
+                                           "password": "test-password", "accept_terms": True})
+        with SessionLocal() as db:
+            user = db.scalar(select(User).where(User.email == f"{key}@example.com"))
+            assert user.tos_accepted_at is not None and user.tos_version == CURRENT_TOS_VERSION
+
+
+@pytest.mark.parametrize("password", ["password", "12345678", "aaaaaaaa", "Qwerty123"])
+def test_signup_refuses_the_most_common_passwords(password):
+    with TestClient(app) as c:
+        key = uuid4().hex
+        response = c.post("/api/auth/register", json={"organization_name": f"Weak {key}", "name": "Owner",
+                                                      "email": f"{key}@example.com", "password": password})
+        assert response.status_code == 422 and "too common" in response.json()["detail"]
+
+
+def test_a_password_containing_the_email_name_is_refused():
+    with TestClient(app) as c:
+        response = c.post("/api/auth/register", json={"organization_name": f"Weak {uuid4().hex}", "name": "Owner",
+                                                      "email": "grace.hopper@example.com", "password": "grace.hopper!"})
+        assert response.status_code == 422
+
+
+def test_change_password_needs_the_current_one_and_ends_other_sessions():
+    with TestClient(app) as c:
+        headers, account = workspace(c)
+        other = c.post("/api/auth/login", json={"email": account["user"]["email"], "password": "test-password"}).json()["token"]
+        c.cookies.clear()
+        wrong = c.post("/api/me/password", headers=headers, json={"current_password": "nope-nope", "new_password": "a-new-passphrase"})
+        assert wrong.status_code == 400
+        ok = c.post("/api/me/password", headers=headers, json={"current_password": "test-password", "new_password": "a-new-passphrase"})
+        assert ok.status_code == 200
+        assert c.get("/api/me", headers={"Authorization": f"Bearer {other}"}).status_code == 401
+        assert c.get("/api/me", headers={"Authorization": f"Bearer {ok.json()['token']}"}).status_code == 200

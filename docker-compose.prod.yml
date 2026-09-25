@@ -115,6 +115,12 @@ services:
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_MODEL: ${AI_MODEL:-}
       AI_API_KEY: ${AI_API_KEY:-}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      BILLING_PLANS: ${BILLING_PLANS:-}
+      TRIAL_DAYS: ${TRIAL_DAYS:-14}
+      TRIAL_AI_CALL_LIMIT: ${TRIAL_AI_CALL_LIMIT:-200}
     deploy:
       replicas: 2
       resources:
@@ -145,6 +151,27 @@ services:
       sh -c "while true; do sh /backup.sh || echo 'backup run failed, retrying next interval'; sleep \"$$BACKUP_INTERVAL_SECONDS\"; done"
     depends_on:
       db: {condition: service_healthy}
+
+  # Mirrors uploaded files to BACKUP_OBJECTS_BUCKET (ideally off-site, with
+  # versioning); backup.sh above covers only the database. Like `backup`, it is
+  # outside `lb`'s dependency chain and starts with a plain `docker compose up -d`.
+  objectstore-backup:
+    image: ${ENTERAI_BACKEND_IMAGE:?set ENTERAI_BACKEND_IMAGE to an immutable image digest}
+    restart: unless-stopped
+    command: ["python", "-m", "app.backup_objects", "--loop"]
+    environment:
+      STORAGE_BUCKET: ${STORAGE_BUCKET:?set STORAGE_BUCKET}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://objectstore:9000}
+      AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:?set STORAGE_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:?set STORAGE_SECRET_KEY}
+      BACKUP_OBJECTS_BUCKET: ${BACKUP_OBJECTS_BUCKET:-}
+      BACKUP_OBJECTS_ENDPOINT_URL: ${BACKUP_OBJECTS_ENDPOINT_URL:-}
+      BACKUP_OBJECTS_REGION: ${BACKUP_OBJECTS_REGION:-us-east-1}
+      BACKUP_OBJECTS_ACCESS_KEY: ${BACKUP_OBJECTS_ACCESS_KEY:-}
+      BACKUP_OBJECTS_SECRET_KEY: ${BACKUP_OBJECTS_SECRET_KEY:-}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+    depends_on:
+      objectstore-init: {condition: service_completed_successfully}
 
   lb:
     image: nginx:1.27-alpine

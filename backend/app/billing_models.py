@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Numeric, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 from .database import Base
-from .models import uid, now
+from .models import uid, now, utc_naive
 
 class BillingPlan(Base):
     __tablename__ = "billing_plans"
@@ -27,7 +27,7 @@ class OrganizationSubscription(Base):
     current_period_end: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     trial_ends_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     canceled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive)
 
 class UsageRecord(Base):
     __tablename__ = "usage_records"
@@ -35,8 +35,9 @@ class UsageRecord(Base):
     organization_id: Mapped[str] = mapped_column(String, ForeignKey("organizations.id"), index=True)
     metric: Mapped[str] = mapped_column(String(50))  # ai_calls, seats
     quantity: Mapped[int] = mapped_column(Integer, default=0)
-    period_start: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
+    period_start: Mapped[datetime] = mapped_column(DateTime, default=utc_naive)
+    # Naive UTC: compared against billing-period boundaries (see models.utc_naive).
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive)
 
 class BillingWebHookEvent(Base):
     __tablename__ = "billing_webhook_events"

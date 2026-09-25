@@ -8,8 +8,12 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+COPY requirements.txt requirements-local-embeddings.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+# EMBEDDING_PROVIDER=local needs PyTorch; everything else (openai, deterministic)
+# does not, so it stays out of the default image.
+ARG LOCAL_EMBEDDINGS=false
+RUN if [ "$LOCAL_EMBEDDINGS" = "true" ]; then pip install --no-cache-dir -r requirements-local-embeddings.txt; fi
 
 COPY . .
 

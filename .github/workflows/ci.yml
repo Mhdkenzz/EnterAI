@@ -18,7 +18,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - run: PYTHONPATH=. alembic upgrade head
         env:
           DATABASE_URL: sqlite:///./ci.db
@@ -30,6 +30,10 @@ jobs:
       - run: PYTHONPATH=. alembic upgrade head
         env:
           DATABASE_URL: sqlite:///./ci.db
+      # The CLI is dependency-free and imports as the `cli` package, so its tests
+      # run from the repository root.
+      - run: python -m pytest -q cli/tests
+        working-directory: .
 
   # SQLite silently ignores foreign keys, so it cannot prove the schema or the
   # endpoints are correct on the database production actually runs. This job is a
@@ -70,7 +74,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -r requirements.txt
+      - run: pip install -r requirements-dev.txt
       - name: Migration chain round trips on PostgreSQL
         run: |
           PYTHONPATH=. alembic upgrade head
@@ -106,7 +110,7 @@ jobs:
       - name: Start API
         working-directory: backend
         run: |
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
           # Startup no longer creates schema; migrate the same disposable database.
           DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db PYTHONPATH=. alembic upgrade head
           ENVIRONMENT=ci ENABLE_API_DOCS=false DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db JWT_SECRET=ci-only-secret AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
@@ -170,7 +174,7 @@ jobs:
       - name: Start API
         working-directory: backend
         run: |
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
           pip install schemathesis==4.27.2 --upgrade pytest
           DATABASE_URL=sqlite:///./ci.db PYTHONPATH=. alembic upgrade head
           ENVIRONMENT=ci ENABLE_API_DOCS=true DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
