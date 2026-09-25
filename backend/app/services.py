@@ -5,7 +5,7 @@ import re
 import html
 from io import BytesIO
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import BadZipFile, ZipFile
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -155,13 +155,41 @@ class ProjectDraftProvider:
         }
 
 
+# Office documents are zip archives, and a 5 MB upload can expand to gigabytes. Every
+# member read out of one draws on this budget, so a crafted file fails as a 415
+# instead of exhausting the replica's memory.
+MAX_EXTRACTED_BYTES = 25 * 1024 * 1024
+
+
+class _ZipBudget:
+    def __init__(self, archive: ZipFile):
+        self.archive, self.remaining = archive, MAX_EXTRACTED_BYTES
+
+    def read(self, name: str) -> bytes:
+        with self.archive.open(name) as member:
+            data = member.read(self.remaining + 1)
+        if len(data) > self.remaining:
+            raise ValueError("This document expands to more text than can be imported.")
+        self.remaining -= len(data)
+        return data
+
+
 def extract_document_text(filename: str, content: bytes) -> str:
+    """Raises ValueError (answered as 415) for anything it cannot read, including a
+    corrupt or truncated Office archive, rather than letting it surface as a 500."""
+    try:
+        return _extract_document_text(filename, content)
+    except (BadZipFile, KeyError, EOFError) as error:
+        raise ValueError("This document could not be read. Check that the file is not damaged.") from error
+
+
+def _extract_document_text(filename: str, content: bytes) -> str:
     suffix = Path(filename).suffix.lower()
     if suffix in {".txt", ".md", ".csv", ".json"}:
         return content.decode("utf-8", errors="replace")
     if suffix == ".docx":
-        with ZipFile(__import__("io").BytesIO(content)) as archive:
-            xml = archive.read("word/document.xml").decode("utf-8", errors="replace")
+        with ZipFile(BytesIO(content)) as archive:
+            xml = _ZipBudget(archive).read("word/document.xml").decode("utf-8", errors="replace")
         return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", xml)).strip()
     if suffix == ".doc":
         printable = content.decode("latin-1", errors="ignore")
@@ -172,16 +200,17 @@ def extract_document_text(filename: str, content: bytes) -> str:
         return " ".join(re.findall(r"[A-Za-z][A-Za-z0-9 ,.;:()/'-]{8,}", printable))
     if suffix == ".xlsx":
         with ZipFile(BytesIO(content)) as archive:
+            budget = _ZipBudget(archive)
             shared = ""
             if "xl/sharedStrings.xml" in archive.namelist():
-                shared_xml = archive.read("xl/sharedStrings.xml").decode("utf-8", errors="replace")
+                shared_xml = budget.read("xl/sharedStrings.xml").decode("utf-8", errors="replace")
                 values = []
                 for item in re.findall(r"<si>(.*?)</si>", shared_xml, flags=re.S):
                     values.append(html.unescape(re.sub(r"<[^>]+>", " ", item)).strip())
                 shared = "\n".join(values)
             sheets = []
             for name in sorted(n for n in archive.namelist() if n.startswith("xl/worksheets/sheet") and n.endswith(".xml")):
-                xml = archive.read(name).decode("utf-8", errors="replace")
+                xml = budget.read(name).decode("utf-8", errors="replace")
                 sheets.append(html.unescape(re.sub(r"<[^>]+>", " ", xml)))
             return "\n".join(x for x in [shared, *sheets] if x).strip()
     raise ValueError("Supported documents are PDF, DOC, DOCX, TXT, MD, XLSX, CSV, and JSON.")

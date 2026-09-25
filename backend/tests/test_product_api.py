@@ -82,3 +82,42 @@ def test_copilot_reads_workspace_and_requires_a_signed_confirmation():
 
         forged = client.post("/api/ai/confirm", headers=headers, json={"confirmation_token": action["confirmation_token"] + "forged"})
         assert forged.status_code == 400
+
+
+def _zip(members: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, data in members.items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
+def test_a_decompression_bomb_is_refused_instead_of_filling_memory(monkeypatch):
+    """A few KB of zip can expand to gigabytes; any member could otherwise take a replica down."""
+    import pytest
+    from app import services
+    monkeypatch.setattr(services, "MAX_EXTRACTED_BYTES", 1024 * 1024)
+    bomb = _zip({"word/document.xml": b"<w:t>a</w:t>" * 200_000})  # ~2.4 MB inflated, tiny compressed
+    assert len(bomb) < 50_000
+    with pytest.raises(ValueError, match="expands to more text"):
+        services.extract_document_text("brief.docx", bomb)
+    sheet_bomb = _zip({f"xl/worksheets/sheet{i}.xml": b"<c>1</c>" * 50_000 for i in range(4)})
+    with pytest.raises(ValueError, match="expands to more text"):
+        services.extract_document_text("plan.xlsx", sheet_bomb)
+
+
+def test_a_damaged_office_file_is_a_clean_rejection_not_a_server_error():
+    import pytest
+    from app.services import extract_document_text
+    with pytest.raises(ValueError, match="could not be read"):
+        extract_document_text("brief.docx", b"PK\x03\x04 not really a zip")
+    with pytest.raises(ValueError, match="could not be read"):
+        extract_document_text("brief.docx", _zip({"unrelated.xml": b"<x/>"}))
+
+
+def test_a_normal_docx_still_imports():
+    from app.services import extract_document_text
+    doc = _zip({"word/document.xml": b"<w:p><w:t>Launch plan</w:t></w:p>"})
+    assert extract_document_text("brief.docx", doc) == "Launch plan"
