@@ -27,28 +27,25 @@ services:
     ports: ["8025:8025"]
   # S3-compatible object storage, so local development exercises the same storage
   # adapter production uses rather than a code path only dev ever runs.
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    command: ["server", "/data", "--console-address", ":9001"]
+  # (Versity S3 Gateway over a local directory; MinIO's images stopped being public.)
+  objectstore:
+    image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+    command: ["--port", ":9000", "posix", "/data"]
     environment:
-      MINIO_ROOT_USER: ${STORAGE_ACCESS_KEY:-enterai_minio}
-      MINIO_ROOT_PASSWORD: ${STORAGE_SECRET_KEY:-enterai_minio_dev_password}
-    ports: ["9000:9000", "9001:9001"]
-    volumes: [minio_data:/data]
-  # Creates the bucket once, then exits; the API waits for it to finish. Readiness
-  # is decided by this retry loop rather than a healthcheck on the server, because
-  # `mc` is guaranteed present here and the server image's tooling is not.
-  minio-init:
-    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
-    depends_on: [minio]
+      ROOT_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-enterai_storage}
+      ROOT_SECRET_KEY: ${STORAGE_SECRET_KEY:-enterai_storage_dev_password}
+    ports: ["9000:9000"]
+    volumes: [objectstore_data:/data]
+  # Creates the bucket once, then exits; the API waits for it to finish.
+  objectstore-init:
+    build: ./backend
+    command: ["python", "-m", "app.ensure_bucket"]
+    depends_on: [objectstore]
     environment:
       STORAGE_BUCKET: ${STORAGE_BUCKET:-enterai-uploads}
-      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-enterai_minio}
-      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-enterai_minio_dev_password}
-    entrypoint: >-
-      sh -c "until mc alias set local http://minio:9000 $$STORAGE_ACCESS_KEY $$STORAGE_SECRET_KEY;
-             do echo 'waiting for minio'; sleep 2; done &&
-             mc mb --ignore-existing local/$$STORAGE_BUCKET"
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://objectstore:9000}
+      AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:-enterai_storage}
+      AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:-enterai_storage_dev_password}
   api:
     build: ./backend
     env_file: .env
@@ -63,9 +60,9 @@ services:
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-s3}
       STORAGE_BUCKET: ${STORAGE_BUCKET:-enterai-uploads}
-      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
-      AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:-enterai_minio}
-      AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:-enterai_minio_dev_password}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://objectstore:9000}
+      AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:-enterai_storage}
+      AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:-enterai_storage_dev_password}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       ENVIRONMENT: ${ENVIRONMENT:-production}
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
@@ -85,7 +82,7 @@ services:
       db: {condition: service_healthy}
       redis: {condition: service_healthy}
       mailpit: {condition: service_started}
-      minio-init: {condition: service_completed_successfully}
+      objectstore-init: {condition: service_completed_successfully}
   web:
     build: ./frontend
     environment:
@@ -94,5 +91,5 @@ services:
     depends_on: [api]
 volumes:
   postgres_data:
-  minio_data:
+  objectstore_data:
   uploads:

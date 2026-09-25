@@ -4,7 +4,7 @@ for anything with more than one replica.
 Local disk is per-container. Two API replicas each get their own `uploads/`
 directory, so whichever replica did not receive the upload cannot see the file.
 `STORAGE_BACKEND=s3` points every replica at one bucket instead; the same adapter
-serves real S3 and any S3-compatible server (MinIO in docker-compose) via
+serves real S3 and any S3-compatible server (the objectstore service in docker-compose) via
 STORAGE_ENDPOINT_URL.
 
 `save` returns the identifier persisted on the row, and it is deliberately
@@ -73,7 +73,7 @@ def _s3_client():
 
     # Credentials come from the standard AWS environment/instance mechanisms rather
     # than bespoke settings, so a deployment can use a role instead of long-lived
-    # keys. STORAGE_ENDPOINT_URL is what retargets the same code at MinIO.
+    # keys. STORAGE_ENDPOINT_URL is what retargets the same code at a self-hosted server.
     return boto3.client(
         "s3",
         endpoint_url=os.getenv("STORAGE_ENDPOINT_URL") or None,

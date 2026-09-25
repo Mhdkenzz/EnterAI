@@ -140,7 +140,7 @@ jobs:
           cat images.env >> "$path/.env.release"
           trap 'rm -f "$path/.env.release"' EXIT
           docker compose --env-file "$path/.env" --env-file "$path/.env.release" pull
-          docker compose --env-file "$path/.env" --env-file "$path/.env.release" up -d db redis minio minio-init
+          docker compose --env-file "$path/.env" --env-file "$path/.env.release" up -d db redis objectstore objectstore-init
           docker compose --env-file "$path/.env" --env-file "$path/.env.release" run --rm migrate
           docker compose --env-file "$path/.env" --env-file "$path/.env.release" up -d --no-build --scale api=2 api web lb
           test "$(docker compose --env-file "$path/.env" --env-file "$path/.env.release" ps -q api | wc -l)" = 2

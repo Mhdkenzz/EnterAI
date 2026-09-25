@@ -1,7 +1,7 @@
 """Uploads must land somewhere every replica can reach.
 
 The S3 cases run against moto, which serves the real botocore wire protocol in
-process, so these exercise the same code path that talks to MinIO and to AWS.
+process, so these exercise the same code path that talks to the self-hosted objectstore and to AWS.
 """
 import os
 from pathlib import Path

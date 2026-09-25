@@ -218,8 +218,8 @@ jobs:
       SEED_ADMIN_EMAIL: admin@ci.enterai.test
       SEED_ADMIN_PASSWORD: ci-only-seed-admin-password
       STORAGE_BUCKET: enterai-uploads
-      STORAGE_ACCESS_KEY: enterai_minio_ci
-      STORAGE_SECRET_KEY: enterai_minio_ci_password
+      STORAGE_ACCESS_KEY: enterai_storage_ci
+      STORAGE_SECRET_KEY: enterai_storage_ci_password
       SMTP_HOST: 127.0.0.1
       EMAIL_FROM: ci@enterai.test
       APP_BASE_URL: http://127.0.0.1:3000
