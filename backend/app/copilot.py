@@ -325,6 +325,50 @@ def _execute_read_tool(name: str, args: dict[str, Any], tools: WorkspaceTools) -
     raise KeyError(f"Unknown read tool {name!r}")
 
 
+def describe_action(db: Session, user: User, name: str, args: dict[str, Any], token: str) -> dict[str, Any]:
+    """A proposed write as the confirmation card shows it: a label plus the concrete
+    targets it touches, resolved to names inside the caller's organization, so the
+    person approving it can see *which* project or task will change."""
+    details: list[dict[str, str]] = []
+
+    def scoped(model, key):
+        row = db.get(model, args.get(key)) if args.get(key) else None
+        org = getattr(row, "organization_id", None)
+        if row is not None and org is None and model is Task:
+            project = db.get(Project, row.project_id)
+            org = project.organization_id if project else None
+        return row if row is not None and org == user.organization_id else None
+
+    project = scoped(Project, "project_id")
+    task = scoped(Task, "task_id")
+    if task is not None and project is None:
+        project = db.get(Project, task.project_id)
+    if project is not None:
+        details.append({"label": "Project", "value": project.name})
+    if task is not None:
+        details.append({"label": "Task", "value": task.title})
+    if args.get("assignee_id") or args.get("agent_id"):
+        person = db.get(User, args.get("assignee_id") or args.get("agent_id"))
+        if person is not None and person.organization_id == user.organization_id:
+            details.append({"label": "Assignee", "value": person.name})
+    if args.get("team_id"):
+        team = db.get(Team, args["team_id"])
+        if team is not None and team.organization_id == user.organization_id:
+            details.append({"label": "Team", "value": team.name})
+    for key, label in (("title", "Title"), ("name", "Name"), ("status", "Status"), ("priority", "Priority"),
+                       ("health", "Health"), ("body", "Comment"), ("due_date", "Due")):
+        if args.get(key) not in (None, ""):
+            details.append({"label": label, "value": str(args[key]).replace("_", " ")[:200]})
+    label = _describe_write_call(name, args)
+    if name == "update_task" and task is not None:
+        label = f"Update task: {task.title}"
+    elif name == "update_project" and project is not None:
+        label = f"Update project: {project.name}"
+    elif name == "add_comment" and task is not None:
+        label = f"Comment on: {task.title}"
+    return {"label": label, "details": details, "confirmation_token": token, "requires_confirmation": True}
+
+
 def _describe_write_call(name: str, args: dict[str, Any]) -> str:
     if name == "create_task": return f"Create task: {args.get('title', 'New task')}"
     if name == "update_task": return "Update task"
@@ -413,10 +457,11 @@ class CopilotService:
         reply = provider_call(tools, self.mode, lambda: self.provider.answer(message, _provider_snapshot(snapshot)))
         if tools.user.kind == "agent":
             require_execution(tools.db, tools.user)
-        actions = self._proposed_actions(message, snapshot, tools.user)
+        actions = self._proposed_actions(message, snapshot, tools)
         return {"reply": reply, "actions": actions, "read_tools": ["get_projects", "get_tasks", "summarize_priorities"]}
 
-    def _proposed_actions(self, message: str, snapshot: dict[str, Any], user: User) -> list[dict[str, Any]]:
+    def _proposed_actions(self, message: str, snapshot: dict[str, Any], tools: "WorkspaceTools") -> list[dict[str, Any]]:
+        user = tools.user
         normalized = message.lower()
         if "create_task" not in allowed_write_tools(user.role):
             return []
@@ -428,7 +473,7 @@ class CopilotService:
         title = re.sub(r"\b(create|add|make)( a)? task\b", "", message, flags=re.I).strip(" :.-")[:140] or "New task"
         args = {"project_id": target["id"], "title": title[:1].upper() + title[1:], "priority": "medium"}
         mint = create_agent_confirmation if user.kind == "agent" else create_confirmation
-        return [{"label": f"Create task: {args['title']}", "confirmation_token": mint(user, "create_task", args), "requires_confirmation": True}]
+        return [describe_action(tools.db, user, "create_task", args, mint(user, "create_task", args))]
 
     def _plan_tool_calling(self, message: str, tools: WorkspaceTools, conversation_id: str | None = None) -> dict[str, Any]:
         role = tools.user.role
@@ -522,8 +567,7 @@ class CopilotService:
                     else:
                         mint = create_agent_confirmation if tools.user.kind == "agent" else create_confirmation
                         token = mint(tools.user, name, call["args"])
-                        label = _describe_write_call(name, call["args"])
-                        confirmed_action = {"label": label, "confirmation_token": token, "requires_confirmation": True}
+                        confirmed_action = describe_action(tools.db, tools.user, name, call["args"], token)
                     continue
                 if name not in READ_TOOL_NAMES:
                     messages.append(self.provider.tool_result_message(call["id"], "This tool does not exist.", is_error=True))
@@ -609,7 +653,7 @@ class CopilotService:
                         messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match this tool's schema.", is_error=True))
                         continue
                     token = create_agent_confirmation(agent, name, call["args"])
-                    action = {"label": _describe_write_call(name, call["args"]), "confirmation_token": token, "requires_confirmation": True}
+                    action = describe_action(db, agent, name, call["args"], token)
                     return {"outcome": "proposed", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": action}
                 if name not in READ_TOOL_NAMES:
                     messages.append(self.provider.tool_result_message(call["id"], "This tool does not exist.", is_error=True))

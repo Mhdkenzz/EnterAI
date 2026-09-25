@@ -61,7 +61,7 @@ const auth = (workspace: Workspace) => ({ Authorization: `Bearer ${workspace.tok
 test("human admin sees usage, member has no Admin navigation", async ({ page, isMobile, workspace }) => {
   await enter(page, workspace.token);
   await openAdmin(page, isMobile);
-  await expect(page.getByText(/Tracked since Phase 7/)).toBeVisible();
+  await expect(page.getByText(/AI provider calls and agent runs for this workspace/)).toBeVisible();
   await expect(page.getByText(/Provider mode:/)).toBeVisible();
   await expect(page.getByText("No agents configured.")).toBeVisible();
   // The session cookie belongs to the context, so a fresh page picks up the member.
@@ -110,7 +110,7 @@ test("execution controls persist and roles protect the signed-in admin", async (
   await expect(disabled).toHaveCount(agents.length);
   const ownRole = page.getByRole("combobox", { name: `Role for ${workspace.adminName}`, exact: true });
   await expect(ownRole).toBeDisabled();
-  await expect(page.getByText(/You cannot change your own role\./)).toBeVisible();
+  await expect(page.getByText(/You cannot change or remove yourself\./)).toBeVisible();
   const memberRole = page.getByRole("combobox", { name: `Role for ${workspace.memberName}`, exact: true });
   await memberRole.selectOption("manager");
   await page.getByRole("button", { name: `Save role for ${workspace.memberName}`, exact: true }).click();
@@ -146,8 +146,8 @@ test("audit filters, attribution and pagination use real recorded actions", asyn
   await audit.getByRole("button", { name: "Apply audit filters" }).click();
   await expect(audit.getByText(/Showing 1–/)).toBeVisible();
   const entry = audit.getByRole("article").filter({ hasText: latest.id });
-  await expect(entry).toContainText(`Actor: ${workspace.adminId}`);
-  await expect(entry).toContainText(`Initiator: ${latest.initiator_id || "—"}`);
+  await expect(entry).toContainText(`Actor: ${workspace.adminName}`);
+  await expect(entry).toContainText(`Initiator: ${latest.initiator_name || latest.initiator_id || "—"}`);
   await expect(entry).toContainText(`Source: ${latest.source}`);
   await audit.getByLabel("Search audit", { exact: true }).fill("no-such-audit-record-7f989e");
   await audit.getByRole("button", { name: "Apply audit filters" }).click();
@@ -220,7 +220,7 @@ test("admin console is accessible without horizontal overflow", async ({ page, i
   const audit = page.getByRole("region", { name: "Audit log", exact: true });
   const registration = audit.getByRole("article").filter({ has: page.getByRole("heading", { name: "registered", exact: true }) });
   await expect(registration).toBeVisible();
-  await expect(registration).toContainText(`Actor: ${workspace.adminId}`);
+  await expect(registration).toContainText(`Actor: ${workspace.adminName}`);
   await registration.getByText("Event detail", { exact: true }).click();
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations.filter(v => ["critical", "serious"].includes(v.impact || ""))).toEqual([]);

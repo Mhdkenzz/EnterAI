@@ -8,7 +8,7 @@ import { BillingSection } from "@/components/billing-settings";
 import { TeamInvitesSection } from "@/components/team-invites";
 
 type Settings = { execution_enabled: boolean };
-type AdminUser = { id: string; name: string; role: "admin" | "manager" | "member"; active: boolean };
+type AdminUser = { id: string; name: string; email?: string; role: "admin" | "manager" | "member"; active: boolean };
 type AgentUsage = Settings & {
   id: string; name: string; status: string; last_execution_at: string | null;
   consecutive_task_failures: number; calls: number; failures: number;
@@ -19,7 +19,7 @@ type Usage = {
   agents: AgentUsage[]; provider_mode: string;
 };
 type AuditEvent = {
-  id: string; actor_id: string | null; initiator_id: string | null; source: string;
+  id: string; actor_id: string | null; initiator_id: string | null; actor_name?: string | null; initiator_name?: string | null; source: string;
   action: string; entity_type: string; entity_id: string | null; detail: unknown; created_at: string;
 };
 type AuditPage = { items: AuditEvent[]; total: number; offset: number; limit: number };
@@ -117,7 +117,7 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <h2 id="usage-heading" className="text-lg font-semibold">Usage overview</h2>
-            <p className="text-sm text-zinc-300">Tracked since Phase 7. Earlier activity is not included. Token and cost data are not available.</p>
+            <p className="text-sm text-zinc-300">AI provider calls and agent runs for this workspace. Token and cost figures are not tracked yet.</p>
             <p className="mt-1 text-sm text-sky-200">Provider mode: {usage.provider_mode}</p>
           </div>
           <Button type="button" variant="outline" disabled={pending} onClick={() => { setRevision(value => value + 1); setAuditRevision(value => value + 1); }}>Refresh admin data</Button>
@@ -171,15 +171,25 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
         </div>
       </section>
       <section aria-labelledby="roles-heading" className="space-y-3">
-        <h2 id="roles-heading" className="text-lg font-semibold">Role governance</h2>
-        <p className="text-sm text-zinc-300">Human workspace members only. You cannot change your own role.</p>
+        <h2 id="roles-heading" className="text-lg font-semibold">Members and roles</h2>
+        <p className="text-sm text-zinc-300">
+          Admins run the workspace, billing and members. Managers can also archive or delete projects, delete any task and create teams.
+          Members work on tasks and can delete only the tasks they created. You cannot change or remove yourself.
+        </p>
         {!users.length && <p className="text-sm text-zinc-300">No human users found.</p>}
         <div className="grid min-w-0 gap-3 xl:grid-cols-2">
-          {users.map(user => <RoleForm key={`${user.id}-${user.role}`} user={user} self={user.id === currentUserId} pending={pending}
+          {users.map(user => <RoleForm key={`${user.id}-${user.role}-${user.active}`} user={user} self={user.id === currentUserId} pending={pending}
             save={role => mutate(async () => {
               const next = await api<AdminUser>(`/admin/users/${user.id}/role`, { method: "PATCH", body: JSON.stringify({ role }) });
               if (mounted.current) setUsers(current => current.map(item => item.id === next.id ? next : item));
-            }, "Role updated.")} />)}
+            }, "Role updated.")}
+            setActive={active => {
+              if (!active && !window.confirm(`Remove ${user.name} from the workspace? They are signed out now and cannot sign in again until restored. Their tasks and history stay.`)) return;
+              void mutate(async () => {
+                const next = await api<AdminUser>(`/admin/users/${user.id}/active`, { method: "PATCH", body: JSON.stringify({ active }) });
+                if (mounted.current) setUsers(current => current.map(item => item.id === next.id ? next : item));
+              }, active ? "Member restored." : "Member removed.");
+            }} />)}
         </div>
       </section>
     </>}
@@ -238,7 +248,7 @@ function PrivacyAdminSection() {
     ]).then(([nextPolicy, nextRequests]) => {
       if (controller.signal.aborted) return;
       setPolicy(nextPolicy); setRequests(nextRequests);
-      setDraft(Object.fromEntries(retentionFields.map(([key]) => [key, nextPolicy[key] ? String(nextPolicy[key]) : ""])));
+      setDraft(Object.fromEntries(retentionFields.map(([key]) => [key, nextPolicy[key] != null ? String(nextPolicy[key]) : ""])));
     }).catch(err => { if (!controller.signal.aborted) setLoadError(errorText(err)); });
     return () => controller.abort();
   }, []);
@@ -249,7 +259,7 @@ function PrivacyAdminSection() {
       api<DeletionRequest[]>("/admin/privacy/deletion-requests"),
     ]).then(([nextPolicy, nextRequests]) => {
       setPolicy(nextPolicy); setRequests(nextRequests);
-      setDraft(Object.fromEntries(retentionFields.map(([key]) => [key, nextPolicy[key] ? String(nextPolicy[key]) : ""])));
+      setDraft(Object.fromEntries(retentionFields.map(([key]) => [key, nextPolicy[key] != null ? String(nextPolicy[key]) : ""])));
     }).catch(err => setLoadError(errorText(err)));
   }
 
@@ -257,7 +267,7 @@ function PrivacyAdminSection() {
     event.preventDefault();
     setSaveError(""); setSaveOk(false);
     try {
-      const body = Object.fromEntries(retentionFields.map(([key]) => [key, draft[key] ? Number(draft[key]) : null]));
+      const body = Object.fromEntries(retentionFields.map(([key]) => [key, draft[key]?.trim() ? Number(draft[key]) : null]));
       const next = await api<RetentionPolicy>("/admin/privacy/retention", { method: "PATCH", body: JSON.stringify(body) });
       setPolicy(next); setSaveOk(true);
     } catch (err) { setSaveError(errorText(err)); }
@@ -342,20 +352,25 @@ function PrivacyAdminSection() {
   </section>;
 }
 
-function RoleForm({ user, self, pending, save }: {
-  user: AdminUser; self: boolean; pending: boolean; save: (role: AdminUser["role"]) => Promise<void>;
+function RoleForm({ user, self, pending, save, setActive }: {
+  user: AdminUser; self: boolean; pending: boolean; save: (role: AdminUser["role"]) => Promise<void>; setActive: (active: boolean) => void;
 }) {
   const [role, setRole] = useState(user.role);
   return <Card className="min-w-0 p-5">
     <form className="space-y-3" onSubmit={event => { event.preventDefault(); if (!self && role !== user.role) void save(role); }}>
       <h3 className="font-medium">{user.name}</h3>
-      <p className="text-sm text-zinc-300">{user.active ? "Active" : "Inactive"} · Current role: {user.role}</p>
+      {user.email && <p className="break-all text-sm text-zinc-400">{user.email}</p>}
+      <p className="text-sm text-zinc-300">{user.active ? "Active" : "Removed"} · Current role: {user.role}</p>
       <label className="block text-sm text-zinc-300">Role for {user.name}
         <select className={field} value={role} disabled={self || pending} onChange={event => setRole(event.target.value as AdminUser["role"])}>
           <option value="admin">Admin</option><option value="manager">Manager</option><option value="member">Member</option>
         </select>
       </label>
-      <Button type="submit" variant="outline" aria-label={`Save role for ${user.name}`} disabled={self || pending || role === user.role}>Save role</Button>
+      <div className="flex flex-wrap gap-2">
+        <Button type="submit" variant="outline" aria-label={`Save role for ${user.name}`} disabled={self || pending || role === user.role}>Save role</Button>
+        {!self && <Button type="button" variant="ghost" aria-label={`${user.active ? "Remove" : "Restore"} ${user.name}`} disabled={pending}
+          onClick={() => setActive(!user.active)}>{user.active ? "Remove from workspace" : "Restore access"}</Button>}
+      </div>
     </form>
   </Card>;
 }
@@ -413,12 +428,14 @@ function AuditLog({ revision }: { revision: number }) {
     {!loading && !error && data && <>
       <p role="status" className="text-sm text-zinc-300">{data.total ? `Showing ${data.offset + 1}–${data.offset + data.items.length} of ${data.total} events` : "No audit events match these filters."}</p>
       <div className="space-y-3">
-        {data.items.map(item => <article key={item.id} aria-label={`Audit event ${item.id}`} className="min-w-0 space-y-2 rounded-lg border border-line bg-panel p-5 text-sm">
-          <h3 className="font-medium">{item.action}</h3>
-          <p className="text-zinc-300">{timestamp(item.created_at)} · Event: {item.id}</p>
-          <p>Actor: {item.actor_id || "—"}</p><p>Initiator: {item.initiator_id || "—"}</p><p>Source: {item.source}</p>
-          <p>Entity: {item.entity_type} · {item.entity_id || "—"}</p>
-          <details><summary className="cursor-pointer text-sky-200 focus:outline-none focus:ring-2 focus:ring-accent">Event detail</summary>
+        {data.items.map(item => <article key={item.id} aria-label={`Audit event ${item.id}`} className="min-w-0 rounded-lg border border-line bg-panel px-4 py-3 text-sm">
+          <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+            <h3 className="font-medium">{item.action}</h3>
+            <p className="text-xs text-zinc-400">{timestamp(item.created_at)}</p>
+          </div>
+          <p className="mt-1 text-zinc-300">Actor: {item.actor_name || item.actor_id || "—"} · Initiator: {item.initiator_name || item.initiator_id || "—"} · Source: {item.source} · Entity: {item.entity_type}</p>
+          <details className="mt-1"><summary className="cursor-pointer text-xs text-sky-200 focus:outline-none focus:ring-2 focus:ring-accent">Event detail</summary>
+            <p className="mt-2 text-xs text-zinc-400">Event: {item.id}<br />Actor ID: {item.actor_id || "—"}<br />Entity ID: {item.entity_id || "—"}</p>
             <pre className="mt-2 whitespace-pre-wrap break-words text-xs text-zinc-300">{typeof item.detail === "string" ? item.detail : JSON.stringify(item.detail, null, 2)}</pre>
           </details>
         </article>)}

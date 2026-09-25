@@ -21,7 +21,7 @@ def human_admin(user: User = Depends(current_user)):
 
 
 def member_out(u):
-    return {'id': u.id, 'name': u.name, 'role': u.role, 'active': u.active}
+    return {'id': u.id, 'name': u.name, 'email': u.email, 'role': u.role, 'active': u.active}
 
 
 def time_window(stmt, column, start, end):
@@ -52,7 +52,14 @@ def audit_search(q: str | None = None, action: str | None = None, source: str | 
     total = db.scalar(select(func.count()).select_from(stmt.subquery()))
     rows = db.scalars(stmt.order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).offset(offset).limit(limit))
     keys = ['id', 'actor_id', 'initiator_id', 'source', 'action', 'entity_type', 'entity_id', 'detail', 'created_at']
-    return {'items': [{key: getattr(row, key) for key in keys} for row in rows], 'total': total, 'offset': offset, 'limit': limit}
+    items = [{key: getattr(row, key) for key in keys} for row in rows]
+    # Names for the people involved, so the log reads without cross-referencing IDs.
+    ids = {i[k] for i in items for k in ('actor_id', 'initiator_id') if i[k]}
+    people = {u.id: u for u in db.scalars(select(User).where(User.id.in_(ids), User.organization_id == user.organization_id))} if ids else {}
+    label = lambda uid: (f"{people[uid].name} ({people[uid].email})" if people[uid].kind == 'human' else f"{people[uid].name} (agent)") if uid in people else None
+    for item in items:
+        item['actor_name'], item['initiator_name'] = label(item['actor_id']), label(item['initiator_id'])
+    return {'items': items, 'total': total, 'offset': offset, 'limit': limit}
 
 
 @router.get('/usage')
@@ -135,6 +142,44 @@ def update_role(user_id: str, data: RoleSetting, user: User = Depends(human_admi
     before = target.role
     target.role = data.role
     log(db, user.organization_id, user.id, 'user', target.id, 'role_updated', before=before, after=data.role)
+    db.commit()
+    return member_out(target)
+
+
+class ActiveSetting(BaseModel):
+    active: StrictBool
+
+
+@router.patch('/users/{user_id}/active')
+def set_active(user_id: str, data: ActiveSetting, user: User = Depends(human_admin), db: Session = Depends(get_db)):
+    """Remove someone from the workspace (or bring them back) without deleting their
+    history: their tasks, comments and audit trail stay, but they can no longer sign
+    in and every session they hold ends now. Same serialized governance transaction
+    and last-administrator rule as a role change."""
+    actor_id, org_id = user.id, user.organization_id
+    db.rollback()
+    if db.get_bind().dialect.name == 'sqlite':
+        db.connection().exec_driver_sql('BEGIN IMMEDIATE')
+    else:
+        db.scalar(select(Organization).where(Organization.id == org_id).with_for_update())
+    fresh_user = db.get(User, actor_id)
+    if not fresh_user or fresh_user.organization_id != org_id:
+        raise HTTPException(403, 'Human administrator required')
+    human_admin(fresh_user)
+    target = db.get(User, user_id)
+    if not target or target.organization_id != org_id or target.kind != 'human':
+        raise HTTPException(404, 'User not found')
+    if not data.active:
+        if target.id == fresh_user.id:
+            raise HTTPException(409, 'You cannot deactivate yourself')
+        if target.role == 'admin':
+            others = db.scalars(select(User).where(User.organization_id == org_id, User.kind == 'human', User.active.is_(True),
+                                                   User.role == 'admin', User.id != target.id)).all()
+            if not others:
+                raise HTTPException(409, 'An active human administrator is required')
+        target.session_epoch = (target.session_epoch or 0) + 1  # end every session now
+    target.active = data.active
+    log(db, org_id, fresh_user.id, 'user', target.id, 'reactivated' if data.active else 'deactivated')
     db.commit()
     return member_out(target)
 

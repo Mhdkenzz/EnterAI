@@ -5,12 +5,14 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 ## What is included
 
 - JWT authentication (httpOnly session cookie in the browser, bearer token for the CLI) and organisation-scoped data
-- Users, roles (`admin`, `manager`, `member`) and teams
-- Projects, list and Kanban views, tasks, subtasks, comments and file attachments
+- Users, roles and teams. Admins run the workspace, billing and membership (invite, remove, restore); managers can also archive or delete projects, delete any task and create teams; members work on tasks and delete only their own
+- Projects (archive or delete), list and drag-and-drop Kanban views, tasks with subtasks, labels, assignees and due dates, comments and downloadable attachments
+- Real URLs for every view (`/projects/<id>`, `/inbox`, `?task=<id>` for an open task): Back, refresh and shared links work
 - Activity history, notifications, My Work, Inbox, portfolio dashboard and global search
-- Copilot chat with organization-scoped read tools and signed, explicit confirmation required before any write
+- Copilot chat with organization-scoped read tools and signed, explicit confirmation required before any write; each proposal shows the project and fields it will change and can be rejected
 - New-project brief ingestion for PDF, DOC, DOCX, TXT, XLSX, CSV, and JSON with editable AI-drafted metadata and suggested tasks
-- Local storage adapter for uploads with a stable interface for a future cloud backend
+- S3-compatible upload storage (local disk for a single node), mirrored to a backup bucket
+- Trials, Stripe Checkout and customer portal, per-period usage and seat limits
 - Seeded demo workspace (three projects, users, teams, tasks and notifications)
 - Alembic migration, smoke tests, Docker Compose, and environment configuration
 

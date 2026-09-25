@@ -1,12 +1,22 @@
 "use client";
 import { useState } from "react";
-import { ChevronRight, FileText, Grid2X2, LayoutList, Plus, Sparkles } from "lucide-react";
+import {
+  Archive,
+  ChevronLeft,
+  ChevronRight,
+  FileText,
+  Grid2X2,
+  LayoutList,
+  Plus,
+  Sparkles,
+  Trash2,
+} from "lucide-react";
 import { API_BASE } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { states, when, Avatar, Health, Row } from "@/components/workspace/shared";
+import { states, when, Avatar, Health, Row, describeActivity } from "@/components/workspace/shared";
 import type { Doc, Project, Task, InboxNotice } from "@/lib/types";
 
 export function Home({ data, activity, project, task, toggle, all, ai }: any) {
@@ -78,7 +88,7 @@ export function Home({ data, activity, project, task, toggle, all, ai }: any) {
                   />
                 </div>
                 <p className="mt-1 text-xs text-zinc-500">
-                  {p.progress}% complete, {p.task_count} tasks
+                  {p.progress}% complete, {p.task_count} {p.task_count === 1 ? "task" : "tasks"}
                 </p>
               </button>
             ))}
@@ -91,7 +101,7 @@ export function Home({ data, activity, project, task, toggle, all, ai }: any) {
           <div key={a.id} className="flex gap-3 border-b border-line/60 px-5 py-3">
             <Avatar user={a.actor} />
             <p className="text-sm text-zinc-300">
-              <b className="text-white">{a.actor?.name || "Enter AI"}</b> {a.action} a {a.entity_type}
+              <b className="text-white">{a.actor?.name || "Enter AI"}</b> {describeActivity(a)}
             </p>
           </div>
         ))}
@@ -99,21 +109,46 @@ export function Home({ data, activity, project, task, toggle, all, ai }: any) {
     </>
   );
 }
-export function Portfolio({ projects, open, create }: any) {
+export function Portfolio({ projects: all, open, create }: any) {
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedCount = all.filter((p: Project) => p.status === "archived").length;
+  const projects = all.filter((p: Project) => showArchived || p.status !== "archived");
   return (
     <>
       <div className="mb-6 flex justify-between">
         <div>
           <p className="text-sm text-sky-300">Portfolio</p>
           <h1 className="mt-1 text-2xl font-semibold">All projects</h1>
+          {archivedCount > 0 && (
+            <button
+              className="mt-1 text-xs text-sky-300 hover:underline"
+              onClick={() => setShowArchived((v) => !v)}
+            >
+              {showArchived ? "Hide archived" : `Show ${archivedCount} archived`}
+            </button>
+          )}
         </div>
         <Button onClick={create}>
           <Plus size={15} />
           New project
         </Button>
       </div>
-      <Card className="overflow-x-auto">
+      {!projects.length && (
+        <Card className="p-8 text-center">
+          <p className="font-medium">No projects yet</p>
+          <p className="mt-1 text-sm text-zinc-400">
+            Create one, or upload a brief and let Enter AI draft it.
+          </p>
+        </Card>
+      )}
+      <Card className={cn("overflow-x-auto", !projects.length && "hidden")}>
         <div className="min-w-[650px]">
+          <div className="grid grid-cols-[1.6fr_.8fr_.6fr_.5fr] gap-4 border-b border-line px-5 py-2 text-xs uppercase tracking-wide text-zinc-500">
+            <span>Project</span>
+            <span>Team</span>
+            <span>Health</span>
+            <span>Progress</span>
+          </div>
           {projects.map((p: Project) => (
             <button
               key={p.id}
@@ -123,6 +158,7 @@ export function Portfolio({ projects, open, create }: any) {
               <span className="text-sm font-medium">
                 <i className="mr-2 inline-block h-2 w-2 rounded-full" style={{ background: p.color }} />
                 {p.name}
+                {p.status === "archived" && <small className="ml-2 text-amber-200">Archived</small>}
                 <small className="ml-2 text-zinc-600">{p.code}</small>
               </span>
               <span className="text-sm text-zinc-400">{p.team || "-"}</span>
@@ -199,6 +235,14 @@ export function Teams({ teams, selected, projects, open, create, select }: any) 
           New team
         </Button>
       </div>
+      {!teams.length && (
+        <Card className="p-8 text-center">
+          <p className="font-medium">No teams yet</p>
+          <p className="mt-1 text-sm text-zinc-400">
+            Teams group projects by who owns them. Create one to get started.
+          </p>
+        </Card>
+      )}
       <div className="grid gap-4 md:grid-cols-2">
         {teams.map((t: any) => (
           <button
@@ -213,7 +257,9 @@ export function Teams({ teams, selected, projects, open, create, select }: any) 
           >
             <h2 className="font-medium">{t.name}</h2>
             <p className="mt-1 text-sm text-zinc-500">{t.description || "No description"}</p>
-            <p className="mt-5 text-xs text-zinc-500">{t.projects} projects. Open to view.</p>
+            <p className="mt-5 text-xs text-zinc-500">
+              {t.projects} {t.projects === 1 ? "project" : "projects"}. Open to view.
+            </p>
           </button>
         ))}
       </div>
@@ -244,11 +290,41 @@ export function Teams({ teams, selected, projects, open, create, select }: any) 
     </>
   );
 }
-export function ProjectView({ project, tasks, open, update, edit, create, ai, upload: put }: any) {
+export function ProjectView({
+  project,
+  tasks,
+  open,
+  update,
+  edit,
+  create,
+  ai,
+  upload: put,
+  canManage,
+  archive,
+  remove,
+}: any) {
   const [mode, setMode] = useState("board");
   if (!project) return <p className="text-zinc-500">Choose a project.</p>;
+  // Subtasks live inside their parent (the task drawer); the board and list show
+  // top-level work with a count, so a checklist does not flood the columns.
+  const topLevel = tasks.filter((t: Task) => !t.parent_id);
+  const subtaskCount = (t: Task) => tasks.filter((x: Task) => x.parent_id === t.id).length;
+  const archived = project.status === "archived";
   return (
     <>
+      {archived && (
+        <div
+          role="status"
+          className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-400/30 bg-amber-400/[.06] px-4 py-3 text-sm text-amber-100"
+        >
+          <span>This project is archived. It is hidden from the portfolio but nothing has been deleted.</span>
+          {canManage && (
+            <Button size="sm" variant="ghost" onClick={() => archive(false)}>
+              Restore project
+            </Button>
+          )}
+        </div>
+      )}
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-sm text-sky-300">{project.code}</p>
@@ -259,7 +335,7 @@ export function ProjectView({ project, tasks, open, update, edit, create, ai, up
           </div>
           <p className="mt-2 text-sm text-zinc-400">{project.description}</p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <Button variant="ghost" size="sm" onClick={ai}>
             <Sparkles size={15} />
             Ask Enter AI
@@ -267,6 +343,29 @@ export function ProjectView({ project, tasks, open, update, edit, create, ai, up
           <Button variant="ghost" size="sm" onClick={edit}>
             Edit project
           </Button>
+          {canManage && !archived && (
+            <Button variant="ghost" size="sm" onClick={() => archive(true)}>
+              <Archive size={15} />
+              Archive
+            </Button>
+          )}
+          {canManage && (
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                if (
+                  window.confirm(
+                    `Delete “${project.name}” permanently? Its ${project.task_count} tasks, comments and files will be deleted. Archive it instead to keep them.`,
+                  )
+                )
+                  remove();
+              }}
+            >
+              <Trash2 size={15} />
+              Delete
+            </Button>
+          )}
           <div className="flex rounded-lg border border-line bg-panel p-1">
             <button
               aria-label="Board view"
@@ -315,7 +414,8 @@ export function ProjectView({ project, tasks, open, update, edit, create, ai, up
       </Card>
       {mode === "list" ? (
         <Card>
-          {tasks.map((t: Task) => (
+          {topLevel.length === 0 && <p className="px-5 py-6 text-sm text-zinc-400">No tasks yet.</p>}
+          {topLevel.map((t: Task) => (
             <Row
               key={t.id}
               task={t}
@@ -325,71 +425,122 @@ export function ProjectView({ project, tasks, open, update, edit, create, ai, up
           ))}
         </Card>
       ) : (
-        <Kanban tasks={tasks} open={open} update={update} />
+        <Kanban tasks={topLevel} subtaskCount={subtaskCount} open={open} update={update} />
       )}
     </>
   );
 }
-export function Kanban({ tasks, open, update }: any) {
+export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
+  const [over, setOver] = useState<string | null>(null);
+  const move = (t: Task, step: number) => {
+    const i = states.indexOf(t.status) + step;
+    if (i >= 0 && i < states.length) update(t, { status: states[i] });
+  };
   return (
     // Tracks never shrink below a readable card width; when five don't fit beside the
     // sidebar the board scrolls sideways instead of overlapping its columns.
     <div className="grid gap-3 overflow-x-auto pb-3 lg:grid-cols-[repeat(5,minmax(14rem,1fr))]">
       {states.map((s) => (
-        <div className="min-w-0" key={s}>
+        <section
+          aria-label={s.replace("_", " ")}
+          className="min-w-0"
+          key={s}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setOver(s);
+          }}
+          onDragLeave={() => setOver((current) => (current === s ? null : current))}
+          onDrop={(e) => {
+            e.preventDefault();
+            setOver(null);
+            const task = tasks.find((t: Task) => t.id === e.dataTransfer.getData("text/task-id"));
+            if (task && task.status !== s) update(task, { status: s });
+          }}
+        >
           <div className="mb-3 flex justify-between px-1 text-xs text-zinc-400">
             <span className="capitalize">{s.replace("_", " ")}</span>
             <span>{tasks.filter((t: Task) => t.status === s).length}</span>
           </div>
-          <div className="min-h-40 space-y-2 rounded-lg bg-white/[.025] p-2">
+          <div
+            className={cn(
+              "min-h-40 space-y-2 rounded-lg bg-white/[.025] p-2 transition-colors",
+              over === s && "bg-sky-400/[.08] ring-1 ring-sky-400/40",
+            )}
+          >
             {tasks
               .filter((t: Task) => t.status === s)
-              .map((t: Task) => (
-                <div
-                  key={t.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => open(t)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      open(t);
-                    }
-                  }}
-                  className={cn(
-                    "block w-full cursor-pointer rounded-lg border border-line bg-panel p-3 text-left hover:border-zinc-600",
-                    t.status === "done" && "border-emerald-500/30 bg-emerald-500/[.035]",
-                  )}
-                >
-                  <div className="mb-3 flex justify-between">
-                    <Badge
-                      tone={t.priority === "high" ? "red" : t.priority === "medium" ? "amber" : "default"}
-                    >
-                      {t.priority}
-                    </Badge>
+              .map((t: Task) => {
+                const subtasks = subtaskCount(t);
+                return (
+                  <article
+                    key={t.id}
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData("text/task-id", t.id);
+                      e.dataTransfer.effectAllowed = "move";
+                    }}
+                    className={cn(
+                      "cursor-grab rounded-lg border border-line bg-panel p-3 hover:border-zinc-600 active:cursor-grabbing",
+                      t.status === "done" && "border-emerald-500/30 bg-emerald-500/[.035]",
+                    )}
+                  >
+                    <div className="mb-3 flex items-center justify-between gap-2">
+                      <Badge
+                        tone={t.priority === "high" ? "red" : t.priority === "medium" ? "amber" : "default"}
+                      >
+                        {t.priority}
+                      </Badge>
+                      <span className="flex">
+                        <button
+                          aria-label={"Move back " + t.title}
+                          disabled={t.status === states[0]}
+                          className="text-zinc-500 hover:text-sky-300 disabled:opacity-30"
+                          onClick={() => move(t, -1)}
+                        >
+                          <ChevronLeft size={16} />
+                        </button>
+                        <button
+                          aria-label={"Advance " + t.title}
+                          disabled={t.status === states[states.length - 1]}
+                          className="text-zinc-500 hover:text-sky-300 disabled:opacity-30"
+                          onClick={() => move(t, 1)}
+                        >
+                          <ChevronRight size={16} />
+                        </button>
+                      </span>
+                    </div>
                     <button
-                      aria-label={"Advance " + t.title}
-                      className="text-zinc-500 hover:text-sky-300"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const i = states.indexOf(t.status);
-                        if (i < 4) update(t, { status: states[i + 1] });
-                      }}
+                      onClick={() => open(t)}
+                      className={cn(
+                        "block w-full text-left text-sm hover:underline",
+                        t.status === "done" && "text-emerald-100/70 line-through",
+                      )}
                     >
-                      <ChevronRight size={16} />
+                      {t.title}
                     </button>
-                  </div>
-                  <p className={cn("text-sm", t.status === "done" && "text-emerald-100/70 line-through")}>
-                    {t.title}
-                  </p>
-                  <div className="mt-4 flex justify-between">
-                    <span className="text-xs text-zinc-600">{when(t.due_date)}</span>
-                    <Avatar user={t.assignee} />
-                  </div>
-                </div>
-              ))}
+                    {(!!t.labels?.length || subtasks > 0) && (
+                      <div className="mt-2 flex flex-wrap gap-1">
+                        {t.labels?.slice(0, 3).map((l: string) => (
+                          <Badge key={l} tone="blue">
+                            {l}
+                          </Badge>
+                        ))}
+                        {subtasks > 0 && (
+                          <span className="text-xs text-zinc-400">
+                            {subtasks} {subtasks === 1 ? "subtask" : "subtasks"}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                    <div className="mt-4 flex justify-between">
+                      <span className="text-xs text-zinc-600">{when(t.due_date)}</span>
+                      <Avatar user={t.assignee} />
+                    </div>
+                  </article>
+                );
+              })}
           </div>
-        </div>
+        </section>
       ))}
     </div>
   );

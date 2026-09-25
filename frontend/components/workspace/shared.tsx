@@ -108,3 +108,42 @@ export function Modal({ title, close, children }: { title: string; close: () => 
     </div>
   );
 }
+
+// Activity rows are (entity_type, action) pairs; say them as a person would.
+const ACTIVITY_TEXT: Record<string, string> = {
+  "task created": "created a task",
+  "task updated": "updated a task",
+  "task deleted": "deleted a task",
+  "task commented": "commented on a task",
+  "task attachment_uploaded": "attached a file to a task",
+  "task delegated_to_agent": "handed a task to an agent",
+  "task agent_progress": "made progress on a task",
+  "task agent_completed": "completed a task",
+  "project created": "created a project",
+  "project updated": "updated a project",
+  "project document_uploaded": "added a project document",
+  "project_document draft_created": "drafted a project from a document",
+  "team created": "created a team",
+  "invite created": "invited a teammate",
+  "invite revoked": "revoked an invitation",
+  "user invite_accepted": "joined the workspace",
+  "user registered": "created the workspace",
+  "user email_verified": "confirmed their email address",
+  "user password_changed": "changed their password",
+  "user password_reset_completed": "reset their password",
+  "hierarchy_config updated": "changed the agent hierarchy",
+  "organization onboarded": "finished setting up the workspace",
+  "copilot confirmed": "approved an AI action",
+  "organization retention_policy_updated": "changed the data retention policy",
+  "organization data_exported": "exported the workspace data",
+  "user data_exported": "exported their data",
+  "user sso_login": "signed in with SSO",
+  "user sso_provisioned": "joined through SSO",
+};
+export function describeActivity(a: { action: string; entity_type: string; detail?: any }): string {
+  const text =
+    ACTIVITY_TEXT[`${a.entity_type} ${a.action}`] ??
+    `${a.action.replace(/_/g, " ")} (${a.entity_type.replace(/_/g, " ")})`;
+  const title = a.detail?.title || a.detail?.name;
+  return title ? `${text}: “${title}”` : text;
+}

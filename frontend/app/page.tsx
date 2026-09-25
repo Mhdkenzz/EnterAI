@@ -10,7 +10,8 @@ import { AuthScreens } from "@/components/workspace/auth-screens";
 import { Sidebar } from "@/components/workspace/sidebar";
 import { Onboarding, VerifyBanner } from "@/components/workspace/onboarding";
 import { Home, Portfolio, Work, InboxView, Teams, ProjectView } from "@/components/workspace/views";
-import { AI, Command } from "@/components/workspace/assistant";
+import { AI, AI_GREETING, Command } from "@/components/workspace/assistant";
+import { routeToUrl, urlToRoute, type Route } from "@/lib/routes";
 import { ProjectForm, ProjectEditForm, TaskForm, TeamForm, Drawer } from "@/components/workspace/forms";
 import { Agents, AgentInspector } from "@/components/workspace/agents";
 import type {
@@ -53,6 +54,7 @@ export default function EnterAI() {
     [error, setError] = useState(""),
     [scopedProject, setScopedProject] = useState<Project | null>(null);
   const [onboarding, setOnboarding] = useState<any>(null);
+  const [aiMessages, setAiMessages] = useState<any[]>([AI_GREETING]);
   const [agents, setAgents] = useState<Agent[]>([]),
     [hierarchyConfig, setHierarchyConfig] = useState<HierarchyConfigT | null>(null),
     [agentInspect, setAgentInspect] = useState<Agent | null>(null),
@@ -114,6 +116,64 @@ export default function EnterAI() {
     window.addEventListener(SESSION_EXPIRED_EVENT, expired);
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   }, []);
+  // --- URLs -----------------------------------------------------------------
+  // The address bar mirrors (view, project, open task). `routed` stays false until
+  // the URL the person arrived on has been applied, so that first render cannot
+  // overwrite a deep link with "/". `fromHistory` marks state that came from
+  // Back/Forward, which must replace rather than push a new entry.
+  const routed = useRef(false),
+    fromHistory = useRef(false);
+  async function applyRoute(route: Route) {
+    try {
+      if (route.view === "Project" && route.projectId) {
+        await openProject(await api<Project>("/projects/" + route.projectId));
+      } else {
+        setView(route.view);
+        if (route.view === "Agents") loadAgents();
+        if (route.view === "AI") setScopedProject(null);
+      }
+      if (route.taskId) await openTask(await api<Task>("/tasks/" + route.taskId));
+      else setTask(null);
+    } catch (e: any) {
+      // A link to something deleted or from another workspace: land somewhere sensible.
+      setError(e.message);
+      setView(route.view === "Project" ? "Portfolio" : route.view);
+    }
+  }
+  useEffect(() => {
+    if (session !== "in" || routed.current) return;
+    const route = urlToRoute(window.location.pathname, window.location.search);
+    if (new URLSearchParams(window.location.search).has("billing")) route.view = "Admin";
+    fromHistory.current = true; // the arrival URL is already in the address bar
+    applyRoute(route).finally(() => {
+      routed.current = true;
+      // After React has rendered what the route set, later navigation pushes again.
+      setTimeout(() => (fromHistory.current = false), 0);
+    });
+  }, [session]);
+  useEffect(() => {
+    const back = () => {
+      fromHistory.current = true;
+      applyRoute(urlToRoute(window.location.pathname, window.location.search)).finally(() =>
+        setTimeout(() => (fromHistory.current = false), 0),
+      );
+    };
+    window.addEventListener("popstate", back);
+    return () => window.removeEventListener("popstate", back);
+  }, []);
+  useEffect(() => {
+    if (session !== "in" || !routed.current) return;
+    const url = routeToUrl({
+      view,
+      projectId: view === "Project" ? project?.id : undefined,
+      taskId: task?.id,
+    });
+    if (url !== window.location.pathname + window.location.search) {
+      if (fromHistory.current) window.history.replaceState(null, "", url);
+      else window.history.pushState(null, "", url);
+    }
+    fromHistory.current = false;
+  }, [view, project?.id, task?.id, session]);
   // Email links land here even when someone is already signed in (signing up signs
   // you in, so the verification link usually arrives that way).
   useEffect(() => {
@@ -350,6 +410,8 @@ export default function EnterAI() {
     ) : view === "AI" ? (
       <AI
         project={scopedProject}
+        messages={aiMessages}
+        setMessages={setAiMessages}
         clear={() => setScopedProject(null)}
         onAction={async (a: Action) => {
           await api("/ai/confirm", {
@@ -368,6 +430,32 @@ export default function EnterAI() {
         edit={() => setEditProject(project)}
         create={() => setTaskForm(true)}
         ai={() => openAI(project)}
+        canManage={user?.kind === "human" && (user?.role === "admin" || user?.role === "manager")}
+        archive={async (on: boolean) => {
+          if (!project) return;
+          try {
+            const next = await api<Project>("/projects/" + project.id, {
+              method: "PATCH",
+              body: JSON.stringify({ status: on ? "archived" : "active" }),
+            });
+            setProject(next);
+            setProjects((all) => all.map((x) => (x.id === next.id ? next : x)));
+          } catch (e: any) {
+            setError(e.message);
+          }
+        }}
+        remove={async () => {
+          if (!project) return;
+          try {
+            await api("/projects/" + project.id, { method: "DELETE" });
+            setProjects((all) => all.filter((x) => x.id !== project.id));
+            setProject(null);
+            nav("Portfolio");
+            await refresh();
+          } catch (e: any) {
+            setError(e.message);
+          }
+        }}
         upload={async (f: File) => {
           if (!project) return;
           try {
@@ -529,8 +617,13 @@ export default function EnterAI() {
       )}
       {task && (
         <Drawer
+          key={task.id}
           task={task}
           users={users}
+          openTask={openTask}
+          tasksChanged={async (projectId: string) => {
+            if (project?.id === projectId) setTasks(await api<Task[]>("/projects/" + projectId + "/tasks"));
+          }}
           deleted={(gone: Task) => {
             setTasks((all) => all.filter((x) => x.id !== gone.id));
             setDashboard((d: any) =>

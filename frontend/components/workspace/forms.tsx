@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { states, Avatar, Modal, field } from "@/components/workspace/shared";
-import type { User } from "@/lib/types";
+import type { Task, User } from "@/lib/types";
 
 /** Every save goes through this: the button is disabled while it runs (no duplicate
  *  records from a double click) and a failure is shown instead of vanishing. */
@@ -353,7 +353,17 @@ export function TeamForm({ close, create }: any) {
 }
 type AttachmentRow = { id: string; file_name: string };
 
-export function Drawer({ task, users, comments, close, update, comment, deleted }: any) {
+export function Drawer({
+  task,
+  users,
+  comments,
+  close,
+  update,
+  comment,
+  deleted,
+  openTask,
+  tasksChanged,
+}: any) {
   const [body, setBody] = useState(""),
     [uploading, setUploading] = useState(false),
     [attachments, setAttachments] = useState<AttachmentRow[]>([]),
@@ -366,6 +376,18 @@ export function Drawer({ task, users, comments, close, update, comment, deleted 
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+  // Subtasks and the parent come from the task's own project, whichever view opened it.
+  const [siblings, setSiblings] = useState<Task[]>([]),
+    [newSubtask, setNewSubtask] = useState("");
+  const loadSiblings = () =>
+    api<Task[]>("/projects/" + task.project_id + "/tasks")
+      .then(setSiblings)
+      .catch(() => {});
+  useEffect(() => {
+    loadSiblings();
+  }, [task.id]);
+  const subtasks = siblings.filter((t) => t.parent_id === task.id);
+  const parent = task.parent_id ? siblings.find((t) => t.id === task.parent_id) : null;
   useEffect(() => {
     let live = true;
     api<AttachmentRow[]>("/tasks/" + task.id + "/attachments")
@@ -476,6 +498,103 @@ export function Drawer({ task, users, comments, close, update, comment, deleted 
             />
           </label>
         </div>
+        <label className="mt-3 block text-xs text-zinc-500">
+          Labels
+          <input
+            key={task.id + (task.labels || []).join(",")}
+            defaultValue={(task.labels || []).join(", ")}
+            placeholder="e.g. design, blocked"
+            className={field}
+            onBlur={(e) => {
+              const labels = Array.from(
+                new Set(
+                  e.target.value
+                    .split(",")
+                    .map((l) => l.trim())
+                    .filter(Boolean)
+                    .map((l) => l.slice(0, 40)),
+                ),
+              ).slice(0, 10);
+              if (labels.join(",") !== (task.labels || []).join(",")) update(task, { labels });
+            }}
+          />
+        </label>
+        {parent && (
+          <p className="mt-4 text-xs text-zinc-400">
+            Subtask of{" "}
+            <button className="text-sky-300 hover:underline" onClick={() => openTask(parent)}>
+              {parent.title}
+            </button>
+          </p>
+        )}
+        {!task.parent_id && (
+          <div className="mt-5">
+            <h3 className="text-sm font-medium">
+              Subtasks{" "}
+              {subtasks.length > 0 && (
+                <span className="text-xs text-zinc-400">
+                  {subtasks.filter((t) => t.status === "done").length}/{subtasks.length} done
+                </span>
+              )}
+            </h3>
+            <ul className="mt-2 space-y-1">
+              {subtasks.map((t) => (
+                <li key={t.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    aria-label={(t.status === "done" ? "Reopen " : "Complete ") + t.title}
+                    checked={t.status === "done"}
+                    onChange={async () => {
+                      const status = t.status === "done" ? "todo" : "done";
+                      // Tick immediately; the server call follows.
+                      setSiblings((all) => all.map((x) => (x.id === t.id ? { ...x, status } : x)));
+                      await update(t, { status });
+                      await loadSiblings();
+                    }}
+                  />
+                  <button
+                    className={cn(
+                      "text-left hover:underline",
+                      t.status === "done" && "text-zinc-500 line-through",
+                    )}
+                    onClick={() => openTask(t)}
+                  >
+                    {t.title}
+                  </button>
+                </li>
+              ))}
+            </ul>
+            <form
+              className="mt-2 flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                const title = newSubtask.trim();
+                if (title)
+                  run(async () => {
+                    await api("/tasks", {
+                      method: "POST",
+                      body: JSON.stringify({ project_id: task.project_id, parent_id: task.id, title }),
+                    });
+                    setNewSubtask("");
+                    await loadSiblings();
+                    tasksChanged?.(task.project_id);
+                  });
+              }}
+            >
+              <input
+                aria-label="New subtask"
+                className="min-w-0 flex-1 rounded-lg border border-line bg-canvas p-2 text-sm outline-none focus:border-accent"
+                placeholder="Add a subtask"
+                value={newSubtask}
+                onChange={(e) => setNewSubtask(e.target.value)}
+              />
+              <Button size="sm" disabled={saving}>
+                <Plus size={14} />
+                Add
+              </Button>
+            </form>
+          </div>
+        )}
         {attachments.length > 0 && (
           <div className="mt-5">
             <h3 className="text-sm font-medium">Attachments</h3>

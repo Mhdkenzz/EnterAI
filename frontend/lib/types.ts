@@ -26,6 +26,7 @@ export type Project = {
 export type Task = {
   id: string;
   project_id: string;
+  parent_id?: string | null;
   title: string;
   description?: string;
   status: string;
@@ -35,7 +36,13 @@ export type Task = {
   assignee?: User;
 };
 export type InboxNotice = { id: string; title: string; body?: string; href?: string; read: boolean };
-export type Action = { label: string; confirmation_token: string; requires_confirmation: boolean };
+export type ActionDetail = { label: string; value: string };
+export type Action = {
+  details?: ActionDetail[];
+  label: string;
+  confirmation_token: string;
+  requires_confirmation: boolean;
+};
 export type Agent = {
   id: string;
   name: string;

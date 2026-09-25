@@ -7,28 +7,30 @@ import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import type { Project, Task, Action } from "@/lib/types";
 
-export function AI({ project, clear, onAction }: any) {
+export const AI_GREETING = {
+  role: "assistant",
+  body: "I can read your workspace and propose changes. Every write needs your confirmation.",
+};
+
+/** `messages` lives in the page, so the conversation survives switching views. Each
+ *  proposed action records its outcome, so it can be run or rejected exactly once. */
+export function AI({ project, clear, onAction, messages, setMessages }: any) {
   const [text, setText] = useState("What should I work on today?"),
-    [messages, setMessages] = useState<any[]>([
-      {
-        role: "assistant",
-        body: "I can read your workspace and propose changes. Every write needs your confirmation.",
-      },
-    ]),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [outcomes, setOutcomes] = useState<Record<string, "running" | "done" | "rejected">>({});
   async function ask(question = text) {
     if (!question.trim() || busy) return;
     setText("");
     setError("");
-    setMessages((x) => [...x, { role: "user", body: question }]);
+    setMessages((x: any[]) => [...x, { role: "user", body: question }]);
     setBusy(true);
     try {
       const r = await api<any>("/ai/plan", {
         method: "POST",
         body: JSON.stringify({ message: question, project_id: project?.id || null }),
       });
-      setMessages((x) => [...x, { role: "assistant", body: r.reply, actions: r.actions }]);
+      setMessages((x: any[]) => [...x, { role: "assistant", body: r.reply, actions: r.actions }]);
     } catch (e: any) {
       setError(e.message || "Enter AI could not answer right now.");
     } finally {
@@ -62,7 +64,11 @@ export function AI({ project, clear, onAction }: any) {
           </div>
         )}
         <div className="flex flex-wrap gap-2 border-b border-line/60 px-5 py-3">
-          {["What should I work on today?", "What is at risk?", "Summarize AI Workspace"].map((prompt) => (
+          {[
+            "What should I work on today?",
+            "What is at risk?",
+            project ? `Summarize ${project.name}` : "Summarize my projects",
+          ].map((prompt) => (
             <button
               key={prompt}
               className="rounded-full border border-line px-3 py-1 text-xs text-sky-200 hover:border-sky-400/50"
@@ -74,7 +80,7 @@ export function AI({ project, clear, onAction }: any) {
           ))}
         </div>
         <div className="space-y-5 p-5">
-          {messages.map((m, i) => (
+          {messages.map((m: any, i: number) => (
             <div className={cn("flex gap-3", m.role === "user" && "justify-end")} key={i}>
               {m.role === "assistant" && (
                 <div className="grid h-7 w-7 place-items-center rounded-lg bg-sky-400/10 text-sky-300">
@@ -88,26 +94,67 @@ export function AI({ project, clear, onAction }: any) {
                 )}
               >
                 <p>{m.body}</p>
-                {m.actions?.map((a: Action) => (
-                  <div key={a.label} className="mt-3 rounded-lg border border-sky-400/30 bg-black/20 p-3">
-                    <p>{a.label}</p>
-                    <Button
-                      size="sm"
-                      className="mt-3"
-                      onClick={async () => {
-                        try {
-                          await onAction(a);
-                          setMessages((x) => [...x, { role: "assistant", body: "Done. " + a.label }]);
-                        } catch (e: any) {
-                          setError(e.message || "Confirmation failed. Please ask for a fresh proposal.");
-                        }
-                      }}
+                {m.actions?.map((a: Action) => {
+                  const outcome = outcomes[a.confirmation_token];
+                  return (
+                    <div
+                      key={a.confirmation_token}
+                      className="mt-3 rounded-lg border border-sky-400/30 bg-black/20 p-3"
                     >
-                      <Check size={14} />
-                      Confirm and run
-                    </Button>
-                  </div>
-                ))}
+                      <p className="font-medium">{a.label}</p>
+                      {!!a.details?.length && (
+                        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                          {a.details.map((d) => (
+                            <div key={d.label + d.value} className="contents">
+                              <dt className="text-zinc-400">{d.label}</dt>
+                              <dd className="break-words">{d.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                      {outcome === "done" && <p className="mt-3 text-xs text-emerald-300">Done.</p>}
+                      {outcome === "rejected" && (
+                        <p className="mt-3 text-xs text-zinc-400">Rejected. Nothing was changed.</p>
+                      )}
+                      {(!outcome || outcome === "running") && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <Button
+                            size="sm"
+                            disabled={outcome === "running"}
+                            onClick={async () => {
+                              setOutcomes((o) => ({ ...o, [a.confirmation_token]: "running" }));
+                              try {
+                                await onAction(a);
+                                setOutcomes((o) => ({ ...o, [a.confirmation_token]: "done" }));
+                              } catch (e: any) {
+                                setOutcomes((o) => {
+                                  const rest = { ...o };
+                                  delete rest[a.confirmation_token];
+                                  return rest;
+                                });
+                                setError(
+                                  e.message || "Confirmation failed. Please ask for a fresh proposal.",
+                                );
+                              }
+                            }}
+                          >
+                            <Check size={14} />
+                            {outcome === "running" ? "Running…" : "Confirm and run"}
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            disabled={outcome === "running"}
+                            onClick={() => setOutcomes((o) => ({ ...o, [a.confirmation_token]: "rejected" }))}
+                          >
+                            <X size={14} />
+                            Reject
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           ))}

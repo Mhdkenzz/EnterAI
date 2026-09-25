@@ -7,10 +7,15 @@ from app.database import get_db
 from app.models import User
 
 
-@pytest.mark.parametrize("role", ["member", "manager", "viewer"])
-@pytest.mark.parametrize("path,payload", [
-    ("/api/teams", {"name": "Denied"}),
-    ("/api/tasks/nonexistent/assign-agent", {"agent_id": "nonexistent"}),
+# Team creation is a manager power too (see main.require_manager); agent
+# assignment stays with human administrators.
+@pytest.mark.parametrize("role,path,payload", [
+    (role, path, payload)
+    for path, payload, roles in [
+        ("/api/teams", {"name": "Denied"}, ["member", "viewer"]),
+        ("/api/tasks/nonexistent/assign-agent", {"agent_id": "nonexistent"}, ["member", "manager", "viewer"]),
+    ]
+    for role in roles
 ])
 def test_admin_mutation_routes_reject_nonadmins(role, path, payload):
     user = User(id="permission-test", organization_id="permission-org", role=role,

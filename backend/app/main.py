@@ -3,7 +3,7 @@ import hashlib
 import re
 import secrets
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 import jwt
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -169,7 +169,7 @@ def shutdown():
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str = Field(max_length=200)
 class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200); accept_terms: bool = False
 class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
-class ProjectUpdate(BaseModel): name: str | None = None; code: str | None = None; description: str | None = None; status: str | None = None; health: str | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
+class ProjectUpdate(BaseModel): name: str | None = None; code: str | None = None; description: str | None = None; status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: str | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
 class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; status: str = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []
 class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
 class CommentIn(BaseModel): body: str = Field(min_length=1)
@@ -204,6 +204,14 @@ def notify(db, recipient_id: str | None, actor: User, title: str, body: str | No
     db.add(Notification(user_id=recipient_id, title=title[:220], body=body, href=href))
 
 
+def require_manager(user: User) -> None:
+    """Destructive project-level changes (delete/archive a project, delete someone
+    else's task, create teams) belong to people who run projects: human admins and
+    managers. This is what distinguishes the manager role from a member."""
+    if user.kind != "human" or user.role not in ("admin", "manager"):
+        raise HTTPException(403, "Only managers and administrators can do this")
+
+
 def ensure_project(db, user, project_id):
     project = db.get(Project, project_id)
     if not project or project.organization_id != user.organization_id: raise HTTPException(404,"Project not found")
@@ -226,6 +234,8 @@ def ensure_org_assignee(db, user, assignee_id):
     assignee = db.get(User, assignee_id)
     if not assignee or assignee.organization_id != user.organization_id:
         raise HTTPException(422, "Assignee not found in this workspace")
+    if assignee.kind == "human" and not assignee.active:
+        raise HTTPException(409, "This person has been removed from the workspace")
     if assignee.kind == "agent":
         human_admin(user)
         if assignee.retired_at is not None:
@@ -407,6 +417,8 @@ def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(cu
     if "code" in values: values["code"] = values["code"].strip().upper()
     if values.get("name") == "" or values.get("code") == "": raise HTTPException(422, "Project name and code cannot be empty")
     if "team_id" in values: ensure_org_team(db, user, values["team_id"])
+    if "status" in values and "archived" in (values["status"], p.status) and values["status"] != p.status:
+        require_manager(user)  # archiving hides the project from everyone's portfolio
     duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, Project.id != p.id, or_(Project.name.ilike(values.get("name", p.name)), Project.code.ilike(values.get("code", p.code)))))
     if duplicate: raise HTTPException(409, "A project with this name or code already exists")
     for key, value in values.items(): setattr(p, key, value)
@@ -469,6 +481,13 @@ def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(
     t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title)
     notify(db, t.assignee_id, user, f"{user.name} assigned you “{t.title}”", p.name, f"project:{p.id}")
     db.commit(); return task_out(t,db)
+@app.get("/api/tasks/{task_id}")
+def get_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    """A single task, for links that open it directly (/projects/<id>?task=<id>)."""
+    t=db.get(Task,task_id)
+    if not t: raise HTTPException(404,"Task not found")
+    ensure_project(db,user,t.project_id)
+    return task_out(t,db)
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
@@ -504,8 +523,51 @@ def detach_task_references(db, task):
 def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id); log(db,user.organization_id,user.id,"task",t.id,"deleted")
+    ensure_project(db,user,t.project_id)
+    if t.reporter_id != user.id: require_manager(user)  # members may delete only what they created
+    log(db,user.organization_id,user.id,"task",t.id,"deleted",title=t.title)
+    for a in db.scalars(select(Attachment).where(Attachment.task_id == t.id)).all():
+        _discard_file(a.path)
     detach_task_references(db,t); db.delete(t); db.commit()
+
+
+def _discard_file(identifier: str) -> None:
+    try:
+        get_storage().delete(identifier)
+    except Exception:
+        pass  # a missing file must not block deleting the row that pointed at it
+
+
+@app.delete("/api/projects/{project_id}",status_code=204)
+def delete_project(project_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    """Permanently delete a project with its tasks, comments, files and indexed text.
+    Archiving (PATCH status=archived) is the reversible alternative."""
+    require_manager(user)
+    p=ensure_project(db,user,project_id)
+    tasks=db.scalars(select(Task).where(Task.project_id==p.id)).all()
+    task_ids=[t.id for t in tasks]
+    if task_ids:
+        for a in db.scalars(select(Attachment).where(Attachment.task_id.in_(task_ids))).all():
+            _discard_file(a.path)
+        db.execute(update(Task).where(Task.id.in_(task_ids)).values(parent_id=None))
+        db.execute(delete(Comment).where(Comment.task_id.in_(task_ids)))
+        db.execute(delete(Attachment).where(Attachment.task_id.in_(task_ids)))
+        db.execute(update(User).where(User.current_task_id.in_(task_ids)).values(current_task_id=None))
+        db.execute(update(User).where(User.last_completed_task_id.in_(task_ids)).values(last_completed_task_id=None))
+        db.execute(delete(Task).where(Task.id.in_(task_ids)))
+    from .models import DocumentChunk
+    db.execute(delete(DocumentChunk).where(DocumentChunk.project_id==p.id))
+    documents=db.scalars(select(ProjectDocument).where(ProjectDocument.project_id==p.id)).all()
+    for d in documents:
+        _discard_file(d.path)
+    if documents:
+        # Explicit, ordered statements: the models declare no relationship between
+        # documents and projects, so the ORM would not know to delete these first.
+        doc_ids=[d.id for d in documents]
+        db.execute(delete(DocumentChunk).where(DocumentChunk.document_id.in_(doc_ids)))
+        db.execute(delete(ProjectDocument).where(ProjectDocument.id.in_(doc_ids)))
+    log(db,user.organization_id,user.id,"project",p.id,"deleted",name=p.name)
+    db.execute(delete(Project).where(Project.id==p.id)); db.commit()
 
 @app.get("/api/tasks/{task_id}/comments")
 def comments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
@@ -585,10 +647,11 @@ def team_projects(team_id:str,user:User=Depends(current_user),db:Session=Depends
     if not team or team.organization_id!=user.organization_id: raise HTTPException(404,"Team not found")
     return [project_out(p,db) for p in db.scalars(select(Project).where(Project.team_id==team_id, Project.organization_id==user.organization_id)).all()]
 @app.post("/api/teams",status_code=201)
-def create_team(data:TeamIn,user:User=Depends(human_admin),db:Session=Depends(get_db)):
+def create_team(data:TeamIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
+    require_manager(user)
     t=Team(organization_id=user.organization_id,**data.model_dump()); db.add(t); db.flush(); log(db,user.organization_id,user.id,"team",t.id,"created"); db.commit(); return {"id":t.id,"name":t.name,"description":t.description}
 @app.get("/api/users")
-def users(user:User=Depends(current_user),db:Session=Depends(get_db)): return [user_out(u) for u in db.scalars(select(User).where(User.organization_id==user.organization_id,User.kind=="human")).all()]
+def users(user:User=Depends(current_user),db:Session=Depends(get_db)): return [user_out(u) for u in db.scalars(select(User).where(User.organization_id==user.organization_id,User.kind=="human",User.active.is_(True))).all()]
 
 def agent_out(a: User, db: Session) -> dict:
     current = db.get(Task, a.current_task_id) if a.current_task_id else None
@@ -720,9 +783,11 @@ def read_notification(notification_id:str,user:User=Depends(current_user),db:Ses
     n=db.get(Notification,notification_id)
     if not n or n.user_id!=user.id: raise HTTPException(404,"Notification not found")
     n.read=True; log(db,user.organization_id,user.id,"notification",n.id,"read"); db.commit(); return {"ok":True}
+# Housekeeping that belongs in the audit log, not the team's activity feed.
+FEED_EXCLUDED_ACTIONS = ("logged_in", "read", "password_reset_requested")
 @app.get("/api/activity")
 def activity(user:User=Depends(current_user),db:Session=Depends(get_db)):
-    return [{"id":a.id,"action":a.action,"entity_type":a.entity_type,"detail":legacy_detail(a.detail or {}),"created_at":a.created_at,"actor":user_out(db.get(User,a.actor_id)) if a.actor_id else None} for a in db.scalars(select(Activity).where(Activity.organization_id==user.organization_id).order_by(Activity.created_at.desc()).limit(50)).all()]
+    return [{"id":a.id,"action":a.action,"entity_type":a.entity_type,"detail":legacy_detail(a.detail or {}),"created_at":a.created_at,"actor":user_out(db.get(User,a.actor_id)) if a.actor_id else None} for a in db.scalars(select(Activity).where(Activity.organization_id==user.organization_id,Activity.action.notin_(FEED_EXCLUDED_ACTIONS)).order_by(Activity.created_at.desc()).limit(50)).all()]
 @app.get("/api/search")
 def search(q:str=Query(min_length=1, max_length=200),user:User=Depends(current_user),db:Session=Depends(get_db)):
     # `%` and `_` are LIKE wildcards: escaped, "100%" finds "100%" rather than everything.

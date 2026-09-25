@@ -79,3 +79,14 @@ def test_search_treats_wildcards_literally_and_is_bounded():
         found = c.get("/api/search", headers=admin, params={"q": "100%"}).json()["tasks"]
         assert [t["title"] for t in found] == ["Reach 100% coverage"]
         assert c.get("/api/search", headers=admin, params={"q": "x" * 201}).status_code == 422
+
+
+def test_a_proposed_task_says_which_project_it_lands_in():
+    with TestClient(app) as c:
+        admin, _ = workspace(c)
+        c.post("/api/projects", headers=admin, json={"name": "Alpha", "code": "ALP"})
+        beta = c.post("/api/projects", headers=admin, json={"name": "Beta launch", "code": "BET"}).json()
+        plan = c.post("/api/ai/plan", headers=admin, json={"message": "create task Book venue for Beta launch", "project_id": beta["id"]}).json()
+        action = plan["actions"][0]
+        assert {"label": "Project", "value": "Beta launch"} in action["details"]
+        assert any(d["label"] == "Title" for d in action["details"])
