@@ -76,9 +76,12 @@ def password_problem(password: str, email: str = "") -> str | None:
 
 
 def require_strong_password(password: str, email: str = "") -> None:
+    # 400, not 422: FastAPI's published schema reserves 422 for its own validation-error
+    # list, and a hand-raised 422 with a string detail violates it (CI's schemathesis
+    # run checks every response against that schema).
     problem = password_problem(password, email)
     if problem:
-        raise HTTPException(422, problem)
+        raise HTTPException(400, problem)
 
 
 def enforce_account_login_budget(address: str) -> None:

@@ -243,14 +243,14 @@ def test_signup_refuses_the_most_common_passwords(password):
         key = uuid4().hex
         response = c.post("/api/auth/register", json={"organization_name": f"Weak {key}", "name": "Owner",
                                                       "email": f"{key}@example.com", "password": password})
-        assert response.status_code == 422 and "too common" in response.json()["detail"]
+        assert response.status_code == 400 and "too common" in response.json()["detail"]
 
 
 def test_a_password_containing_the_email_name_is_refused():
     with TestClient(app) as c:
         response = c.post("/api/auth/register", json={"organization_name": f"Weak {uuid4().hex}", "name": "Owner",
                                                       "email": "grace.hopper@example.com", "password": "grace.hopper!"})
-        assert response.status_code == 422
+        assert response.status_code == 400
 
 
 def test_change_password_needs_the_current_one_and_ends_other_sessions():
