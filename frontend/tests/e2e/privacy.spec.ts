@@ -80,10 +80,11 @@ test("export requires the correct password and then downloads a file", async ({ 
 });
 
 test("deleting an account can be canceled before it runs, and the account keeps working", async ({ page, isMobile, workspace }) => {
-  await enter(page, workspace.token);
+  // A member: the workspace's only administrator is not allowed to delete themselves.
+  await enter(page, workspace.memberToken);
   await openSettings(page, isMobile);
   await page.getByRole("button", { name: "Delete my account" }).click();
-  await page.getByRole("region", { name: "Delete my account" }).getByLabel("Confirm your password").fill(workspace.adminPassword);
+  await page.getByRole("region", { name: "Delete my account" }).getByLabel("Confirm your password").fill(workspace.memberPassword);
   await page.getByRole("button", { name: "Confirm deletion" }).click();
 
   await expect(page.getByText(/scheduled for deletion on/)).toBeVisible();

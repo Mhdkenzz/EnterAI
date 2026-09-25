@@ -1,7 +1,7 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
 import { Bell, Menu, Plus, Search, X } from "lucide-react";
-import { api, ApiError, upload } from "@/lib/api";
+import { api, ApiError, SESSION_EXPIRED_EVENT, upload } from "@/lib/api";
 import { AdminConsole } from "@/components/admin-console";
 import { PrivacySettings } from "@/components/privacy-settings";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,7 @@ import type {
 
 export default function EnterAI() {
   // "checking" until /me answers, so a signed-in reload never flashes the login screen.
-  const [session, setSession] = useState<"checking" | "in" | "out">("checking"),
+  const [session, setSession] = useState<"checking" | "in" | "out" | "unreachable">("checking"),
     [user, setUser] = useState<User | null>(null),
     [view, setView] = useState("Home"),
     [collapsed, setCollapsed] = useState(false),
@@ -81,7 +81,11 @@ export default function EnterAI() {
       loadOnboarding();
     } catch (e: any) {
       if (e instanceof ApiError && e.status === 401) setSession("out");
-      else setError(e.message);
+      else {
+        setError(e.message);
+        // First load never got an answer: say so, rather than leaving a blank page.
+        setSession((current) => (current === "checking" ? "unreachable" : current));
+      }
     }
   }
   async function loadOnboarding() {
@@ -102,8 +106,33 @@ export default function EnterAI() {
       await api("/auth/resend-verification", { method: "POST", body: JSON.stringify({ email: user.email }) });
   }
   useEffect(() => {
+    // Stripe Checkout and the billing portal return here; show the admin console,
+    // which reads and clears the ?billing= outcome.
+    if (new URLSearchParams(window.location.search).has("billing")) setView("Admin");
     refresh();
+    const expired = () => setSession("out");
+    window.addEventListener(SESSION_EXPIRED_EVENT, expired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   }, []);
+  // Email links land here even when someone is already signed in (signing up signs
+  // you in, so the verification link usually arrives that way).
+  useEffect(() => {
+    if (session !== "in") return;
+    const params = new URLSearchParams(window.location.search);
+    const verify = params.get("verify");
+    if (verify) {
+      window.history.replaceState({}, "", window.location.pathname);
+      api("/auth/verify-email", { method: "POST", body: JSON.stringify({ token: verify }) })
+        .then(() => refresh())
+        .catch((e: any) => setError(e.message));
+    } else if (params.get("invite") || params.get("reset")) {
+      // These belong to a different (or signed-out) person: end this session so the
+      // sign-in screens can use the link, which is still in the address bar.
+      api("/auth/logout", { method: "POST" })
+        .catch(() => {})
+        .finally(() => setSession("out"));
+    }
+  }, [session]);
   useEffect(() => {
     const fn = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === "k") {
@@ -250,6 +279,24 @@ export default function EnterAI() {
     }
   }
   if (session === "checking") return <div className="min-h-screen bg-canvas" />;
+  if (session === "unreachable")
+    return (
+      <main className="grid min-h-screen place-items-center bg-canvas p-6 text-ink">
+        <div role="alert" className="max-w-sm space-y-4 text-center">
+          <h1 className="text-lg font-semibold">Can’t reach Enter AI</h1>
+          <p className="text-sm text-zinc-400">Check your connection and try again. {error}</p>
+          <Button
+            onClick={() => {
+              setError("");
+              setSession("checking");
+              refresh();
+            }}
+          >
+            Try again
+          </Button>
+        </div>
+      </main>
+    );
   if (session === "out") return <AuthScreens login={login} busy={busy} error={error} signedIn={refresh} />;
   const main =
     view === "Admin" ? (
@@ -483,6 +530,14 @@ export default function EnterAI() {
       {task && (
         <Drawer
           task={task}
+          users={users}
+          deleted={(gone: Task) => {
+            setTasks((all) => all.filter((x) => x.id !== gone.id));
+            setDashboard((d: any) =>
+              d ? { ...d, my_tasks: (d.my_tasks || []).filter((x: Task) => x.id !== gone.id) } : d,
+            );
+            refresh();
+          }}
           comments={comments}
           close={() => setTask(null)}
           update={changeTask}

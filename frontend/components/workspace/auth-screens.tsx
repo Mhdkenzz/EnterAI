@@ -104,6 +104,33 @@ export function AuthScreens({ login, busy, error, signedIn }: any) {
     />
   );
 }
+// Published legal pages, compiled in at build time. When both are set, creating an
+// account requires agreeing to them; the required checkbox is the only way the form
+// submits, so `accept_terms` is simply "terms are published".
+const TERMS_URL = process.env.NEXT_PUBLIC_TERMS_URL || "";
+const PRIVACY_URL = process.env.NEXT_PUBLIC_PRIVACY_URL || "";
+const TERMS_PUBLISHED = Boolean(TERMS_URL && PRIVACY_URL);
+
+function TermsCheckbox() {
+  if (!TERMS_PUBLISHED) return null;
+  return (
+    <label className="flex items-start gap-2 text-xs text-zinc-400">
+      <input type="checkbox" required className="mt-0.5" />
+      <span>
+        I agree to the{" "}
+        <a href={TERMS_URL} target="_blank" rel="noreferrer" className="text-sky-300 underline">
+          Terms of Service
+        </a>{" "}
+        and{" "}
+        <a href={PRIVACY_URL} target="_blank" rel="noreferrer" className="text-sky-300 underline">
+          Privacy Policy
+        </a>
+        .
+      </span>
+    </label>
+  );
+}
+
 // `next dev` only: the demo login is public, and a production build must not
 // advertise it (production refuses to seed it anyway).
 const DEMO_LOGIN =
@@ -413,7 +440,7 @@ export function AcceptInvite({
             try {
               await api("/auth/accept-invite", {
                 method: "POST",
-                body: JSON.stringify({ token, name, password }),
+                body: JSON.stringify({ token, name, password, accept_terms: TERMS_PUBLISHED }),
               });
               signedIn();
             } catch (err: any) {
@@ -448,6 +475,7 @@ export function AcceptInvite({
               onChange={(e) => setPassword(e.target.value)}
             />
           </label>
+          <TermsCheckbox />
           {error && <Notice tone="error">{error}</Notice>}
           <Submit busy={busy}>Accept invitation</Submit>
           <Button type="button" variant="ghost" className="w-full" onClick={cancel}>
@@ -472,7 +500,10 @@ export function Signup({ signedIn, cancel }: { signedIn: () => void; cancel: () 
           setBusy(true);
           setError("");
           try {
-            await api("/auth/register", { method: "POST", body: JSON.stringify(form) });
+            await api("/auth/register", {
+              method: "POST",
+              body: JSON.stringify({ ...form, accept_terms: TERMS_PUBLISHED }),
+            });
             signedIn();
           } catch (err: any) {
             setError(err.message);
@@ -521,6 +552,7 @@ export function Signup({ signedIn, cancel }: { signedIn: () => void; cancel: () 
         <p className="text-xs text-zinc-500">
           At least 8 characters. We'll email you a link to confirm your address.
         </p>
+        <TermsCheckbox />
         {error && <Notice tone="error">{error}</Notice>}
         <Submit busy={busy}>Create workspace</Submit>
         <Button type="button" variant="ghost" className="w-full" onClick={cancel}>

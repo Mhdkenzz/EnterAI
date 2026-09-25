@@ -79,13 +79,13 @@ test("the SSO callback shows a generic error and clears its fragment", async ({ 
   expect(page.url()).not.toContain("sso_error=");
 });
 
-test("sign out clears the session cookie and does not restore the workspace", async ({ page }) => {
+test("sign out clears the session cookie and does not restore the workspace", async ({ page, isMobile }) => {
   const key = unique("logout");
   const account = await registerWorkspace(page, key, `Logout Org ${key}`);
   await signIn(page.context(), account.token);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
-  await page.getByRole("button", { name: "Open menu" }).click();
+  if (isMobile) await page.getByRole("button", { name: "Open menu" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Enter AI" })).toBeVisible();
   expect(await sessionCookie(page.context())).toBeUndefined();

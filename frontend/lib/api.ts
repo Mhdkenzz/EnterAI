@@ -14,9 +14,38 @@ export class ApiError extends Error {
   }
 }
 
-async function failure(response: Response, fallback: string): Promise<ApiError> {
-  const detail = (await response.json().catch(() => ({ detail: fallback }))).detail;
-  return new ApiError(typeof detail === "string" ? detail : fallback, response.status);
+// Fired when a signed-in request comes back 401 (expired, revoked or signed out
+// elsewhere); the app listens for it and returns to the sign-in screen.
+export const SESSION_EXPIRED_EVENT = "enterai:session-expired";
+
+/** FastAPI validation errors arrive as a list of {loc, msg}; show the first one as a
+ *  sentence instead of a generic "Request failed". */
+function describe(detail: unknown, fallback: string): string {
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail) && detail.length) {
+    const first = detail[0] as { loc?: unknown[]; msg?: string };
+    const field = Array.isArray(first.loc) ? String(first.loc[first.loc.length - 1] ?? "") : "";
+    const label = field && field !== "body" ? field.replace(/_/g, " ") + ": " : "";
+    if (first.msg) return label + first.msg.replace(/^Value error, /, "");
+  }
+  return fallback;
+}
+
+/** A 401 is not always a dead session: re-entering a wrong password to export data or
+ *  delete an account is also a 401. Only sign the person out when /me agrees. */
+function checkSession(path: string) {
+  if (typeof window === "undefined" || path.startsWith("/auth/")) return;
+  const expired = () => window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT));
+  if (path === "/me") return expired();
+  fetch(`${API_BASE}/me`, { credentials: "include" })
+    .then((r) => r.status === 401 && expired())
+    .catch(() => {});
+}
+
+async function failure(response: Response, fallback: string, path: string): Promise<ApiError> {
+  if (response.status === 401) checkSession(path);
+  const body = await response.json().catch(() => ({ detail: fallback }));
+  return new ApiError(describe(body.detail, fallback), response.status);
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -25,7 +54,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     credentials: "include",
     headers: { "Content-Type": "application/json", ...CLIENT_HEADER, ...options.headers },
   });
-  if (!response.ok) throw await failure(response, "Request failed");
+  if (!response.ok) throw await failure(response, "Request failed", path);
   return response.status === 204 ? (undefined as T) : response.json();
 }
 
@@ -38,6 +67,6 @@ export async function upload<T>(path: string, file: File): Promise<T> {
     credentials: "include",
     headers: CLIENT_HEADER,
   });
-  if (!response.ok) throw await failure(response, "Upload failed");
+  if (!response.ok) throw await failure(response, "Upload failed", path);
   return response.json();
 }

@@ -23,7 +23,8 @@ export function Onboarding({
     [busy, setBusy] = useState(false),
     [error, setError] = useState(""),
     [sent, setSent] = useState("");
-  if (!state || state.complete) return null;
+  // Setup is the administrator's checklist; members could neither act on it nor dismiss it.
+  if (!state || state.complete || !state.can_invite) return null;
   const steps = state.steps || [],
     remaining = steps.filter((s: any) => !s.done).length;
   return (

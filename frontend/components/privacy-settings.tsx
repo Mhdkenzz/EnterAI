@@ -73,8 +73,10 @@ export function PrivacySettings({ userId }: { userId: string }) {
   return <div className="min-w-0 space-y-6 [overflow-wrap:anywhere]">
     <div>
       <h1 className="text-2xl font-semibold">Privacy</h1>
-      <p className="mt-2 text-sm text-zinc-300">Export your data or delete your account. Both require your password again, even though you are signed in.</p>
+      <p className="mt-2 text-sm text-zinc-300">Change your password, export your data or delete your account. Each asks for your current password, even though you are signed in.</p>
     </div>
+
+    <ChangePasswordSection />
 
     <section aria-labelledby="export-heading" className="space-y-3">
       <h2 id="export-heading" className="text-lg font-semibold">Export my data</h2>
@@ -124,4 +126,45 @@ export function PrivacySettings({ userId }: { userId: string }) {
       </Card>}
     </section>
   </div>;
+}
+
+/** Change the password without the email reset round trip. Other sessions end; this one continues. */
+function ChangePasswordSection() {
+  const [current, setCurrent] = useState(""), [next, setNext] = useState(""), [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false), [error, setError] = useState(""), [done, setDone] = useState(false);
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    setError(""); setDone(false);
+    if (next !== confirm) { setError("The new passwords do not match."); return; }
+    setBusy(true);
+    try {
+      await api("/me/password", { method: "POST", body: JSON.stringify({ current_password: current, new_password: next }) });
+      setCurrent(""); setNext(""); setConfirm(""); setDone(true);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Could not change your password.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return <section aria-labelledby="password-heading" className="space-y-3">
+    <h2 id="password-heading" className="text-lg font-semibold">Password</h2>
+    <Card className="min-w-0 p-5">
+      <form onSubmit={submit} className="grid min-w-0 gap-3 sm:grid-cols-3">
+        <label className="text-sm text-zinc-300">Current password
+          <input type="password" autoComplete="current-password" required className={field} value={current} onChange={e => setCurrent(e.target.value)} />
+        </label>
+        <label className="text-sm text-zinc-300">New password
+          <input type="password" autoComplete="new-password" required minLength={8} className={field} value={next} onChange={e => setNext(e.target.value)} />
+        </label>
+        <label className="text-sm text-zinc-300">Confirm new password
+          <input type="password" autoComplete="new-password" required minLength={8} className={field} value={confirm} onChange={e => setConfirm(e.target.value)} />
+        </label>
+        <div className="flex flex-wrap items-center gap-3 sm:col-span-3">
+          <Button type="submit" disabled={busy}>{busy ? "Changing…" : "Change password"}</Button>
+          {done && <p role="status" className="text-sm text-emerald-300">Password changed. Your other sessions were signed out.</p>}
+          {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
+        </div>
+      </form>
+    </Card>
+  </section>;
 }

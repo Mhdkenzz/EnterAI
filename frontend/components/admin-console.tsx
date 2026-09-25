@@ -4,6 +4,8 @@ import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { BillingSection } from "@/components/billing-settings";
+import { TeamInvitesSection } from "@/components/team-invites";
 
 type Settings = { execution_enabled: boolean };
 type AdminUser = { id: string; name: string; role: "admin" | "manager" | "member"; active: boolean };
@@ -108,6 +110,8 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
     </Card>}
     {mutationError && <p role="alert" className="rounded-lg border border-red-400/40 p-3 text-sm text-red-300">{mutationError}</p>}
     <p role="status" aria-live="polite" className="text-sm text-sky-200">{pending ? "Saving changes…" : notice}</p>
+    <BillingSection />
+    <TeamInvitesSection />
     {!loading && !loadError && usage && settings && <>
       <section aria-labelledby="usage-heading" className="space-y-3">
         <div className="flex flex-wrap items-start justify-between gap-3">

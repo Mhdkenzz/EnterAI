@@ -12,6 +12,10 @@ COPY . .
 ARG BUILD_ENVIRONMENT=development
 ARG NEXT_PUBLIC_API_URL=""
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# Links to the published legal pages; when set, signup requires agreeing to them.
+ARG NEXT_PUBLIC_TERMS_URL=""
+ARG NEXT_PUBLIC_PRIVACY_URL=""
+ENV NEXT_PUBLIC_TERMS_URL=$NEXT_PUBLIC_TERMS_URL NEXT_PUBLIC_PRIVACY_URL=$NEXT_PUBLIC_PRIVACY_URL
 # Next public variables are compiled into the browser bundle.  Hosted builds must
 # receive the public API endpoint now; a runtime Compose environment cannot fix it.
 RUN if [ "$BUILD_ENVIRONMENT" = "staging" ] || [ "$BUILD_ENVIRONMENT" = "production" ]; then \

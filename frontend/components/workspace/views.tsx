@@ -1,6 +1,7 @@
 "use client";
 import { useState } from "react";
 import { ChevronRight, FileText, Grid2X2, LayoutList, Plus, Sparkles } from "lucide-react";
+import { API_BASE } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -293,9 +294,13 @@ export function ProjectView({ project, tasks, open, update, edit, create, ai, up
           <FileText size={16} className="text-sky-300" />
           <span className="text-sm font-medium">Project documents</span>
           {project.documents?.map((d: Doc) => (
-            <span key={d.id} className="rounded bg-white/5 px-2 py-1 text-xs text-zinc-400">
+            <a
+              key={d.id}
+              href={`${API_BASE}/project-documents/${d.id}/download`}
+              className="rounded bg-white/5 px-2 py-1 text-xs text-sky-300 hover:underline"
+            >
               {d.file_name}
-            </span>
+            </a>
           ))}
           <label className="ml-auto cursor-pointer text-xs text-sky-300">
             Attach document
@@ -327,9 +332,11 @@ export function ProjectView({ project, tasks, open, update, edit, create, ai, up
 }
 export function Kanban({ tasks, open, update }: any) {
   return (
-    <div className="grid gap-3 overflow-x-auto pb-3 lg:grid-cols-5">
+    // Tracks never shrink below a readable card width; when five don't fit beside the
+    // sidebar the board scrolls sideways instead of overlapping its columns.
+    <div className="grid gap-3 overflow-x-auto pb-3 lg:grid-cols-[repeat(5,minmax(14rem,1fr))]">
       {states.map((s) => (
-        <div className="min-w-56" key={s}>
+        <div className="min-w-0" key={s}>
           <div className="mb-3 flex justify-between px-1 text-xs text-zinc-400">
             <span className="capitalize">{s.replace("_", " ")}</span>
             <span>{tasks.filter((t: Task) => t.status === s).length}</span>

@@ -1,5 +1,5 @@
 "use client";
-import { type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { Check, X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
@@ -70,14 +70,35 @@ export function Row({ task, open, toggle }: { task: Task; open: () => void; togg
   );
 }
 export function Modal({ title, close, children }: { title: string; close: () => void; children: ReactNode }) {
+  const panel = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  // Parents pass a new `close` on every render; read the latest through a ref so the
+  // effect below runs once, instead of stealing focus back on each re-render.
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    // Keyboard users land inside the dialog, and Escape closes it.
+    panel.current
+      ?.querySelector<HTMLElement>("input, select, textarea, button:not([aria-label='Close dialog'])")
+      ?.focus();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeRef.current();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
   return (
     <div className="fixed inset-0 z-40 grid place-items-center bg-black/60 p-4" onMouseDown={close}>
       <Card
+        ref={panel}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
         className="max-h-[90vh] w-full max-w-lg overflow-y-auto p-5 shadow-2xl"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="mb-5 flex justify-between">
-          <h2 className="font-medium">{title}</h2>
+          <h2 id={titleId} className="font-medium">
+            {title}
+          </h2>
           <button aria-label="Close dialog" onClick={close}>
             <X className="text-zinc-500" size={18} />
           </button>

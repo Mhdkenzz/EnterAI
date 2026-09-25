@@ -1,12 +1,37 @@
 "use client";
-import { useState } from "react";
-import { Paperclip, Plus, Send, X } from "lucide-react";
-import { api, upload } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { Download, Paperclip, Plus, Send, X } from "lucide-react";
+import { API_BASE, api, upload } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { states, Avatar, Modal, field } from "@/components/workspace/shared";
 import type { User } from "@/lib/types";
+
+/** Every save goes through this: the button is disabled while it runs (no duplicate
+ *  records from a double click) and a failure is shown instead of vanishing. */
+function useSubmit() {
+  const [saving, setSaving] = useState(false),
+    [saveError, setSaveError] = useState("");
+  async function run(action: () => Promise<unknown>) {
+    if (saving) return;
+    setSaving(true);
+    setSaveError("");
+    try {
+      await action();
+    } catch (e: any) {
+      setSaveError(e?.message || "Could not save. Please try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+  const failure = saveError ? (
+    <p role="alert" className="text-sm text-red-300">
+      {saveError}
+    </p>
+  ) : null;
+  return { saving, run, failure };
+}
 
 export function ProjectForm({ teams, close, create }: any) {
   const [name, setName] = useState(""),
@@ -18,9 +43,11 @@ export function ProjectForm({ teams, close, create }: any) {
     [draft, setDraft] = useState<any>(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const { saving, run, failure } = useSubmit();
   async function read(file?: File) {
     if (!file) return;
     setBusy(true);
+    setError("");
     try {
       const r = await upload<any>("/project-drafts/assist", file);
       setName(r.draft.name);
@@ -44,15 +71,17 @@ export function ProjectForm({ teams, close, create }: any) {
         onSubmit={(e) => {
           e.preventDefault();
           if (name.trim() && code.trim())
-            create({
-              name: name.trim(),
-              code: code.trim(),
-              description,
-              team_id: team || null,
-              health,
-              color: "#38bdf8",
-              source_document_ids: doc ? [doc] : [],
-            });
+            run(() =>
+              create({
+                name: name.trim(),
+                code: code.trim(),
+                description,
+                team_id: team || null,
+                health,
+                color: "#38bdf8",
+                source_document_ids: doc ? [doc] : [],
+              }),
+            );
         }}
       >
         <label className="block rounded-lg border border-dashed border-line p-3 text-sm text-zinc-400">
@@ -69,6 +98,7 @@ export function ProjectForm({ teams, close, create }: any) {
           />
         </label>
         {error && <p className="text-sm text-red-300">{error}</p>}
+        {failure}
         {draft && (
           <div className="rounded-lg border border-sky-400/20 bg-sky-400/[.04] p-3 text-xs text-zinc-300">
             <p className="font-medium text-sky-200">AI suggestions</p>
@@ -130,9 +160,9 @@ export function ProjectForm({ teams, close, create }: any) {
           <Button type="button" variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" disabled={busy || saving}>
             <Plus size={15} />
-            Create project
+            {saving ? "Creating…" : "Create project"}
           </Button>
         </div>
       </form>
@@ -145,19 +175,22 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
     [description, setDescription] = useState(project.description || ""),
     [health, setHealth] = useState(project.health),
     [team, setTeam] = useState(teams.find((t: any) => t.name === project.team)?.id || "");
+  const { saving, run, failure } = useSubmit();
   return (
     <Modal title="Edit project" close={close}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
-          save({
-            name: name.trim(),
-            code: code.trim().toUpperCase(),
-            description,
-            health,
-            team_id: team || null,
-          });
+          run(() =>
+            save({
+              name: name.trim(),
+              code: code.trim().toUpperCase(),
+              description,
+              health,
+              team_id: team || null,
+            }),
+          );
         }}
       >
         <div className="grid gap-3 sm:grid-cols-[1fr_.45fr]">
@@ -204,11 +237,14 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
             </select>
           </label>
         </div>
+        {failure}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button type="submit">Save changes</Button>
+          <Button type="submit" disabled={saving}>
+            {saving ? "Saving…" : "Save changes"}
+          </Button>
         </div>
       </form>
     </Modal>
@@ -219,13 +255,15 @@ export function TaskForm({ project, users, close, create }: any) {
     [description, setDescription] = useState(""),
     [priority, setPriority] = useState("medium"),
     [assignee, setAssignee] = useState("");
+  const { saving, run, failure } = useSubmit();
   return (
     <Modal title={"New task in " + project.name} close={close}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (title) create({ title, description, priority, assignee_id: assignee || null });
+          if (title.trim())
+            run(() => create({ title: title.trim(), description, priority, assignee_id: assignee || null }));
         }}
       >
         <label className="block text-xs text-zinc-400">
@@ -261,13 +299,14 @@ export function TaskForm({ project, users, close, create }: any) {
             </select>
           </label>
         </div>
+        {failure}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button type="submit">
+          <Button type="submit" disabled={saving}>
             <Plus size={15} />
-            Create task
+            {saving ? "Creating…" : "Create task"}
           </Button>
         </div>
       </form>
@@ -277,13 +316,14 @@ export function TaskForm({ project, users, close, create }: any) {
 export function TeamForm({ close, create }: any) {
   const [name, setName] = useState(""),
     [description, setDescription] = useState("");
+  const { saving, run, failure } = useSubmit();
   return (
     <Modal title="New team" close={close}>
       <form
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (name) create({ name, description });
+          if (name.trim()) run(() => create({ name: name.trim(), description }));
         }}
       >
         <label className="block text-xs text-zinc-400">
@@ -298,26 +338,52 @@ export function TeamForm({ close, create }: any) {
             onChange={(e) => setDescription(e.target.value)}
           />
         </label>
+        {failure}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button type="submit">Create team</Button>
+          <Button type="submit" disabled={saving}>
+            {saving ? "Creating…" : "Create team"}
+          </Button>
         </div>
       </form>
     </Modal>
   );
 }
-export function Drawer({ task, comments, close, update, comment }: any) {
+type AttachmentRow = { id: string; file_name: string };
+
+export function Drawer({ task, users, comments, close, update, comment, deleted }: any) {
   const [body, setBody] = useState(""),
     [uploading, setUploading] = useState(false),
-    [uploaded, setUploaded] = useState("");
+    [attachments, setAttachments] = useState<AttachmentRow[]>([]),
+    [attachError, setAttachError] = useState("");
+  const { saving, run, failure } = useSubmit();
+  const closeRef = useRef(close);
+  closeRef.current = close;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && closeRef.current();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  useEffect(() => {
+    let live = true;
+    api<AttachmentRow[]>("/tasks/" + task.id + "/attachments")
+      .then((rows) => live && setAttachments(rows))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [task.id]);
   async function attach(file?: File) {
     if (!file) return;
     setUploading(true);
+    setAttachError("");
     try {
-      const r = await upload<any>("/tasks/" + task.id + "/attachments", file);
-      setUploaded(r.file_name);
+      const r = await upload<AttachmentRow>("/tasks/" + task.id + "/attachments", file);
+      setAttachments((rows) => [...rows, r]);
+    } catch (e: any) {
+      setAttachError(e.message);
     } finally {
       setUploading(false);
     }
@@ -325,6 +391,9 @@ export function Drawer({ task, comments, close, update, comment }: any) {
   return (
     <div className="fixed inset-0 z-30 bg-black/45" onMouseDown={close}>
       <aside
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Task: ${task.title}`}
         className="absolute inset-y-0 right-0 w-full max-w-xl overflow-y-auto border-l border-line bg-[#0e0e12] p-5 sm:p-6"
         onMouseDown={(e) => e.stopPropagation()}
       >
@@ -337,8 +406,14 @@ export function Drawer({ task, comments, close, update, comment }: any) {
           </button>
         </div>
         <input
+          aria-label="Task title"
           defaultValue={task.title}
-          onBlur={(e) => e.target.value !== task.title && update(task, { title: e.target.value })}
+          onBlur={(e) => {
+            const next = e.target.value.trim();
+            // A task needs a name: an emptied title goes back to what it was.
+            if (!next) e.target.value = task.title;
+            else if (next !== task.title) update(task, { title: next });
+          }}
           className="w-full bg-transparent text-xl font-semibold outline-none"
         />
         <textarea
@@ -374,7 +449,51 @@ export function Drawer({ task, comments, close, update, comment }: any) {
               <option>high</option>
             </select>
           </label>
+          <label className="text-xs text-zinc-500">
+            Assignee
+            <select
+              className={field}
+              value={task.assignee?.id || ""}
+              onChange={(e) => update(task, { assignee_id: e.target.value || null })}
+            >
+              <option value="">Unassigned</option>
+              {(users || []).map((u: User) => (
+                <option key={u.id} value={u.id}>
+                  {u.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs text-zinc-500">
+            Due date
+            <input
+              type="date"
+              className={field}
+              value={task.due_date ? String(task.due_date).slice(0, 10) : ""}
+              onChange={(e) =>
+                update(task, { due_date: e.target.value ? e.target.value + "T00:00:00" : null })
+              }
+            />
+          </label>
         </div>
+        {attachments.length > 0 && (
+          <div className="mt-5">
+            <h3 className="text-sm font-medium">Attachments</h3>
+            <ul className="mt-2 space-y-1">
+              {attachments.map((a) => (
+                <li key={a.id}>
+                  <a
+                    href={`${API_BASE}/attachments/${a.id}/download`}
+                    className="inline-flex items-center gap-2 text-sm text-sky-300 hover:underline"
+                  >
+                    <Download size={14} />
+                    {a.file_name}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div className="mt-7 border-t border-line pt-5">
           <h3 className="text-sm font-medium">Comments</h3>
           <div className="mt-4 space-y-3">
@@ -392,10 +511,12 @@ export function Drawer({ task, comments, close, update, comment }: any) {
             className="mt-5 flex gap-2"
             onSubmit={(e) => {
               e.preventDefault();
-              if (body) {
-                comment(body);
-                setBody("");
-              }
+              const text = body.trim();
+              if (text)
+                run(async () => {
+                  await comment(text);
+                  setBody("");
+                });
             }}
           >
             <input
@@ -404,10 +525,11 @@ export function Drawer({ task, comments, close, update, comment }: any) {
               onChange={(e) => setBody(e.target.value)}
               placeholder="Write a comment"
             />
-            <Button size="sm">
+            <Button size="sm" aria-label="Post comment" disabled={saving}>
               <Send size={14} />
             </Button>
           </form>
+          {failure}
         </div>
         <div className="mt-5 flex flex-wrap gap-2">
           <label className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border border-line bg-panel px-3 text-xs">
@@ -415,13 +537,23 @@ export function Drawer({ task, comments, close, update, comment }: any) {
             {uploading ? "Uploading..." : "Attach file"}
             <input type="file" className="hidden" onChange={(e) => attach(e.target.files?.[0])} />
           </label>
-          {uploaded && <span className="self-center text-xs text-emerald-300">Uploaded {uploaded}</span>}
+          {attachError && (
+            <span role="alert" className="self-center text-xs text-red-300">
+              {attachError}
+            </span>
+          )}
           <Button
             variant="danger"
             size="sm"
             onClick={async () => {
-              await api("/tasks/" + task.id, { method: "DELETE" });
-              close();
+              if (!window.confirm(`Delete “${task.title}”? This cannot be undone.`)) return;
+              try {
+                await api("/tasks/" + task.id, { method: "DELETE" });
+                deleted?.(task);
+                close();
+              } catch (e: any) {
+                setAttachError(e.message);
+              }
             }}
           >
             Delete
