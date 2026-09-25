@@ -373,7 +373,7 @@ def test_sso_start_hands_an_unconfigured_domain_back_to_the_generic_ui_error():
         assert "provider" not in response.headers["location"].lower()
 
 
-def test_sso_callback_route_completes_a_real_login_with_a_client_only_token_fragment(fake_idp):
+def test_sso_callback_route_completes_a_real_login_with_an_httponly_session_cookie(fake_idp):
     with TestClient(backend_app) as c, SessionLocal() as db:
         domain = f"callbackroute-{uuid4().hex}.example"
         org, idp = _org_and_idp(db, fake_idp, domain=domain)
@@ -389,13 +389,14 @@ def test_sso_callback_route_completes_a_real_login_with_a_client_only_token_frag
         }, follow_redirects=False)
         assert callback.status_code == 302
         redirected = urlparse(callback.headers["location"])
-        redirect_fragment = parse_qs(redirected.fragment)
         assert redirected.path == "/sso/callback"
         assert redirected.query == ""
-        assert "sso_token" in redirect_fragment
-        assert "organization_id" not in redirect_fragment
+        assert redirected.fragment == ""  # the token never rides in the URL
+        set_cookie = callback.headers["set-cookie"]
+        assert set_cookie.startswith("enterai_session=")
+        assert "HttpOnly" in set_cookie and "Path=/api" in set_cookie
 
-        me = c.get("/api/me", headers={"Authorization": f"Bearer {redirect_fragment['sso_token'][0]}"})
+        me = c.get("/api/me")  # the TestClient cookie jar now carries the session
         assert me.status_code == 200
 
 

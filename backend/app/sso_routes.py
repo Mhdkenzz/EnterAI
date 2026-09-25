@@ -2,7 +2,6 @@
 import os
 from datetime import datetime, timezone
 from typing import Literal
-from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from . import secrets_store, sso_oidc
 from .admin import human_admin
+from .auth import set_session_cookie
 from .database import get_db
 from .models import User, AuditEvent
 from .services import log
@@ -253,11 +253,9 @@ def sso_login_start(email: EmailStr, db: Session = Depends(get_db)):
 def sso_login_callback(request: Request, db: Session = Depends(get_db)):
     """The IdP redirects the browser back here with `code`+`state` (success)
     or `error` (the user canceled, access was denied, etc). Never renders
-    anything itself -- always redirects on to the frontend, with a session
-    token on success or a generic error code on failure, so the frontend owns
-    the actual sign-in UI. The token travels as a query param the frontend
-    reads once and discards from the URL, the same handoff shape as an
-    emailed verification link."""
+    anything itself -- always redirects on to the frontend, carrying a session
+    cookie on success or a generic error code on failure, so the frontend owns
+    the actual sign-in UI."""
     params = request.query_params
     state = params.get('state')
     if not state:
@@ -267,11 +265,11 @@ def sso_login_callback(request: Request, db: Session = Depends(get_db)):
             db, code=params.get('code'), state=state, idp_error=params.get('error'))
     except sso_oidc.OIDCError:
         return _sso_failure_redirect()
-    # A fragment is kept entirely client-side.  The session token therefore
-    # never appears in a frontend/proxy request URL, browser referrer, or the
-    # callback route's server-side logs before the frontend stores it.
-    fragment = urlencode({'sso_token': token})
-    return RedirectResponse(f'{_app_base_url()}/sso/callback#{fragment}', status_code=302)
+    # The session travels as an httpOnly cookie set on this redirect, so the
+    # token never appears in a URL, a referrer, a log line, or page script.
+    response = RedirectResponse(f'{_app_base_url()}/sso/callback', status_code=302)
+    set_session_cookie(response, token)
+    return response
 
 
 # --- SCIM endpoints ---

@@ -3,7 +3,7 @@ import ipaddress
 import os
 from datetime import datetime, timedelta, timezone
 import jwt
-from fastapi import Depends, HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
 from sqlalchemy import select
@@ -75,6 +75,37 @@ def create_token(user: User):
                        "iat": int(now.timestamp()), "exp": now + timedelta(days=7)}, SECRET, algorithm="HS256")
 
 
+# The browser dashboard holds its session in an httpOnly cookie rather than in
+# localStorage, so script injected into the page cannot read the token and carry it
+# off. Non-browser clients (the CLI, SCIM-style automation, tests) keep sending the
+# same JWT as a bearer header; the login responses still return it for them.
+SESSION_COOKIE = "enterai_session"
+SESSION_MAX_AGE = 7 * 86400
+# A cookie is sent on any request the browser makes to this host, including a form
+# post from another site. Requiring a custom header on cookie-authenticated writes
+# closes that: a cross-origin page cannot add one without a CORS preflight, which
+# only the configured origins pass.
+CSRF_HEADER = "X-EnterAI-Client"
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+def _session_cookie_secure() -> bool:
+    configured = os.getenv("SESSION_COOKIE_SECURE", "").strip().lower()
+    if configured:
+        return configured in {"1", "true", "yes", "on"}
+    return is_deployment_environment()
+
+
+def set_session_cookie(response: Response, token: str) -> None:
+    response.set_cookie(SESSION_COOKIE, token, max_age=SESSION_MAX_AGE, path="/api",
+                        httponly=True, secure=_session_cookie_secure(), samesite="lax")
+
+
+def clear_session_cookie(response: Response) -> None:
+    response.delete_cookie(SESSION_COOKIE, path="/api", httponly=True,
+                           secure=_session_cookie_secure(), samesite="lax")
+
+
 def _client_ip(request: Request) -> str | None:
     """Same trusted-proxy rule as accounts.client_key: only consulted behind a
     proxy the deployment says it controls, and only that proxy's own appended
@@ -130,8 +161,14 @@ def _enforce_session_policy(db: Session, user: User, payload: dict) -> None:
 
 
 def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db: Session = Depends(get_db), request: Request = None):
-    if not credentials: raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in required")
-    try: payload = jwt.decode(credentials.credentials, SECRET, algorithms=["HS256"])
+    if credentials:
+        raw_token = credentials.credentials
+    else:
+        raw_token = request.cookies.get(SESSION_COOKIE) if request is not None else None
+        if not raw_token: raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sign in required")
+        if request.method not in _SAFE_METHODS and not request.headers.get(CSRF_HEADER):
+            raise HTTPException(status_code=403, detail="Missing request header for cookie session")
+    try: payload = jwt.decode(raw_token, SECRET, algorithms=["HS256"])
     except jwt.PyJWTError: raise HTTPException(status_code=401, detail="Invalid session")
     if payload.get("kind") != SESSION_TOKEN_KIND: raise HTTPException(status_code=401, detail="Invalid session")
     user = db.scalar(select(User).where(User.id == payload.get("sub")))

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import { sessionCookie, signIn } from "./session";
 
 const API = process.env.E2E_API_URL || "http://127.0.0.1:8000/api";
 
@@ -31,11 +32,14 @@ function seed(script: string, args: string[]) {
   }).trim();
 }
 
-async function registerWorkspace(request: Page["request"], key: string, name: string) {
-  const response = await request.post(`${API}/auth/register`, {
+async function registerWorkspace(page: Page, key: string, name: string) {
+  const response = await page.request.post(`${API}/auth/register`, {
     data: { organization_name: name, name: "Owner", email: `${key}@example.com`, password: "owner-password-1" },
   });
   expect(response.ok(), await response.text()).toBeTruthy();
+  // page.request shares the browser's cookie jar, so registering signed the page in.
+  // Start every test signed out; the ones that need a session sign in explicitly.
+  await page.context().clearCookies();
   return response.json();
 }
 
@@ -58,12 +62,14 @@ test("a visitor can create a workspace and lands in it as its first admin", asyn
   await expect(page.getByRole("button", { name: "Send invite" })).toBeVisible();
 });
 
-test("the SSO callback keeps a session token client-side and clears it after sign-in", async ({ page }) => {
+test("the SSO callback opens the workspace from the session cookie the API set", async ({ page }) => {
   const key = unique("sso");
-  const account = await registerWorkspace(page.request, key, `SSO Org ${key}`);
-  await page.goto(`/sso/callback#sso_token=${account.token}`);
+  const account = await registerWorkspace(page, key, `SSO Org ${key}`);
+  // The API's callback sets this cookie on its redirect; the token never rides in the URL.
+  await signIn(page.context(), account.token);
+  await page.goto("/sso/callback");
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
-  expect(page.url()).not.toContain("sso_token=");
+  expect(page.url()).not.toContain("#");
   expect(page.url()).not.toContain("?");
 });
 
@@ -73,17 +79,16 @@ test("the SSO callback shows a generic error and clears its fragment", async ({ 
   expect(page.url()).not.toContain("sso_error=");
 });
 
-test("sign out removes the local session and does not restore the workspace", async ({ page }) => {
+test("sign out clears the session cookie and does not restore the workspace", async ({ page }) => {
   const key = unique("logout");
-  const account = await registerWorkspace(page.request, key, `Logout Org ${key}`);
+  const account = await registerWorkspace(page, key, `Logout Org ${key}`);
+  await signIn(page.context(), account.token);
   await page.goto("/");
-  await page.evaluate(value => localStorage.setItem("enter-token", value), account.token);
-  await page.reload();
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
   await page.getByRole("button", { name: "Open menu" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Enter AI" })).toBeVisible();
-  expect(await page.evaluate(() => localStorage.getItem("enter-token"))).toBeNull();
+  expect(await sessionCookie(page.context())).toBeUndefined();
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Enter AI" })).toBeVisible();
 });
@@ -99,7 +104,7 @@ test("forgot password never reveals whether an address has an account", async ({
 
 test("an invited teammate accepts from the emailed link and is signed in", async ({ page }) => {
   const key = unique("invite");
-  const account = await registerWorkspace(page.request, key, `Invite Org ${key}`);
+  const account = await registerWorkspace(page, key, `Invite Org ${key}`);
   const token = rawToken();
   const invitee = `${key}-mate@example.com`;
 
@@ -134,7 +139,7 @@ with SessionLocal() as db:
 
 test("a reset link lets its owner choose a new password and sign in with it", async ({ page }) => {
   const key = unique("reset");
-  const account = await registerWorkspace(page.request, key, `Reset Org ${key}`);
+  const account = await registerWorkspace(page, key, `Reset Org ${key}`);
   const token = rawToken();
 
   seed(`
@@ -186,7 +191,7 @@ test("the reset screen catches mismatched passwords before submitting", async ({
 
 test("a verification link confirms the address and clears the banner", async ({ page }) => {
   const key = unique("verify");
-  const account = await registerWorkspace(page.request, key, `Verify Org ${key}`);
+  const account = await registerWorkspace(page, key, `Verify Org ${key}`);
   const token = rawToken();
 
   seed(`
@@ -207,7 +212,7 @@ with SessionLocal() as db:
   await page.goto(`/?verify=${token}`);
   await expect(page.getByRole("status")).toContainText("email address is confirmed");
 
-  await page.addInitScript(value => localStorage.setItem("enter-token", value), account.token);
+  await signIn(page.context(), account.token);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
   await expect(page.getByText("Confirm your email address to secure your account.")).toHaveCount(0);

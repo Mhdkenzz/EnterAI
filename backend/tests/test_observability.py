@@ -11,6 +11,9 @@ def workspace(client):
     key = uuid4().hex
     response = client.post('/api/auth/register', json={'organization_name': key, 'name': 'Admin', 'email': f'{key}@example.com', 'password': 'test-password'})
     assert response.status_code == 200
+    # Registering also sets the browser session cookie. These tests authenticate with
+    # explicit bearer headers, so drop it: a later "no credentials" request must stay anonymous.
+    client.cookies.clear()
     data = response.json()
     return {'Authorization': 'Bearer ' + data['token']}, data
 

@@ -129,3 +129,56 @@ def test_the_proxy_header_is_used_only_when_the_deployment_opts_in(monkeypatch):
     forwarded = request_with("10.0.0.9", {"x-forwarded-for": "203.0.113.7, 198.51.100.4"})
     assert client_key(forwarded) == "198.51.100.4"
     assert client_key(request_with("10.0.0.9", {})) == "10.0.0.9"
+
+
+def test_login_sets_an_httponly_session_cookie_the_browser_can_use():
+    with TestClient(app) as c:
+        _headers, account = workspace(c)
+        login = c.post("/api/auth/login", json={"email": account["user"]["email"], "password": "test-password"})
+        assert login.status_code == 200
+        set_cookie = login.headers["set-cookie"]
+        assert set_cookie.startswith("enterai_session=")
+        assert "HttpOnly" in set_cookie and "SameSite=lax" in set_cookie and "Path=/api" in set_cookie
+        assert c.get("/api/me").json()["user"]["email"] == account["user"]["email"]
+
+
+def test_cookie_session_writes_need_the_client_header():
+    """A cross-site form post carries the cookie but cannot add a custom header."""
+    with TestClient(app) as c:
+        _headers, account = workspace(c)
+        c.post("/api/auth/login", json={"email": account["user"]["email"], "password": "test-password"})
+        forged = c.post("/api/teams", json={"name": "Forged"})
+        assert forged.status_code == 403
+        allowed = c.post("/api/teams", json={"name": "Real"}, headers={"X-EnterAI-Client": "1"})
+        assert allowed.status_code in (200, 201)
+
+
+def test_bearer_clients_do_not_need_the_client_header():
+    with TestClient(app) as c:
+        headers, _account = workspace(c)
+        assert c.post("/api/teams", json={"name": "CLI"}, headers=headers).status_code in (200, 201)
+
+
+def test_logout_clears_the_session_cookie():
+    with TestClient(app) as c:
+        _headers, account = workspace(c)
+        c.post("/api/auth/login", json={"email": account["user"]["email"], "password": "test-password"})
+        assert c.get("/api/me").status_code == 200
+        out = c.post("/api/auth/logout")
+        assert out.status_code == 204
+        assert "enterai_session=" in out.headers["set-cookie"] and "Max-Age=0" in out.headers["set-cookie"]
+        assert c.get("/api/me").status_code == 401
+
+
+def test_session_cookie_is_secure_in_deployment_environments(monkeypatch):
+    from starlette.responses import Response
+    from app.auth import set_session_cookie
+    monkeypatch.setenv("ENVIRONMENT", "production")
+    monkeypatch.delenv("SESSION_COOKIE_SECURE", raising=False)
+    response = Response()
+    set_session_cookie(response, "t")
+    assert "Secure" in response.headers["set-cookie"]
+    monkeypatch.setenv("SESSION_COOKIE_SECURE", "false")
+    response = Response()
+    set_session_cookie(response, "t")
+    assert "Secure" not in response.headers["set-cookie"]

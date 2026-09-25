@@ -1,166 +1,512 @@
 "use client";
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import { Bell, Bot, Check, ChevronDown, ChevronLeft, ChevronRight, Circle, FileText, FolderKanban, GitBranch, Grid2X2, Inbox, LayoutList, Loader2, Menu, MessageCircle, Paperclip, Plus, Search, Send, Settings2, Shield, Sparkles, Users, X } from "lucide-react";
-import { API_BASE, api, upload } from "@/lib/api";
+import { useEffect, useRef, useState } from "react";
+import { Bell, Menu, Plus, Search, X } from "lucide-react";
+import { api, ApiError, upload } from "@/lib/api";
 import { AdminConsole } from "@/components/admin-console";
 import { PrivacySettings } from "@/components/privacy-settings";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-type User={id:string;name:string;email:string;role:string;kind?:string;title?:string;avatar?:string;email_verified?:boolean};
-type Doc={id:string;file_name:string};
-type Project={id:string;name:string;code:string;description?:string;status?:string;health:string;color:string;progress:number;task_count:number;team?:string;due_date?:string;documents?:Doc[]};
-type Task={id:string;project_id:string;title:string;description?:string;status:string;priority:string;labels:string[];due_date?:string;assignee?:User};
-type Notice={id:string;title:string;body?:string;href?:string;read:boolean};
-type Action={label:string;confirmation_token:string;requires_confirmation:boolean};
-type Agent={id:string;name:string;title?:string;avatar?:string;hierarchy_level:string;parent_agent_id?:string|null;current_task?:Task|null;last_completed_task?:Task|null;is_working?:boolean;is_blocked?:boolean};
-type HierarchyConfigT={vp_count:number;directors_per_vp:number;managers_per_director:number;workers_per_manager:number};
-type AgentMsg={id:string;role:string;body:string;actions?:Action[]};
-const states=["backlog","todo","in_progress","review","done"], field="mt-1.5 w-full rounded-lg border border-line bg-canvas px-3 py-2.5 text-sm outline-none focus:border-accent";
-const when=(v?:string)=>v?new Date(v).toLocaleDateString(undefined,{month:"short",day:"numeric"}):"No date";
-function Avatar({user}:{user?:{name?:string;avatar?:string}}){return <span className="inline-grid h-7 w-7 shrink-0 place-items-center rounded-full bg-sky-400/15 text-[10px] font-bold text-sky-200">{user?.avatar||user?.name?.split(" ").map(x=>x[0]).join("")||"EA"}</span>}
-function Health({health}:{health:string}){return <Badge tone={health==="at_risk"?"red":health==="on_track"?"green":"amber"}>{health.replace("_"," ")}</Badge>}
-function Row({task,open,toggle}:{task:Task;open:()=>void;toggle:()=>void}){const done=task.status==="done";return <div className={cn("flex items-center gap-3 border-b border-line/70 px-4 py-3",done&&"bg-emerald-500/[.035]")}><button aria-label={(done?"Reopen ":"Complete ")+task.title} onClick={toggle} className={cn("grid h-5 w-5 shrink-0 place-items-center rounded-full border",done?"border-emerald-400 bg-emerald-400 text-slate-950":"border-zinc-600 hover:border-accent")}>{done&&<Check size={12}/>}</button><button onClick={open} className="min-w-0 flex-1 text-left"><p className={cn("truncate text-sm",done&&"text-emerald-200/70 line-through")}>{task.title}</p><div className="mt-1 flex gap-2"><Badge tone={task.priority==="high"?"red":task.priority==="medium"?"amber":"default"}>{task.priority}</Badge>{task.labels?.slice(0,1).map(x=><Badge key={x} tone="blue">{x}</Badge>)}</div></button><span className="hidden text-xs text-zinc-500 sm:block">{done?"Completed":when(task.due_date)}</span><Avatar user={task.assignee}/></div>}
-export default function EnterAI(){
- const [token,setToken]=useState<string|null>(null),[user,setUser]=useState<User|null>(null),[view,setView]=useState("Home"),[collapsed,setCollapsed]=useState(false),[mobile,setMobile]=useState(false),[dashboard,setDashboard]=useState<any>(null),[projects,setProjects]=useState<Project[]>([]),[users,setUsers]=useState<User[]>([]),[teams,setTeams]=useState<any[]>([]),[notices,setNotices]=useState<Notice[]>([]),[activity,setActivity]=useState<any[]>([]),[project,setProject]=useState<Project|null>(null),[tasks,setTasks]=useState<Task[]>([]),[task,setTask]=useState<Task|null>(null),[comments,setComments]=useState<any[]>([]),[command,setCommand]=useState(false),[projectForm,setProjectForm]=useState(false),[editProject,setEditProject]=useState<Project|null>(null),[taskForm,setTaskForm]=useState(false),[teamForm,setTeamForm]=useState(false),[selectedTeam,setSelectedTeam]=useState<any>(null),[teamProjects,setTeamProjects]=useState<Project[]>([]),[busy,setBusy]=useState(false),[error,setError]=useState(""),[scopedProject,setScopedProject]=useState<Project|null>(null);
- const [onboarding,setOnboarding]=useState<any>(null);
- const [agents,setAgents]=useState<Agent[]>([]),[hierarchyConfig,setHierarchyConfig]=useState<HierarchyConfigT|null>(null),[agentInspect,setAgentInspect]=useState<Agent|null>(null),[agentMessages,setAgentMessages]=useState<AgentMsg[]>([]),[agentChatBusy,setAgentChatBusy]=useState(false),[agentChatError,setAgentChatError]=useState("");
- async function refresh(){try{const [me,d,p,u,t,n,a]=await Promise.all([api<any>("/me"),api<any>("/dashboard"),api<Project[]>("/projects"),api<User[]>("/users"),api<any[]>("/teams"),api<Notice[]>("/notifications"),api<any[]>("/activity")]);setUser(me.user);setDashboard(d);setProjects(p);setUsers(u);setTeams(t);setNotices(n);setActivity(a);loadOnboarding()}catch(e:any){setError(e.message)}}
- async function loadOnboarding(){try{setOnboarding(await api<any>("/onboarding"))}catch{/* onboarding is advisory; never block the workspace on it */}}
- async function sendInvite(email:string,role:string){await api("/auth/invites",{method:"POST",body:JSON.stringify({email,role})})}
- async function completeOnboarding(){await api("/onboarding/complete",{method:"POST"})}
- async function resendVerification(){if(user?.email)await api("/auth/resend-verification",{method:"POST",body:JSON.stringify({email:user.email})})}
- useEffect(()=>{const saved=localStorage.getItem("enter-token");if(saved){setToken(saved);refresh()}},[]);
- useEffect(()=>{const fn=(e:KeyboardEvent)=>{if((e.ctrlKey||e.metaKey)&&e.key==="k"){e.preventDefault();setCommand(true)}};window.addEventListener("keydown",fn);return()=>window.removeEventListener("keydown",fn)},[]);
- async function login(email:string,password:string){setBusy(true);setError("");try{const r=await api<any>("/auth/login",{method:"POST",body:JSON.stringify({email,password})});localStorage.setItem("enter-token",r.token);setToken(r.token);await refresh()}catch(e:any){setError(e.message)}finally{setBusy(false)}}
- async function openProject(p:Project){try{setProject(p);setView("Project");setMobile(false);setTasks(await api<Task[]>("/projects/"+p.id+"/tasks"))}catch(e:any){setError(e.message)}}
- async function openTask(t:Task){try{setTask(t);setComments(await api<any[]>("/tasks/"+t.id+"/comments"))}catch(e:any){setError(e.message)}}
- async function changeTask(t:Task,values:Record<string,unknown>){try{const next=await api<Task>("/tasks/"+t.id,{method:"PATCH",body:JSON.stringify(values)});setTasks(all=>all.map(x=>x.id===t.id?next:x));setDashboard((d:any)=>d?{...d,my_tasks:(d.my_tasks||[]).map((x:Task)=>x.id===t.id?next:x)}:d);setTask(x=>x?.id===t.id?next:x);await refresh()}catch(e:any){setError(e.message)}}
- async function openNotice(n:Notice){try{await api("/notifications/"+n.id+"/read",{method:"PATCH"});setNotices(all=>all.map(x=>x.id===n.id?{...x,read:true}:x));const id=n.href?.startsWith("project:")?n.href.slice(8):n.href?.match(/projects\/([^/]+)/)?.[1];const p=projects.find(x=>x.id===id);if(p)await openProject(p);else if(n.href)nav("Portfolio")}catch(e:any){setError(e.message)}}
- const nav=(next:string)=>{setView(next);setMobile(false);if(next==="Agents")loadAgents()};
- const openAI=(scope?:Project|null)=>{setScopedProject(scope||null);setView("AI");setMobile(false)};
- async function loadAgents(){try{const [a,cfg]=await Promise.all([api<Agent[]>("/agents"),api<HierarchyConfigT>("/hierarchy-config")]);setAgents(a);setHierarchyConfig(cfg)}catch(e:any){setError(e.message)}}
- async function saveHierarchyConfig(values:Partial<HierarchyConfigT>){const next=await api<HierarchyConfigT>("/hierarchy-config",{method:"PATCH",body:JSON.stringify(values)});setHierarchyConfig(next);setAgents(await api<Agent[]>("/agents"))}
- // Loading a transcript is slower than typing into it. Both the load and a send
- // claim this token, so a history response that arrives after the reader has
- // already sent something is dropped instead of overwriting their message.
- const transcript=useRef(0);
- async function inspectAgent(a:Agent){const claim=++transcript.current;setAgentInspect(a);setAgentMessages([]);setAgentChatError("");try{const history=await api<AgentMsg[]>("/agents/"+a.id+"/messages");if(transcript.current===claim)setAgentMessages(history)}catch(e:any){if(transcript.current===claim)setAgentChatError(e.message)}}
- async function sendAgentMessage(agentId:string,text:string){transcript.current++;setAgentChatBusy(true);setAgentChatError("");setAgentMessages(x=>[...x,{id:"tmp-u-"+Date.now(),role:"user",body:text}]);try{const r=await api<any>("/agents/"+agentId+"/messages",{method:"POST",body:JSON.stringify({message:text})});setAgentMessages(x=>[...x,{id:"tmp-a-"+Date.now(),role:"agent",body:r.reply,actions:r.actions}])}catch(e:any){setAgentChatError(e.message||"The agent could not respond right now.")}finally{setAgentChatBusy(false)}}
- async function confirmAgentAction(a:Action){try{await api("/ai/confirm",{method:"POST",body:JSON.stringify({confirmation_token:a.confirmation_token})});setAgentMessages(x=>[...x,{id:"tmp-c-"+Date.now(),role:"agent",body:"Done. "+a.label}]);const fresh=await api<Agent[]>("/agents");setAgents(fresh);setAgentInspect(current=>current?fresh.find(x=>x.id===current.id)||current:current)}catch(e:any){setAgentChatError(e.message||"Confirmation failed. Please ask for a fresh proposal.")}}
- if(!token)return <AuthScreens login={login} busy={busy} error={error} signedIn={async(t:string)=>{localStorage.setItem("enter-token",t);setToken(t);await refresh()}}/>;
- const main=view==="Admin"?(user?.role==="admin"&&user?.kind==="human"?<AdminConsole currentUserId={user.id}/>:<p role="alert">Human administrator access required.</p>):view==="Settings"?<PrivacySettings userId={user?.id||""}/>:view==="Home"?<Home data={dashboard} activity={activity} project={openProject} task={openTask} toggle={(t:Task)=>changeTask(t,{status:t.status==="done"?"todo":"done"})} all={()=>nav("My work")} ai={()=>openAI()}/>:view==="Portfolio"?<Portfolio projects={projects} open={openProject} create={()=>setProjectForm(true)}/>:view==="My work"?<Work tasks={dashboard?.my_tasks||[]} open={openTask} toggle={(t:Task)=>changeTask(t,{status:t.status==="done"?"todo":"done"})}/>:view==="Inbox"?<InboxView notices={notices} open={openNotice}/>:view==="Teams"?<Teams teams={teams} selected={selectedTeam} projects={teamProjects} open={openProject} create={()=>setTeamForm(true)} select={async(t:any)=>{setSelectedTeam(t);setTeamProjects(await api<Project[]>("/teams/"+t.id+"/projects"))}}/>:view==="Agents"?<Agents agents={agents} config={hierarchyConfig} save={saveHierarchyConfig} isAdmin={user?.role==="admin"} inspect={inspectAgent}/>:view==="AI"?<AI project={scopedProject} clear={()=>setScopedProject(null)} onAction={async(a:Action)=>{await api("/ai/confirm",{method:"POST",body:JSON.stringify({confirmation_token:a.confirmation_token})});await refresh()}}/>:<ProjectView project={project} tasks={tasks} open={openTask} update={changeTask} edit={()=>setEditProject(project)} create={()=>setTaskForm(true)} ai={()=>openAI(project)} upload={async(f:File)=>{if(!project)return;try{const d=await upload<Doc>("/projects/"+project.id+"/documents",f);const next={...project,documents:[...(project.documents||[]),d]};setProject(next);setProjects(all=>all.map(x=>x.id===next.id?next:x))}catch(e:any){setError(e.message)}}}/>;
- return <div className="min-h-screen bg-canvas text-ink"><Sidebar collapsed={collapsed} mobile={mobile} view={view} user={user} notices={notices} toggle={()=>setCollapsed(!collapsed)} close={()=>setMobile(false)} nav={nav} ai={()=>openAI()}/>{mobile&&<button aria-label="Close menu" className="fixed inset-0 z-10 bg-black/60 lg:hidden" onClick={()=>setMobile(false)}/>}<main className={cn("min-h-screen lg:pl-64",collapsed&&"lg:pl-[72px]")}><header className="sticky top-0 z-10 flex h-16 items-center gap-2 border-b border-line bg-canvas/95 px-4 backdrop-blur sm:px-6"><button aria-label="Open menu" className="rounded-lg p-2 text-zinc-400 lg:hidden" onClick={()=>setMobile(true)}><Menu size={19}/></button><button aria-label="Search or ask Enter AI" onClick={()=>setCommand(true)} className="flex h-9 min-w-0 max-w-xl flex-1 items-center gap-2 rounded-lg border border-line bg-panel px-3 text-left text-sm text-zinc-500"><Search size={15}/><span className="flex-1 truncate">Search or ask Enter AI</span><kbd className="hidden rounded border border-line px-1.5 py-0.5 text-[10px] sm:block">Ctrl K</kbd></button><button aria-label="Open inbox" className="relative rounded-lg p-2 text-zinc-400" onClick={()=>nav("Inbox")}><Bell size={18}/>{notices.some(x=>!x.read)&&<i className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-sky-400"/>}</button><Button aria-label="New project" size="sm" onClick={()=>setProjectForm(true)}><Plus size={15}/><span className="hidden sm:inline">New project</span></Button></header><div className="grid-bg mx-auto max-w-[1600px] p-4 sm:p-6">{error&&<div role="alert" className="mb-4 flex justify-between rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">{error}<button onClick={()=>setError("")}><X size={16}/></button></div>}<VerifyBanner user={user} resend={resendVerification}/>{view==="Home"&&<Onboarding state={onboarding} reload={loadOnboarding} invite={sendInvite} done={completeOnboarding}/>}{main}</div></main>{command&&<Command projects={projects} close={()=>setCommand(false)} open={(p:Project)=>{setCommand(false);openProject(p)}} ai={()=>{setCommand(false);openAI()}}/>}{projectForm&&<ProjectForm teams={teams} close={()=>setProjectForm(false)} create={async(data:any)=>{const p=await api<Project>("/projects",{method:"POST",body:JSON.stringify(data)});setProjects(x=>[p,...x]);setProjectForm(false);await openProject(p)}}/>}{editProject&&<ProjectEditForm project={editProject} teams={teams} close={()=>setEditProject(null)} save={async(data:any)=>{const next=await api<Project>("/projects/"+editProject.id,{method:"PATCH",body:JSON.stringify(data)});setProject(next);setProjects(all=>all.map(x=>x.id===next.id?next:x));setEditProject(null);await refresh()}}/>}{taskForm&&project&&<TaskForm project={project} users={users} close={()=>setTaskForm(false)} create={async(data:any)=>{const t=await api<Task>("/tasks",{method:"POST",body:JSON.stringify({...data,project_id:project.id})});setTasks(x=>[...x,t]);setTaskForm(false);await refresh()}}/>}{teamForm&&<TeamForm close={()=>setTeamForm(false)} create={async(data:any)=>{await api("/teams",{method:"POST",body:JSON.stringify(data)});setTeamForm(false);await refresh()}}/>}{task&&<Drawer task={task} comments={comments} close={()=>setTask(null)} update={changeTask} comment={async(body:string)=>{const c=await api<any>("/tasks/"+task.id+"/comments",{method:"POST",body:JSON.stringify({body})});setComments(x=>[...x,{...c,author:user}])}}/>}{agentInspect&&<AgentInspector agent={agents.find(x=>x.id===agentInspect.id)||agentInspect} reports={agents.filter(x=>x.parent_agent_id===agentInspect.id)} messages={agentMessages} busy={agentChatBusy} error={agentChatError} close={()=>setAgentInspect(null)} send={(t:string)=>sendAgentMessage(agentInspect.id,t)} confirm={confirmAgentAction}/>}</div>
-}
-function Sidebar({collapsed,mobile,view,user,notices,toggle,close,nav,ai}:any){
- const items=[[Grid2X2,"Home"],[FolderKanban,"Portfolio"],[Circle,"My work"],[Inbox,"Inbox"],[Users,"Teams"],[GitBranch,"Agents"],...(user?.kind==="human"?[[Shield,"Settings"] as const]:[]),...(user?.role==="admin"&&user?.kind==="human"?[[Settings2,"Admin"] as const]:[])] as const;
- const logout=()=>{localStorage.removeItem("enter-token");window.location.reload()};
- return <aside className={cn("fixed inset-y-0 left-0 z-20 flex w-64 flex-col border-r border-line bg-[#0c0c0f] transition-transform lg:visible lg:translate-x-0",mobile?"visible translate-x-0":"invisible -translate-x-full",collapsed&&"lg:w-[72px]")}>
-  <div className="flex h-16 items-center gap-3 px-4"><div className="grid h-8 w-8 place-items-center rounded-lg bg-accent font-black text-slate-950">E</div>{!collapsed&&<span className="font-semibold">Enter AI</span>}<button aria-label={collapsed?"Expand sidebar":"Collapse sidebar"} className="ml-auto hidden text-zinc-500 lg:block" onClick={toggle}>{collapsed?<ChevronRight size={16}/>:<ChevronLeft size={16}/>}</button><button aria-label="Close navigation" className="ml-auto lg:hidden" onClick={close}><X size={17}/></button></div>
-  <nav className="px-3">{items.map(([Icon,label])=><button key={label} aria-label={label} aria-current={view===label?"page":undefined} onClick={()=>nav(label)} className={cn("mb-1 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-zinc-400 hover:bg-white/5",view===label&&"bg-sky-400/10 text-sky-300",collapsed&&"lg:justify-center lg:px-0")}><Icon size={17}/>{!collapsed&&label}{label==="Inbox"&&notices.some((x:any)=>!x.read)&&!collapsed&&<i className="ml-auto h-1.5 w-1.5 rounded-full bg-sky-400"/>}</button>)}<div className="my-4 h-px"/><button onClick={ai} className="flex w-full gap-3 rounded-lg bg-sky-400/10 px-3 py-2.5 text-sm text-sky-300"><Sparkles size={17}/>{!collapsed&&"Ask Enter AI"}</button></nav>
-  <div className="mt-auto border-t border-line p-3"><div className="flex gap-3 p-2"><Avatar user={user}/>{!collapsed&&<span className="text-sm">{user?.name||"Enter AI Admin"}</span>}</div><button aria-label="Sign out" onClick={logout} className={cn("mt-1 flex w-full items-center gap-3 rounded-lg px-2 py-2 text-sm text-zinc-400 hover:bg-white/5 hover:text-zinc-100",collapsed&&"lg:justify-center")}><X size={16}/>{!collapsed&&"Sign out"}</button></div>
- </aside>
-}
-function AuthShell({title,subtitle,children}:{title:string;subtitle:string;children:ReactNode}){return <main className="grid min-h-screen place-items-center bg-canvas p-4 sm:p-6"><Card className="w-full max-w-md p-6 shadow-glow sm:p-7"><div className="mb-6 flex gap-3"><div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-accent font-black text-slate-950">E</div><div className="min-w-0"><h1 className="font-semibold">{title}</h1><p className="text-xs text-zinc-500">{subtitle}</p></div></div>{children}</Card></main>}
-function Notice({tone,children}:{tone:"error"|"ok";children:ReactNode}){return <p role={tone==="error"?"alert":"status"} className={cn("rounded-lg border p-3 text-sm",tone==="error"?"border-red-500/30 bg-red-500/10 text-red-200":"border-emerald-500/30 bg-emerald-500/10 text-emerald-200")}>{children}</p>}
-function Submit({busy,children}:{busy:boolean;children:ReactNode}){return <Button className="w-full" disabled={busy}>{busy&&<Loader2 className="animate-spin" size={15}/>}{children}</Button>}
-/** Unauthenticated routing. The links in transactional email land back on this page
- *  carrying a single-use token, so the screen is chosen from the query string. */
-function AuthScreens({login,busy,error,signedIn}:any){
- const [screen,setScreen]=useState("login"),[emailToken,setEmailToken]=useState(""),[ssoError,setSsoError]=useState("");
- useEffect(()=>{const params=new URLSearchParams(window.location.search);
-  const ssoParams=new URLSearchParams(window.location.hash.slice(1));
-  const ssoToken=ssoParams.get("sso_token"), callbackError=ssoParams.get("sso_error");
-  if(ssoToken||callbackError){
-   window.history.replaceState({},"",window.location.pathname+window.location.search);
-   if(ssoToken){void signedIn(ssoToken).catch(()=>{localStorage.removeItem("enter-token");setSsoError("SSO sign-in failed. Please try again.")})}
-   else setSsoError("SSO sign-in failed. Please try again.");
-   return;
+import { AuthScreens } from "@/components/workspace/auth-screens";
+import { Sidebar } from "@/components/workspace/sidebar";
+import { Onboarding, VerifyBanner } from "@/components/workspace/onboarding";
+import { Home, Portfolio, Work, InboxView, Teams, ProjectView } from "@/components/workspace/views";
+import { AI, Command } from "@/components/workspace/assistant";
+import { ProjectForm, ProjectEditForm, TaskForm, TeamForm, Drawer } from "@/components/workspace/forms";
+import { Agents, AgentInspector } from "@/components/workspace/agents";
+import type {
+  User,
+  Doc,
+  Project,
+  Task,
+  InboxNotice,
+  Action,
+  Agent,
+  HierarchyConfigT,
+  AgentMsg,
+} from "@/lib/types";
+
+export default function EnterAI() {
+  // "checking" until /me answers, so a signed-in reload never flashes the login screen.
+  const [session, setSession] = useState<"checking" | "in" | "out">("checking"),
+    [user, setUser] = useState<User | null>(null),
+    [view, setView] = useState("Home"),
+    [collapsed, setCollapsed] = useState(false),
+    [mobile, setMobile] = useState(false),
+    [dashboard, setDashboard] = useState<any>(null),
+    [projects, setProjects] = useState<Project[]>([]),
+    [users, setUsers] = useState<User[]>([]),
+    [teams, setTeams] = useState<any[]>([]),
+    [notices, setNotices] = useState<InboxNotice[]>([]),
+    [activity, setActivity] = useState<any[]>([]),
+    [project, setProject] = useState<Project | null>(null),
+    [tasks, setTasks] = useState<Task[]>([]),
+    [task, setTask] = useState<Task | null>(null),
+    [comments, setComments] = useState<any[]>([]),
+    [command, setCommand] = useState(false),
+    [projectForm, setProjectForm] = useState(false),
+    [editProject, setEditProject] = useState<Project | null>(null),
+    [taskForm, setTaskForm] = useState(false),
+    [teamForm, setTeamForm] = useState(false),
+    [selectedTeam, setSelectedTeam] = useState<any>(null),
+    [teamProjects, setTeamProjects] = useState<Project[]>([]),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState(""),
+    [scopedProject, setScopedProject] = useState<Project | null>(null);
+  const [onboarding, setOnboarding] = useState<any>(null);
+  const [agents, setAgents] = useState<Agent[]>([]),
+    [hierarchyConfig, setHierarchyConfig] = useState<HierarchyConfigT | null>(null),
+    [agentInspect, setAgentInspect] = useState<Agent | null>(null),
+    [agentMessages, setAgentMessages] = useState<AgentMsg[]>([]),
+    [agentChatBusy, setAgentChatBusy] = useState(false),
+    [agentChatError, setAgentChatError] = useState("");
+  async function refresh() {
+    try {
+      const [me, d, p, u, t, n, a] = await Promise.all([
+        api<any>("/me"),
+        api<any>("/dashboard"),
+        api<Project[]>("/projects"),
+        api<User[]>("/users"),
+        api<any[]>("/teams"),
+        api<InboxNotice[]>("/notifications"),
+        api<any[]>("/activity"),
+      ]);
+      setUser(me.user);
+      setDashboard(d);
+      setProjects(p);
+      setUsers(u);
+      setTeams(t);
+      setNotices(n);
+      setActivity(a);
+      setSession("in");
+      loadOnboarding();
+    } catch (e: any) {
+      if (e instanceof ApiError && e.status === 401) setSession("out");
+      else setError(e.message);
+    }
   }
-  for(const [key,next] of [["reset","reset"],["verify","verify"],["invite","invite"]] as const){const value=params.get(key);if(value){setEmailToken(value);setScreen(next);
-   // Drop the token from the address bar so it does not linger in history or in a
-   // referrer header once the page starts making requests.
-   window.history.replaceState({},"",window.location.pathname);return}}},[]);
- if(screen==="forgot")return <ForgotPassword back={()=>setScreen("login")}/>;
- if(screen==="reset")return <ResetPassword token={emailToken} done={()=>setScreen("login")}/>;
- if(screen==="verify")return <VerifyEmail token={emailToken} done={()=>setScreen("login")}/>;
- if(screen==="invite")return <AcceptInvite token={emailToken} signedIn={signedIn} cancel={()=>setScreen("login")}/>;
- if(screen==="signup")return <Signup signedIn={signedIn} cancel={()=>setScreen("login")}/>;
- return <Login login={login} busy={busy} error={error||ssoError} forgot={()=>setScreen("forgot")} signup={()=>setScreen("signup")}/>;
+  async function loadOnboarding() {
+    try {
+      setOnboarding(await api<any>("/onboarding"));
+    } catch {
+      /* onboarding is advisory; never block the workspace on it */
+    }
+  }
+  async function sendInvite(email: string, role: string) {
+    await api("/auth/invites", { method: "POST", body: JSON.stringify({ email, role }) });
+  }
+  async function completeOnboarding() {
+    await api("/onboarding/complete", { method: "POST" });
+  }
+  async function resendVerification() {
+    if (user?.email)
+      await api("/auth/resend-verification", { method: "POST", body: JSON.stringify({ email: user.email }) });
+  }
+  useEffect(() => {
+    refresh();
+  }, []);
+  useEffect(() => {
+    const fn = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "k") {
+        e.preventDefault();
+        setCommand(true);
+      }
+    };
+    window.addEventListener("keydown", fn);
+    return () => window.removeEventListener("keydown", fn);
+  }, []);
+  async function login(email: string, password: string) {
+    setBusy(true);
+    setError("");
+    try {
+      await api("/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function openProject(p: Project) {
+    try {
+      setProject(p);
+      setView("Project");
+      setMobile(false);
+      setTasks(await api<Task[]>("/projects/" + p.id + "/tasks"));
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+  async function openTask(t: Task) {
+    try {
+      setTask(t);
+      setComments(await api<any[]>("/tasks/" + t.id + "/comments"));
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+  async function changeTask(t: Task, values: Record<string, unknown>) {
+    try {
+      const next = await api<Task>("/tasks/" + t.id, { method: "PATCH", body: JSON.stringify(values) });
+      setTasks((all) => all.map((x) => (x.id === t.id ? next : x)));
+      setDashboard((d: any) =>
+        d ? { ...d, my_tasks: (d.my_tasks || []).map((x: Task) => (x.id === t.id ? next : x)) } : d,
+      );
+      setTask((x) => (x?.id === t.id ? next : x));
+      await refresh();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+  async function openNotice(n: InboxNotice) {
+    try {
+      await api("/notifications/" + n.id + "/read", { method: "PATCH" });
+      setNotices((all) => all.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
+      const id = n.href?.startsWith("project:") ? n.href.slice(8) : n.href?.match(/projects\/([^/]+)/)?.[1];
+      const p = projects.find((x) => x.id === id);
+      if (p) await openProject(p);
+      else if (n.href) nav("Portfolio");
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+  const nav = (next: string) => {
+    setView(next);
+    setMobile(false);
+    if (next === "Agents") loadAgents();
+  };
+  const openAI = (scope?: Project | null) => {
+    setScopedProject(scope || null);
+    setView("AI");
+    setMobile(false);
+  };
+  async function loadAgents() {
+    try {
+      const [a, cfg] = await Promise.all([
+        api<Agent[]>("/agents"),
+        api<HierarchyConfigT>("/hierarchy-config"),
+      ]);
+      setAgents(a);
+      setHierarchyConfig(cfg);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+  async function saveHierarchyConfig(values: Partial<HierarchyConfigT>) {
+    const next = await api<HierarchyConfigT>("/hierarchy-config", {
+      method: "PATCH",
+      body: JSON.stringify(values),
+    });
+    setHierarchyConfig(next);
+    setAgents(await api<Agent[]>("/agents"));
+  }
+  // Loading a transcript is slower than typing into it. Both the load and a send
+  // claim this token, so a history response that arrives after the reader has
+  // already sent something is dropped instead of overwriting their message.
+  const transcript = useRef(0);
+  async function inspectAgent(a: Agent) {
+    const claim = ++transcript.current;
+    setAgentInspect(a);
+    setAgentMessages([]);
+    setAgentChatError("");
+    try {
+      const history = await api<AgentMsg[]>("/agents/" + a.id + "/messages");
+      if (transcript.current === claim) setAgentMessages(history);
+    } catch (e: any) {
+      if (transcript.current === claim) setAgentChatError(e.message);
+    }
+  }
+  async function sendAgentMessage(agentId: string, text: string) {
+    transcript.current++;
+    setAgentChatBusy(true);
+    setAgentChatError("");
+    setAgentMessages((x) => [...x, { id: "tmp-u-" + Date.now(), role: "user", body: text }]);
+    try {
+      const r = await api<any>("/agents/" + agentId + "/messages", {
+        method: "POST",
+        body: JSON.stringify({ message: text }),
+      });
+      setAgentMessages((x) => [
+        ...x,
+        { id: "tmp-a-" + Date.now(), role: "agent", body: r.reply, actions: r.actions },
+      ]);
+    } catch (e: any) {
+      setAgentChatError(e.message || "The agent could not respond right now.");
+    } finally {
+      setAgentChatBusy(false);
+    }
+  }
+  async function confirmAgentAction(a: Action) {
+    try {
+      await api("/ai/confirm", {
+        method: "POST",
+        body: JSON.stringify({ confirmation_token: a.confirmation_token }),
+      });
+      setAgentMessages((x) => [...x, { id: "tmp-c-" + Date.now(), role: "agent", body: "Done. " + a.label }]);
+      const fresh = await api<Agent[]>("/agents");
+      setAgents(fresh);
+      setAgentInspect((current) => (current ? fresh.find((x) => x.id === current.id) || current : current));
+    } catch (e: any) {
+      setAgentChatError(e.message || "Confirmation failed. Please ask for a fresh proposal.");
+    }
+  }
+  if (session === "checking") return <div className="min-h-screen bg-canvas" />;
+  if (session === "out") return <AuthScreens login={login} busy={busy} error={error} signedIn={refresh} />;
+  const main =
+    view === "Admin" ? (
+      user?.role === "admin" && user?.kind === "human" ? (
+        <AdminConsole currentUserId={user.id} />
+      ) : (
+        <p role="alert">Human administrator access required.</p>
+      )
+    ) : view === "Settings" ? (
+      <PrivacySettings userId={user?.id || ""} />
+    ) : view === "Home" ? (
+      <Home
+        data={dashboard}
+        activity={activity}
+        project={openProject}
+        task={openTask}
+        toggle={(t: Task) => changeTask(t, { status: t.status === "done" ? "todo" : "done" })}
+        all={() => nav("My work")}
+        ai={() => openAI()}
+      />
+    ) : view === "Portfolio" ? (
+      <Portfolio projects={projects} open={openProject} create={() => setProjectForm(true)} />
+    ) : view === "My work" ? (
+      <Work
+        tasks={dashboard?.my_tasks || []}
+        open={openTask}
+        toggle={(t: Task) => changeTask(t, { status: t.status === "done" ? "todo" : "done" })}
+      />
+    ) : view === "Inbox" ? (
+      <InboxView notices={notices} open={openNotice} />
+    ) : view === "Teams" ? (
+      <Teams
+        teams={teams}
+        selected={selectedTeam}
+        projects={teamProjects}
+        open={openProject}
+        create={() => setTeamForm(true)}
+        select={async (t: any) => {
+          setSelectedTeam(t);
+          setTeamProjects(await api<Project[]>("/teams/" + t.id + "/projects"));
+        }}
+      />
+    ) : view === "Agents" ? (
+      <Agents
+        agents={agents}
+        config={hierarchyConfig}
+        save={saveHierarchyConfig}
+        isAdmin={user?.role === "admin"}
+        inspect={inspectAgent}
+      />
+    ) : view === "AI" ? (
+      <AI
+        project={scopedProject}
+        clear={() => setScopedProject(null)}
+        onAction={async (a: Action) => {
+          await api("/ai/confirm", {
+            method: "POST",
+            body: JSON.stringify({ confirmation_token: a.confirmation_token }),
+          });
+          await refresh();
+        }}
+      />
+    ) : (
+      <ProjectView
+        project={project}
+        tasks={tasks}
+        open={openTask}
+        update={changeTask}
+        edit={() => setEditProject(project)}
+        create={() => setTaskForm(true)}
+        ai={() => openAI(project)}
+        upload={async (f: File) => {
+          if (!project) return;
+          try {
+            const d = await upload<Doc>("/projects/" + project.id + "/documents", f);
+            const next = { ...project, documents: [...(project.documents || []), d] };
+            setProject(next);
+            setProjects((all) => all.map((x) => (x.id === next.id ? next : x)));
+          } catch (e: any) {
+            setError(e.message);
+          }
+        }}
+      />
+    );
+  return (
+    <div className="min-h-screen bg-canvas text-ink">
+      <Sidebar
+        collapsed={collapsed}
+        mobile={mobile}
+        view={view}
+        user={user}
+        notices={notices}
+        toggle={() => setCollapsed(!collapsed)}
+        close={() => setMobile(false)}
+        nav={nav}
+        ai={() => openAI()}
+      />
+      {mobile && (
+        <button
+          aria-label="Close menu"
+          className="fixed inset-0 z-10 bg-black/60 lg:hidden"
+          onClick={() => setMobile(false)}
+        />
+      )}
+      <main className={cn("min-h-screen lg:pl-64", collapsed && "lg:pl-[72px]")}>
+        <header className="sticky top-0 z-10 flex h-16 items-center gap-2 border-b border-line bg-canvas/95 px-4 backdrop-blur sm:px-6">
+          <button
+            aria-label="Open menu"
+            className="rounded-lg p-2 text-zinc-400 lg:hidden"
+            onClick={() => setMobile(true)}
+          >
+            <Menu size={19} />
+          </button>
+          <button
+            aria-label="Search or ask Enter AI"
+            onClick={() => setCommand(true)}
+            className="flex h-9 min-w-0 max-w-xl flex-1 items-center gap-2 rounded-lg border border-line bg-panel px-3 text-left text-sm text-zinc-500"
+          >
+            <Search size={15} />
+            <span className="flex-1 truncate">Search or ask Enter AI</span>
+            <kbd className="hidden rounded border border-line px-1.5 py-0.5 text-[10px] sm:block">Ctrl K</kbd>
+          </button>
+          <button
+            aria-label="Open inbox"
+            className="relative rounded-lg p-2 text-zinc-400"
+            onClick={() => nav("Inbox")}
+          >
+            <Bell size={18} />
+            {notices.some((x) => !x.read) && (
+              <i className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-sky-400" />
+            )}
+          </button>
+          <Button aria-label="New project" size="sm" onClick={() => setProjectForm(true)}>
+            <Plus size={15} />
+            <span className="hidden sm:inline">New project</span>
+          </Button>
+        </header>
+        <div className="grid-bg mx-auto max-w-[1600px] p-4 sm:p-6">
+          {error && (
+            <div
+              role="alert"
+              className="mb-4 flex justify-between rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200"
+            >
+              {error}
+              <button onClick={() => setError("")}>
+                <X size={16} />
+              </button>
+            </div>
+          )}
+          <VerifyBanner user={user} resend={resendVerification} />
+          {view === "Home" && (
+            <Onboarding
+              state={onboarding}
+              reload={loadOnboarding}
+              invite={sendInvite}
+              done={completeOnboarding}
+            />
+          )}
+          {main}
+        </div>
+      </main>
+      {command && (
+        <Command
+          projects={projects}
+          close={() => setCommand(false)}
+          open={(p: Project) => {
+            setCommand(false);
+            openProject(p);
+          }}
+          ai={() => {
+            setCommand(false);
+            openAI();
+          }}
+        />
+      )}
+      {projectForm && (
+        <ProjectForm
+          teams={teams}
+          close={() => setProjectForm(false)}
+          create={async (data: any) => {
+            const p = await api<Project>("/projects", { method: "POST", body: JSON.stringify(data) });
+            setProjects((x) => [p, ...x]);
+            setProjectForm(false);
+            await openProject(p);
+          }}
+        />
+      )}
+      {editProject && (
+        <ProjectEditForm
+          project={editProject}
+          teams={teams}
+          close={() => setEditProject(null)}
+          save={async (data: any) => {
+            const next = await api<Project>("/projects/" + editProject.id, {
+              method: "PATCH",
+              body: JSON.stringify(data),
+            });
+            setProject(next);
+            setProjects((all) => all.map((x) => (x.id === next.id ? next : x)));
+            setEditProject(null);
+            await refresh();
+          }}
+        />
+      )}
+      {taskForm && project && (
+        <TaskForm
+          project={project}
+          users={users}
+          close={() => setTaskForm(false)}
+          create={async (data: any) => {
+            const t = await api<Task>("/tasks", {
+              method: "POST",
+              body: JSON.stringify({ ...data, project_id: project.id }),
+            });
+            setTasks((x) => [...x, t]);
+            setTaskForm(false);
+            await refresh();
+          }}
+        />
+      )}
+      {teamForm && (
+        <TeamForm
+          close={() => setTeamForm(false)}
+          create={async (data: any) => {
+            await api("/teams", { method: "POST", body: JSON.stringify(data) });
+            setTeamForm(false);
+            await refresh();
+          }}
+        />
+      )}
+      {task && (
+        <Drawer
+          task={task}
+          comments={comments}
+          close={() => setTask(null)}
+          update={changeTask}
+          comment={async (body: string) => {
+            const c = await api<any>("/tasks/" + task.id + "/comments", {
+              method: "POST",
+              body: JSON.stringify({ body }),
+            });
+            setComments((x) => [...x, { ...c, author: user }]);
+          }}
+        />
+      )}
+      {agentInspect && (
+        <AgentInspector
+          agent={agents.find((x) => x.id === agentInspect.id) || agentInspect}
+          reports={agents.filter((x) => x.parent_agent_id === agentInspect.id)}
+          messages={agentMessages}
+          busy={agentChatBusy}
+          error={agentChatError}
+          close={() => setAgentInspect(null)}
+          send={(t: string) => sendAgentMessage(agentInspect.id, t)}
+          confirm={confirmAgentAction}
+        />
+      )}
+    </div>
+  );
 }
-function Login({login,busy,error,forgot,signup}:any){const[email,setEmail]=useState("admin@demo.enterai.com"),[password,setPassword]=useState("enterai-demo"),[ssoEmail,setSsoEmail]=useState(""),[sso,setSso]=useState(false);const startSso=()=>{if(!ssoEmail.trim())return;window.location.assign(`${API_BASE}/auth/sso/start?email=${encodeURIComponent(ssoEmail.trim())}`)};return <AuthShell title="Enter AI" subtitle="Project execution, with AI assistance"><form className="space-y-4" onSubmit={e=>{e.preventDefault();login(email,password)}}><label className="block text-xs text-zinc-400">Email<input type="email" autoComplete="email" required className={field} value={email} onChange={e=>setEmail(e.target.value)}/></label><label className="block text-xs text-zinc-400">Password<input type="password" autoComplete="current-password" required className={field} value={password} onChange={e=>setPassword(e.target.value)}/></label>{error&&<Notice tone="error">{error}</Notice>}<Submit busy={busy}>Sign in</Submit></form><div className="mt-5 border-t border-line pt-4"><button type="button" className="w-full text-sm text-sky-300 underline-offset-2 hover:underline" onClick={()=>setSso(v=>!v)}>{sso?"Use password instead":"Continue with SSO"}</button>{sso&&<form className="mt-3 space-y-3" onSubmit={e=>{e.preventDefault();startSso()}}><label className="block text-xs text-zinc-400">Work email<input type="email" autoComplete="email" required className={field} value={ssoEmail} onChange={e=>setSsoEmail(e.target.value)} placeholder="you@company.com"/></label><Button type="submit" className="w-full">Continue with SSO</Button></form>}</div><div className="mt-5 flex flex-wrap items-center justify-between gap-2 text-xs"><button type="button" onClick={forgot} className="text-sky-300 underline-offset-2 hover:underline">Forgot your password?</button><button type="button" onClick={signup} className="text-zinc-400 underline-offset-2 hover:underline">Create a workspace</button></div></AuthShell>}
-function ForgotPassword({back}:{back:()=>void}){const[email,setEmail]=useState(""),[busy,setBusy]=useState(false),[sent,setSent]=useState(false),[error,setError]=useState("");
- return <AuthShell title="Reset your password" subtitle="We'll email you a link to choose a new one">{sent?<><Notice tone="ok">If that address has an account, we've sent it a reset link. It expires in 60 minutes.</Notice><Button variant="ghost" className="mt-5 w-full" onClick={back}>Back to sign in</Button></>:<form className="space-y-4" onSubmit={async e=>{e.preventDefault();setBusy(true);setError("");try{await api("/auth/forgot-password",{method:"POST",body:JSON.stringify({email})});setSent(true)}catch(err:any){setError(err.message)}finally{setBusy(false)}}}><label className="block text-xs text-zinc-400">Email<input type="email" autoComplete="email" required className={field} value={email} onChange={e=>setEmail(e.target.value)}/></label>{error&&<Notice tone="error">{error}</Notice>}<Submit busy={busy}>Email me a link</Submit><Button type="button" variant="ghost" className="w-full" onClick={back}>Back to sign in</Button></form>}</AuthShell>}
-function ResetPassword({token,done}:{token:string;done:()=>void}){const[password,setPassword]=useState(""),[confirm,setConfirm]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState(""),[ok,setOk]=useState(false);
- return <AuthShell title="Choose a new password" subtitle="This link can only be used once">{ok?<><Notice tone="ok">Your password has been changed. Any other sessions have been signed out.</Notice><Button className="mt-5 w-full" onClick={done}>Sign in</Button></>:<form className="space-y-4" onSubmit={async e=>{e.preventDefault();if(password!==confirm){setError("Those passwords do not match.");return}setBusy(true);setError("");try{await api("/auth/reset-password",{method:"POST",body:JSON.stringify({token,password})});setOk(true)}catch(err:any){setError(err.message)}finally{setBusy(false)}}}><label className="block text-xs text-zinc-400">New password<input type="password" autoComplete="new-password" required minLength={8} className={field} value={password} onChange={e=>setPassword(e.target.value)}/></label><label className="block text-xs text-zinc-400">Confirm new password<input type="password" autoComplete="new-password" required minLength={8} className={field} value={confirm} onChange={e=>setConfirm(e.target.value)}/></label><p className="text-xs text-zinc-500">At least 8 characters.</p>{error&&<Notice tone="error">{error}</Notice>}<Submit busy={busy}>Change password</Submit><Button type="button" variant="ghost" className="w-full" onClick={done}>Back to sign in</Button></form>}</AuthShell>}
-function VerifyEmail({token,done}:{token:string;done:()=>void}){const[state,setState]=useState<"working"|"ok"|"failed">("working"),[error,setError]=useState("");
- useEffect(()=>{let live=true;api("/auth/verify-email",{method:"POST",body:JSON.stringify({token})}).then(()=>live&&setState("ok")).catch((err:any)=>{if(live){setError(err.message);setState("failed")}});return()=>{live=false}},[token]);
- return <AuthShell title="Confirming your email" subtitle="One moment">{state==="working"&&<p role="status" className="flex items-center gap-2 text-sm text-zinc-400"><Loader2 className="animate-spin" size={15}/>Checking your link...</p>}{state==="ok"&&<Notice tone="ok">Your email address is confirmed.</Notice>}{state==="failed"&&<Notice tone="error">{error}</Notice>}<Button className="mt-5 w-full" onClick={done}>Continue to sign in</Button></AuthShell>}
-function AcceptInvite({token,signedIn,cancel}:{token:string;signedIn:(t:string)=>void;cancel:()=>void}){const[invite,setInvite]=useState<any>(null),[name,setName]=useState(""),[password,setPassword]=useState(""),[busy,setBusy]=useState(false),[error,setError]=useState(""),[loadError,setLoadError]=useState("");
- useEffect(()=>{let live=true;api<any>("/auth/invites/"+encodeURIComponent(token)+"/preview").then(r=>live&&setInvite(r)).catch((err:any)=>live&&setLoadError(err.message));return()=>{live=false}},[token]);
- if(loadError)return <AuthShell title="Invitation" subtitle="We couldn't open this invitation"><Notice tone="error">{loadError}</Notice><Button className="mt-5 w-full" onClick={cancel}>Back to sign in</Button></AuthShell>;
- return <AuthShell title={invite?`Join ${invite.organization}`:"Invitation"} subtitle={invite?`Invited as ${invite.email}`:"Loading your invitation"}>{!invite?<p role="status" className="flex items-center gap-2 text-sm text-zinc-400"><Loader2 className="animate-spin" size={15}/>Loading...</p>:<form className="space-y-4" onSubmit={async e=>{e.preventDefault();setBusy(true);setError("");try{const r=await api<any>("/auth/accept-invite",{method:"POST",body:JSON.stringify({token,name,password})});signedIn(r.token)}catch(err:any){setError(err.message)}finally{setBusy(false)}}}><p className="text-sm text-zinc-400">You'll join as <b className="text-zinc-200">{invite.role}</b>.</p><label className="block text-xs text-zinc-400">Your name<input required autoComplete="name" className={field} value={name} onChange={e=>setName(e.target.value)}/></label><label className="block text-xs text-zinc-400">Choose a password<input type="password" autoComplete="new-password" required minLength={8} className={field} value={password} onChange={e=>setPassword(e.target.value)}/></label>{error&&<Notice tone="error">{error}</Notice>}<Submit busy={busy}>Accept invitation</Submit><Button type="button" variant="ghost" className="w-full" onClick={cancel}>Back to sign in</Button></form>}</AuthShell>}
-function Signup({signedIn,cancel}:{signedIn:(t:string)=>void;cancel:()=>void}){const[form,setForm]=useState({organization_name:"",name:"",email:"",password:""}),[busy,setBusy]=useState(false),[error,setError]=useState("");
- const set=(key:string)=>(e:any)=>setForm(f=>({...f,[key]:e.target.value}));
- return <AuthShell title="Create your workspace" subtitle="You'll be its first administrator"><form className="space-y-4" onSubmit={async e=>{e.preventDefault();setBusy(true);setError("");try{const r=await api<any>("/auth/register",{method:"POST",body:JSON.stringify(form)});signedIn(r.token)}catch(err:any){setError(err.message)}finally{setBusy(false)}}}><label className="block text-xs text-zinc-400">Organization name<input required minLength={2} className={field} value={form.organization_name} onChange={set("organization_name")}/></label><label className="block text-xs text-zinc-400">Your name<input required autoComplete="name" className={field} value={form.name} onChange={set("name")}/></label><label className="block text-xs text-zinc-400">Work email<input type="email" autoComplete="email" required className={field} value={form.email} onChange={set("email")}/></label><label className="block text-xs text-zinc-400">Password<input type="password" autoComplete="new-password" required minLength={8} className={field} value={form.password} onChange={set("password")}/></label><p className="text-xs text-zinc-500">At least 8 characters. We'll email you a link to confirm your address.</p>{error&&<Notice tone="error">{error}</Notice>}<Submit busy={busy}>Create workspace</Submit><Button type="button" variant="ghost" className="w-full" onClick={cancel}>I already have an account</Button></form></AuthShell>}
-function Onboarding({state,reload,invite,done}:{state:any;reload:()=>void;invite:(email:string,role:string)=>Promise<void>;done:()=>Promise<void>}){
- const [email,setEmail]=useState(""),[role,setRole]=useState("member"),[busy,setBusy]=useState(false),[error,setError]=useState(""),[sent,setSent]=useState("");
- if(!state||state.complete)return null;
- const steps=state.steps||[],remaining=steps.filter((s:any)=>!s.done).length;
- return <Card className="mb-6 p-5"><div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-sm font-semibold">Finish setting up {state.organization}</h2><p className="mt-1 text-xs text-zinc-500">{remaining?`${remaining} step${remaining===1?"":"s"} left.`:"All done -- dismiss this when you're ready."}</p></div><Button size="sm" variant="ghost" onClick={async()=>{await done();reload()}}>Dismiss</Button></div>
-  <ul className="mt-4 space-y-2">{steps.map((step:any)=><li key={step.key} className="flex items-center gap-3 text-sm"><span aria-hidden className={cn("grid h-5 w-5 shrink-0 place-items-center rounded-full border",step.done?"border-emerald-400 bg-emerald-400 text-slate-950":"border-zinc-600")}>{step.done&&<Check size={12}/>}</span><span className={cn(step.done&&"text-zinc-500 line-through")}>{step.label}</span><span className="sr-only">{step.done?"completed":"not completed"}</span></li>)}</ul>
-  {state.can_invite&&<form className="mt-5 flex flex-wrap items-end gap-2 border-t border-line pt-4" onSubmit={async e=>{e.preventDefault();setBusy(true);setError("");setSent("");try{await invite(email,role);setSent(email);setEmail("");reload()}catch(err:any){setError(err.message)}finally{setBusy(false)}}}>
-   <label className="min-w-48 flex-1 text-xs text-zinc-400">Invite a teammate<input type="email" required placeholder="colleague@company.com" className={field} value={email} onChange={e=>setEmail(e.target.value)}/></label>
-   <label className="text-xs text-zinc-400">Role<select className={field} value={role} onChange={e=>setRole(e.target.value)}><option value="member">member</option><option value="manager">manager</option><option value="admin">admin</option></select></label>
-   <Button type="submit" disabled={busy}>{busy&&<Loader2 className="animate-spin" size={15}/>}Send invite</Button>
-   {sent&&<p role="status" className="w-full text-xs text-emerald-300">Invitation sent to {sent}.</p>}
-   {error&&<p role="alert" className="w-full text-xs text-red-300">{error}</p>}</form>}
- </Card>
-}
-function VerifyBanner({user,resend}:{user:User|null;resend:()=>Promise<void>}){
- const [sent,setSent]=useState(false);
- if(!user||user.email_verified!==false||user.kind==="agent")return null;
- return <div role="status" className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100"><span>Confirm your email address to secure your account.</span>{sent?<span className="text-xs text-amber-200/80">Confirmation link sent.</span>:<button className="text-xs underline underline-offset-2" onClick={async()=>{await resend();setSent(true)}}>Resend the link</button>}</div>;
-}
-function Home({data,activity,project,task,toggle,all,ai}:any){const tasks:Task[]=data?.my_tasks||[];return <><div className="mb-7 flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm text-sky-300">{new Intl.DateTimeFormat(undefined,{weekday:"long",month:"long",day:"numeric"}).format(new Date())}</p><h1 className="mt-1 text-2xl font-semibold">Your workspace</h1><p className="mt-1 text-sm text-zinc-400">Keep work moving or ask Enter AI to help.</p></div><Button onClick={ai}><Sparkles size={16}/>Ask Enter AI</Button></div><div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">{[["Active projects",data?.stats?.active_projects,"text-sky-300"],["At risk",data?.stats?.at_risk,"text-red-300"],["Open tasks",data?.stats?.my_open_tasks,"text-amber-300"],["Completed",data?.stats?.completed_this_week,"text-emerald-300"]].map(([l,v,c])=><Card key={String(l)} className="p-4"><p className="text-xs text-zinc-500">{l}</p><p className={cn("mt-2 text-2xl font-semibold",String(c))}>{v??"-"}</p></Card>)}</div><div className="grid gap-5 xl:grid-cols-[1.45fr_.85fr]"><Card><div className="flex justify-between border-b border-line px-5 py-4"><div><h2 className="text-sm font-semibold">My priorities</h2><p className="text-xs text-zinc-500">Completed work stays visible.</p></div><Button variant="ghost" size="sm" onClick={all}>View all</Button></div>{tasks.length?tasks.slice(0,6).map(t=><Row key={t.id} task={t} open={()=>task(t)} toggle={()=>toggle(t)}/>):<p className="p-5 text-sm text-zinc-500">No assigned work yet.</p>}</Card><Card><div className="border-b border-line px-5 py-4"><h2 className="text-sm font-semibold">Project health</h2></div><div className="space-y-4 p-5">{(data?.projects||[]).map((p:Project)=><button key={p.id} onClick={()=>project(p)} className="block w-full text-left"><div className="mb-1.5 flex justify-between"><span className="text-sm">{p.name}</span><Health health={p.health}/></div><div className="h-1.5 rounded-full bg-white/5"><div className="h-full rounded-full" style={{width:p.progress+"%",background:p.color}}/></div><p className="mt-1 text-xs text-zinc-500">{p.progress}% complete, {p.task_count} tasks</p></button>)}</div></Card></div><Card className="mt-5"><div className="border-b border-line px-5 py-4 text-sm font-semibold">Recent activity</div>{activity.slice(0,5).map((a:any)=><div key={a.id} className="flex gap-3 border-b border-line/60 px-5 py-3"><Avatar user={a.actor}/><p className="text-sm text-zinc-300"><b className="text-white">{a.actor?.name||"Enter AI"}</b> {a.action} a {a.entity_type}</p></div>)}</Card></>}
-function Portfolio({projects,open,create}:any){return <><div className="mb-6 flex justify-between"><div><p className="text-sm text-sky-300">Portfolio</p><h1 className="mt-1 text-2xl font-semibold">All projects</h1></div><Button onClick={create}><Plus size={15}/>New project</Button></div><Card className="overflow-x-auto"><div className="min-w-[650px]">{projects.map((p:Project)=><button key={p.id} onClick={()=>open(p)} className="grid w-full grid-cols-[1.6fr_.8fr_.6fr_.5fr] gap-4 border-b border-line/60 px-5 py-4 text-left hover:bg-white/[.025]"><span className="text-sm font-medium"><i className="mr-2 inline-block h-2 w-2 rounded-full" style={{background:p.color}}/>{p.name}<small className="ml-2 text-zinc-600">{p.code}</small></span><span className="text-sm text-zinc-400">{p.team||"-"}</span><Health health={p.health}/><span className="text-sm text-zinc-400">{p.progress}%</span></button>)}</div></Card></>}
-function Work({tasks,open,toggle}:any){return <><div className="mb-6"><p className="text-sm text-sky-300">Personal execution</p><h1 className="mt-1 text-2xl font-semibold">My work</h1><p className="mt-1 text-sm text-zinc-500">Tick work off without losing it from the list.</p></div><Card>{tasks.length?tasks.map((t:Task)=><Row task={t} key={t.id} open={()=>open(t)} toggle={()=>toggle(t)}/>):<p className="p-6 text-sm text-zinc-500">No work assigned.</p>}</Card></>}
-function InboxView({notices,open}:any){return <><div className="mb-6"><p className="text-sm text-sky-300">Updates</p><h1 className="mt-1 text-2xl font-semibold">Inbox</h1><p className="mt-1 text-sm text-zinc-500">Open an update to mark it read and jump to its project.</p></div><Card>{notices.length?notices.map((n:Notice)=><button key={n.id} onClick={()=>open(n)} className={cn("flex w-full gap-4 border-b border-line/70 px-5 py-4 text-left hover:bg-white/[.02]",!n.read&&"bg-sky-400/[.035]")}><i className={cn("mt-1.5 h-2 w-2 rounded-full",n.read?"bg-transparent":"bg-sky-400")}/><span><b className="block text-sm">{n.title}</b><span className="mt-1 block text-sm text-zinc-400">{n.body}</span></span></button>):<p className="p-6 text-sm text-zinc-500">Inbox zero.</p>}</Card></>}
-function Teams({teams,selected,projects,open,create,select}:any){return <><div className="mb-6 flex justify-between"><div><p className="text-sm text-sky-300">People and ownership</p><h1 className="mt-1 text-2xl font-semibold">Teams</h1></div><Button onClick={create}><Plus size={15}/>New team</Button></div><div className="grid gap-4 md:grid-cols-2">{teams.map((t:any)=><button key={t.id} onClick={()=>select(t)} className={cn("rounded-lg border p-5 text-left",selected?.id===t.id?"border-sky-400/50 bg-sky-400/[.05]":"border-line bg-panel hover:border-zinc-600")}><h2 className="font-medium">{t.name}</h2><p className="mt-1 text-sm text-zinc-500">{t.description||"No description"}</p><p className="mt-5 text-xs text-zinc-500">{t.projects} projects. Open to view.</p></button>)}</div>{selected&&<section className="mt-6"><h2 className="mb-3 text-sm font-semibold">{selected.name} projects</h2><div className="grid gap-3 md:grid-cols-2">{projects.length?projects.map((p:Project)=><button key={p.id} onClick={()=>open(p)} className="rounded-lg border border-line bg-panel p-4 text-left hover:border-zinc-600"><div className="flex justify-between"><span className="text-sm font-medium">{p.name}</span><Health health={p.health}/></div><p className="mt-2 text-xs text-zinc-500">{p.progress}% complete</p></button>):<p className="text-sm text-zinc-500">No projects assigned.</p>}</div></section>}</>}
-function ProjectView({project,tasks,open,update,edit,create,ai,upload:put}:any){const[mode,setMode]=useState("board");if(!project)return <p className="text-zinc-500">Choose a project.</p>;return <><div className="mb-6 flex flex-wrap items-end justify-between gap-4"><div><p className="text-sm text-sky-300">{project.code}</p><div className="mt-1 flex gap-3"><i className="mt-2 h-3 w-3 rounded-full" style={{background:project.color}}/><h1 className="text-2xl font-semibold">{project.name}</h1><Health health={project.health}/></div><p className="mt-2 text-sm text-zinc-400">{project.description}</p></div><div className="flex gap-2"><Button variant="ghost" size="sm" onClick={ai}><Sparkles size={15}/>Ask Enter AI</Button><Button variant="ghost" size="sm" onClick={edit}>Edit project</Button><div className="flex rounded-lg border border-line bg-panel p-1"><button aria-label="Board view" className={cn("rounded p-1.5",mode==="board"&&"bg-white/10")} onClick={()=>setMode("board")}><Grid2X2 size={15}/></button><button aria-label="List view" className={cn("rounded p-1.5",mode==="list"&&"bg-white/10")} onClick={()=>setMode("list")}><LayoutList size={15}/></button></div><Button onClick={create}><Plus size={15}/>New task</Button></div></div><Card className="mb-5 p-4"><div className="flex flex-wrap items-center gap-3"><FileText size={16} className="text-sky-300"/><span className="text-sm font-medium">Project documents</span>{project.documents?.map((d:Doc)=><span key={d.id} className="rounded bg-white/5 px-2 py-1 text-xs text-zinc-400">{d.file_name}</span>)}<label className="ml-auto cursor-pointer text-xs text-sky-300">Attach document<input className="hidden" type="file" accept=".pdf,.doc,.docx,.txt,.xlsx,.csv,.json" onChange={e=>e.target.files?.[0]&&put(e.target.files[0])}/></label></div></Card>{mode==="list"?<Card>{tasks.map((t:Task)=><Row key={t.id} task={t} open={()=>open(t)} toggle={()=>update(t,{status:t.status==="done"?"todo":"done"})}/>)}</Card>:<Kanban tasks={tasks} open={open} update={update}/>}</>}
-function Kanban({tasks,open,update}:any){return <div className="grid gap-3 overflow-x-auto pb-3 lg:grid-cols-5">{states.map(s=><div className="min-w-56" key={s}><div className="mb-3 flex justify-between px-1 text-xs text-zinc-400"><span className="capitalize">{s.replace("_"," ")}</span><span>{tasks.filter((t:Task)=>t.status===s).length}</span></div><div className="min-h-40 space-y-2 rounded-lg bg-white/[.025] p-2">{tasks.filter((t:Task)=>t.status===s).map((t:Task)=><div key={t.id} role="button" tabIndex={0} onClick={()=>open(t)} onKeyDown={e=>{if(e.key==="Enter"||e.key===" "){e.preventDefault();open(t)}}} className={cn("block w-full cursor-pointer rounded-lg border border-line bg-panel p-3 text-left hover:border-zinc-600",t.status==="done"&&"border-emerald-500/30 bg-emerald-500/[.035]")}><div className="mb-3 flex justify-between"><Badge tone={t.priority==="high"?"red":t.priority==="medium"?"amber":"default"}>{t.priority}</Badge><button aria-label={"Advance "+t.title} className="text-zinc-500 hover:text-sky-300" onClick={e=>{e.stopPropagation();const i=states.indexOf(t.status);if(i<4)update(t,{status:states[i+1]})}}><ChevronRight size={16}/></button></div><p className={cn("text-sm",t.status==="done"&&"text-emerald-100/70 line-through")}>{t.title}</p><div className="mt-4 flex justify-between"><span className="text-xs text-zinc-600">{when(t.due_date)}</span><Avatar user={t.assignee}/></div></div>)}</div></div>)}</div>}
-function AI({project,clear,onAction}:any){
- const [text,setText]=useState("What should I work on today?"),[messages,setMessages]=useState<any[]>([{role:"assistant",body:"I can read your workspace and propose changes. Every write needs your confirmation."}]),[busy,setBusy]=useState(false),[error,setError]=useState("");
- async function ask(question=text){if(!question.trim()||busy)return;setText("");setError("");setMessages(x=>[...x,{role:"user",body:question}]);setBusy(true);try{const r=await api<any>("/ai/plan",{method:"POST",body:JSON.stringify({message:question,project_id:project?.id||null})});setMessages(x=>[...x,{role:"assistant",body:r.reply,actions:r.actions}])}catch(e:any){setError(e.message||"Enter AI could not answer right now.")}finally{setBusy(false)}}
- return <div className="mx-auto max-w-4xl"><div className="mb-7 text-center"><div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-xl bg-sky-400/10 text-sky-300"><Sparkles size={22}/></div><h1 className="text-2xl font-semibold">Enter AI Copilot</h1><p className="mt-2 text-sm text-zinc-500">Grounded in your workspace. No change happens without your confirmation.</p></div><Card className="min-h-[480px] overflow-hidden">{project?<div className="flex items-center justify-between border-b border-line bg-sky-400/[.04] px-5 py-2 text-xs text-sky-200"><span>Scoped to <b>{project.name}</b> -- only this project's data is used.</span><button className="text-sky-300 underline-offset-2 hover:underline" onClick={clear}>Ask about everything instead</button></div>:<div className="border-b border-line px-5 py-3 text-xs text-zinc-400">Read tools: projects, tasks, and priority summaries. Write tools are proposed first.</div>}<div className="flex flex-wrap gap-2 border-b border-line/60 px-5 py-3">{["What should I work on today?","What is at risk?","Summarize AI Workspace"].map(prompt=><button key={prompt} className="rounded-full border border-line px-3 py-1 text-xs text-sky-200 hover:border-sky-400/50" onClick={()=>ask(prompt)} disabled={busy}>{prompt}</button>)}</div><div className="space-y-5 p-5">{messages.map((m,i)=><div className={cn("flex gap-3",m.role==="user"&&"justify-end")} key={i}>{m.role==="assistant"&&<div className="grid h-7 w-7 place-items-center rounded-lg bg-sky-400/10 text-sky-300"><Bot size={15}/></div>}<div className={cn("max-w-[82%] rounded-lg px-4 py-3 text-sm",m.role==="assistant"?"bg-white/[.045]":"bg-sky-400 text-slate-950")}><p>{m.body}</p>{m.actions?.map((a:Action)=><div key={a.label} className="mt-3 rounded-lg border border-sky-400/30 bg-black/20 p-3"><p>{a.label}</p><Button size="sm" className="mt-3" onClick={async()=>{try{await onAction(a);setMessages(x=>[...x,{role:"assistant",body:"Done. "+a.label}])}catch(e:any){setError(e.message||"Confirmation failed. Please ask for a fresh proposal.")}}}><Check size={14}/>Confirm and run</Button></div>)}</div></div>)}{busy&&<Loader2 className="animate-spin text-sky-300" size={18}/>} {error&&<p role="alert" className="text-sm text-red-300">{error}</p>}</div><div className="border-t border-line p-4"><div className="flex gap-2 rounded-lg border border-line bg-canvas p-2 focus-within:border-accent"><Sparkles className="m-1 text-sky-300" size={16}/><input className="min-w-0 flex-1 bg-transparent text-sm outline-none" value={text} onChange={e=>setText(e.target.value)} onKeyDown={e=>e.key==="Enter"&&ask()} placeholder="Ask about work or propose a task"/><Button aria-label="Send message" size="sm" onClick={()=>ask()} disabled={busy}><Send size={15}/></Button></div></div></Card></div>}
-function Command({projects,close,open,ai}:any){const[q,setQ]=useState(""),[result,setResult]=useState<any>(null);useEffect(()=>{const id=setTimeout(()=>{if(q.trim())api("/search?q="+encodeURIComponent(q)).then(setResult).catch(()=>setResult(null))},180);return()=>clearTimeout(id)},[q]);return <div className="fixed inset-0 z-50 grid place-items-start bg-black/65 p-4 pt-[12vh]" onMouseDown={close}><Card className="w-full max-w-2xl overflow-hidden" onMouseDown={e=>e.stopPropagation()}><div className="flex gap-3 border-b border-line px-4"><Search size={18} className="my-auto text-zinc-500"/><input autoFocus className="h-14 flex-1 bg-transparent text-sm outline-none" value={q} onChange={e=>setQ(e.target.value)} placeholder="Search projects and tasks"/><button aria-label="Close command bar" onClick={close}><X className="text-zinc-500" size={18}/></button></div><div className="max-h-80 overflow-auto p-2"><button onClick={ai} className="flex w-full gap-3 rounded-lg p-3 text-left hover:bg-sky-400/10"><Sparkles className="text-sky-300" size={17}/><span className="text-sm">Ask Enter AI</span></button>{(!q?projects:result?.projects||[]).map((p:Project)=><button key={p.id} onClick={()=>open(p)} className="flex w-full gap-3 rounded-lg p-3 text-left hover:bg-white/5"><FolderKanban size={16} className="text-zinc-500"/><span className="text-sm">{p.name}</span></button>)}{result?.tasks?.map((t:Task)=><div key={t.id} className="flex gap-3 p-3 text-sm"><Circle size={13}/>{t.title}</div>)}</div></Card></div>}
-function ProjectForm({teams,close,create}:any){const[name,setName]=useState(""),[code,setCode]=useState(""),[description,setDescription]=useState(""),[team,setTeam]=useState(""),[health,setHealth]=useState("on_track"),[doc,setDoc]=useState(""),[draft,setDraft]=useState<any>(null),[busy,setBusy]=useState(false),[error,setError]=useState("");async function read(file?:File){if(!file)return;setBusy(true);try{const r=await upload<any>("/project-drafts/assist",file);setName(r.draft.name);setCode(r.draft.code);setDescription(r.draft.description);setHealth(r.draft.health);setDoc(r.document.id);setDraft(r.draft);const suggested=teams.find((t:any)=>t.name===r.draft.suggested_team);if(suggested)setTeam(suggested.id)}catch(e:any){setError(e.message)}finally{setBusy(false)}}return <Modal title="New project" close={close}><form className="space-y-4" onSubmit={e=>{e.preventDefault();if(name.trim()&&code.trim())create({name:name.trim(),code:code.trim(),description,team_id:team||null,health,color:"#38bdf8",source_document_ids:doc?[doc]:[]})}}><label className="block rounded-lg border border-dashed border-line p-3 text-sm text-zinc-400">{busy?"Reading document...":doc?"Document read. Review details below.":"Upload a brief and Enter AI will draft the project"}<input className="mt-2 block w-full text-xs" type="file" accept=".pdf,.doc,.docx,.txt,.xlsx,.csv,.json" onChange={e=>read(e.target.files?.[0])}/></label>{error&&<p className="text-sm text-red-300">{error}</p>}{draft&&<div className="rounded-lg border border-sky-400/20 bg-sky-400/[.04] p-3 text-xs text-zinc-300"><p className="font-medium text-sky-200">AI suggestions</p><p className="mt-1">Priority: <b>{draft.priority}</b> · Suggested team: <b>{draft.suggested_team}</b></p><ul className="mt-2 list-disc pl-4">{draft.suggested_tasks?.map((t:any)=><li key={t.title}>{t.title}</li>)}</ul></div>}<div className="grid gap-3 sm:grid-cols-[1fr_.45fr]"><label className="block text-xs text-zinc-400">Project name<input required className={field} value={name} onChange={e=>setName(e.target.value)}/></label><label className="block text-xs text-zinc-400">Code<input required className={field} value={code} onChange={e=>setCode(e.target.value.toUpperCase())}/></label></div><label className="block text-xs text-zinc-400">Description<textarea className={cn(field,"min-h-24")} value={description} onChange={e=>setDescription(e.target.value)}/></label><div className="grid gap-3 sm:grid-cols-2"><label className="text-xs text-zinc-400">Team<select className={field} value={team} onChange={e=>setTeam(e.target.value)}><option value="">No team</option>{teams.map((t:any)=><option key={t.id} value={t.id}>{t.name}</option>)}</select></label><label className="text-xs text-zinc-400">Health<select className={field} value={health} onChange={e=>setHealth(e.target.value)}><option value="on_track">On track</option><option value="at_risk">At risk</option><option value="off_track">Off track</option></select></label></div><div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={close}>Cancel</Button><Button type="submit" disabled={busy}><Plus size={15}/>Create project</Button></div></form></Modal>}
-function ProjectEditForm({project,teams,close,save}:any){const[name,setName]=useState(project.name),[code,setCode]=useState(project.code),[description,setDescription]=useState(project.description||""),[health,setHealth]=useState(project.health),[team,setTeam]=useState(teams.find((t:any)=>t.name===project.team)?.id||"");return <Modal title="Edit project" close={close}><form className="space-y-4" onSubmit={e=>{e.preventDefault();save({name:name.trim(),code:code.trim().toUpperCase(),description,health,team_id:team||null})}}><div className="grid gap-3 sm:grid-cols-[1fr_.45fr]"><label className="block text-xs text-zinc-400">Project name<input required className={field} value={name} onChange={e=>setName(e.target.value)}/></label><label className="block text-xs text-zinc-400">Code<input required className={field} value={code} onChange={e=>setCode(e.target.value.toUpperCase())}/></label></div><label className="block text-xs text-zinc-400">Description<textarea className={cn(field,"min-h-24")} value={description} onChange={e=>setDescription(e.target.value)}/></label><div className="grid gap-3 sm:grid-cols-2"><label className="text-xs text-zinc-400">Team<select className={field} value={team} onChange={e=>setTeam(e.target.value)}><option value="">No team</option>{teams.map((t:any)=><option key={t.id} value={t.id}>{t.name}</option>)}</select></label><label className="text-xs text-zinc-400">Health<select className={field} value={health} onChange={e=>setHealth(e.target.value)}><option value="on_track">On track</option><option value="at_risk">At risk</option><option value="off_track">Off track</option></select></label></div><div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={close}>Cancel</Button><Button type="submit">Save changes</Button></div></form></Modal>}
-function TaskForm({project,users,close,create}:any){const[title,setTitle]=useState(""),[description,setDescription]=useState(""),[priority,setPriority]=useState("medium"),[assignee,setAssignee]=useState("");return <Modal title={"New task in "+project.name} close={close}><form className="space-y-4" onSubmit={e=>{e.preventDefault();if(title)create({title,description,priority,assignee_id:assignee||null})}}><label className="block text-xs text-zinc-400">Title<input required className={field} value={title} onChange={e=>setTitle(e.target.value)}/></label><label className="block text-xs text-zinc-400">Description<textarea className={cn(field,"min-h-20")} value={description} onChange={e=>setDescription(e.target.value)}/></label><div className="grid gap-3 sm:grid-cols-2"><label className="text-xs text-zinc-400">Priority<select className={field} value={priority} onChange={e=>setPriority(e.target.value)}><option>low</option><option>medium</option><option>high</option></select></label><label className="text-xs text-zinc-400">Assignee<select className={field} value={assignee} onChange={e=>setAssignee(e.target.value)}><option value="">Unassigned</option>{users.map((u:User)=><option key={u.id} value={u.id}>{u.name}</option>)}</select></label></div><div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={close}>Cancel</Button><Button type="submit"><Plus size={15}/>Create task</Button></div></form></Modal>}
-function TeamForm({close,create}:any){const[name,setName]=useState(""),[description,setDescription]=useState("");return <Modal title="New team" close={close}><form className="space-y-4" onSubmit={e=>{e.preventDefault();if(name)create({name,description})}}><label className="block text-xs text-zinc-400">Team name<input required className={field} value={name} onChange={e=>setName(e.target.value)}/></label><label className="block text-xs text-zinc-400">Description<textarea className={cn(field,"min-h-20")} value={description} onChange={e=>setDescription(e.target.value)}/></label><div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={close}>Cancel</Button><Button type="submit">Create team</Button></div></form></Modal>}
-function Drawer({task,comments,close,update,comment}:any){const[body,setBody]=useState(""),[uploading,setUploading]=useState(false),[uploaded,setUploaded]=useState("");async function attach(file?:File){if(!file)return;setUploading(true);try{const r=await upload<any>("/tasks/"+task.id+"/attachments",file);setUploaded(r.file_name)}finally{setUploading(false)}}return <div className="fixed inset-0 z-30 bg-black/45" onMouseDown={close}><aside className="absolute inset-y-0 right-0 w-full max-w-xl overflow-y-auto border-l border-line bg-[#0e0e12] p-5 sm:p-6" onMouseDown={e=>e.stopPropagation()}><div className="mb-6 flex justify-between"><Badge tone={task.status==="done"?"green":"blue"}>{task.status==="done"?"Completed":"Task"}</Badge><button aria-label="Close task" onClick={close}><X className="text-zinc-500"/></button></div><input defaultValue={task.title} onBlur={e=>e.target.value!==task.title&&update(task,{title:e.target.value})} className="w-full bg-transparent text-xl font-semibold outline-none"/><textarea defaultValue={task.description} onBlur={e=>e.target.value!==task.description&&update(task,{description:e.target.value})} className={cn(field,"min-h-24")} placeholder="Add a description"/><div className="mt-5 grid grid-cols-2 gap-3"><label className="text-xs text-zinc-500">Status<select className={field} value={task.status} onChange={e=>update(task,{status:e.target.value})}>{states.map(s=><option key={s} value={s}>{s.replace("_"," ")}</option>)}</select></label><label className="text-xs text-zinc-500">Priority<select className={field} value={task.priority} onChange={e=>update(task,{priority:e.target.value})}><option>low</option><option>medium</option><option>high</option></select></label></div><div className="mt-7 border-t border-line pt-5"><h3 className="text-sm font-medium">Comments</h3><div className="mt-4 space-y-3">{comments.map((c:any)=><div key={c.id} className="flex gap-2"><Avatar user={c.author}/><div className="rounded-lg bg-white/[.045] p-3 text-sm"><b className="mb-1 block text-xs">{c.author?.name}</b>{c.body}</div></div>)}</div><form className="mt-5 flex gap-2" onSubmit={e=>{e.preventDefault();if(body){comment(body);setBody("")}}}><input className="min-w-0 flex-1 rounded-lg border border-line bg-canvas p-2.5 text-sm outline-none focus:border-accent" value={body} onChange={e=>setBody(e.target.value)} placeholder="Write a comment"/><Button size="sm"><Send size={14}/></Button></form></div><div className="mt-5 flex flex-wrap gap-2"><label className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border border-line bg-panel px-3 text-xs"><Paperclip size={14}/>{uploading?"Uploading...":"Attach file"}<input type="file" className="hidden" onChange={e=>attach(e.target.files?.[0])}/></label>{uploaded&&<span className="self-center text-xs text-emerald-300">Uploaded {uploaded}</span>}<Button variant="danger" size="sm" onClick={async()=>{await api("/tasks/"+task.id,{method:"DELETE"});close()}}>Delete</Button></div></aside></div>}
-function Agents({agents,config,save,isAdmin,inspect}:{agents:Agent[];config:HierarchyConfigT|null;save:(v:Partial<HierarchyConfigT>)=>Promise<void>;isAdmin:boolean;inspect:(a:Agent)=>void}){
- const roots=agents.filter(a=>!a.parent_agent_id);
- const childrenOf=(id:string)=>agents.filter(a=>a.parent_agent_id===id);
- return <><div className="mb-6"><p className="text-sm text-sky-300">Org chart</p><h1 className="mt-1 text-2xl font-semibold">Agent hierarchy</h1><p className="mt-1 text-sm text-zinc-400">{agents.length} agent{agents.length===1?"":"s"} reporting up to the CEO.</p></div>{isAdmin&&<HierarchyConfigForm config={config} save={save}/>}{roots.length?<Card className="overflow-x-auto p-6"><div className="flex min-w-max justify-center gap-10">{roots.map(r=><AgentNode key={r.id} agent={r} childrenOf={childrenOf} inspect={inspect}/>)}</div></Card>:<Card className="p-8 text-center text-sm text-zinc-500">{isAdmin?"No agents yet -- configure the hierarchy above to create your first agent.":"No agents yet. Ask an admin to configure the agent hierarchy."}</Card>}</>
-}
-function HierarchyConfigForm({config,save}:{config:HierarchyConfigT|null;save:(v:Partial<HierarchyConfigT>)=>Promise<void>}){
- const [form,setForm]=useState<HierarchyConfigT>(config||{vp_count:0,directors_per_vp:0,managers_per_director:0,workers_per_manager:0});
- const [busy,setBusy]=useState(false),[error,setError]=useState("");
- useEffect(()=>{if(config)setForm(config)},[config]);
- const small="mt-1 w-full rounded-lg border border-line bg-canvas px-3 py-2 text-sm outline-none focus:border-accent";
- const fields:[keyof HierarchyConfigT,string][]=[["vp_count","VPs under CEO"],["directors_per_vp","Directors per VP"],["managers_per_director","Senior managers per Director"],["workers_per_manager","Workers per Senior Manager"]];
- return <Card className="mb-6 p-5"><div className="mb-4 flex items-center gap-2"><Settings2 size={16} className="text-sky-300"/><h2 className="text-sm font-semibold">Configure hierarchy</h2></div><form className="grid gap-3 sm:grid-cols-4" onSubmit={async e=>{e.preventDefault();setBusy(true);setError("");try{await save(form)}catch(err:any){setError(err.message)}finally{setBusy(false)}}}>{fields.map(([key,label])=><label key={key} className="text-xs text-zinc-400">{label}<input type="number" min={0} max={20} className={small} value={form[key]} onChange={e=>setForm(f=>({...f,[key]:Number(e.target.value)}))}/></label>)}<div className="flex items-center gap-3 sm:col-span-4">{error&&<p role="alert" className="text-sm text-red-300">{error}</p>}<Button type="submit" disabled={busy} className="ml-auto">{busy&&<Loader2 className="animate-spin" size={15}/>}Save hierarchy</Button></div></form></Card>
-}
-function AgentNode({agent,childrenOf,inspect}:{agent:Agent;childrenOf:(id:string)=>Agent[];inspect:(a:Agent)=>void}){
- const [open,setOpen]=useState(true);
- const kids=childrenOf(agent.id);
- const status=agent.is_blocked?"blocked":agent.is_working?"working":"idle";
- return <div className="flex flex-col items-center"><button onClick={()=>inspect(agent)} className="relative w-40 shrink-0 rounded-lg border border-line bg-panel p-3 text-center hover:border-sky-400/50"><i aria-label={"Status: "+status} title={"Status: "+status} className={cn("absolute right-2 top-2 h-2 w-2 rounded-full",status==="blocked"&&"bg-red-400",status==="working"&&"bg-sky-400 animate-pulse",status==="idle"&&"bg-zinc-700")}/><Avatar user={agent}/><p className="mt-2 truncate text-sm font-medium">{agent.name}</p><p className="truncate text-xs text-zinc-500">{agent.title}</p><p className={cn("mt-2 truncate text-[10px]",agent.current_task?"text-sky-300":"text-zinc-600")}>{agent.current_task?agent.current_task.title:"Idle"}</p></button>{kids.length>0&&<><button aria-label={(open?"Collapse ":"Expand ")+agent.name+"'s reports"} onClick={()=>setOpen(!open)} className="my-2 text-zinc-500 hover:text-sky-300"><ChevronDown size={14} className={cn("transition-transform",!open&&"-rotate-90")}/></button>{open&&<div className="flex gap-6 border-t border-line/40 pt-4">{kids.map(k=><AgentNode key={k.id} agent={k} childrenOf={childrenOf} inspect={inspect}/>)}</div>}</>}</div>
-}
-function AgentInspector({agent,reports,messages,busy,error,close,send,confirm}:{agent:Agent;reports:Agent[];messages:AgentMsg[];busy:boolean;error:string;close:()=>void;send:(t:string)=>void;confirm:(a:Action)=>void}){
- const [text,setText]=useState("");
- return <div className="fixed inset-0 z-30 bg-black/45" onMouseDown={close}><aside className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-line bg-[#0e0e12]" onMouseDown={e=>e.stopPropagation()}><div className="flex items-center justify-between border-b border-line p-5"><div className="flex items-center gap-3"><Avatar user={agent}/><div><h2 className="font-semibold">{agent.name}</h2><p className="text-xs text-zinc-500">{agent.title}</p></div></div><button aria-label="Close agent inspector" onClick={close}><X className="text-zinc-500"/></button></div><div className="max-h-72 space-y-4 overflow-y-auto border-b border-line p-5"><div><h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">Current task</h3><p className="mt-1 text-sm">{agent.current_task?agent.current_task.title:"Idle -- no active task."}</p>{agent.is_blocked&&<p className="mt-1 text-xs text-red-300">Blocked -- repeated attempts failed. Send a message or reassign the task to reset it.</p>}{agent.is_working&&<p className="mt-1 text-xs text-sky-300">Working autonomously on this task.</p>}</div><div><h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">Last completed task</h3><p className="mt-1 text-sm">{agent.last_completed_task?agent.last_completed_task.title:"None yet."}</p></div><div><h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">Direct reports ({reports.length})</h3>{reports.length?<ul className="mt-2 space-y-1.5">{reports.map(r=><li key={r.id} className="flex items-center gap-2 text-sm text-zinc-300"><Avatar user={r}/>{r.name} -- {r.title}</li>)}</ul>:<p className="mt-1 text-sm text-zinc-500">No direct reports.</p>}</div></div><div className="flex flex-1 flex-col overflow-hidden"><div className="flex items-center gap-2 px-5 py-3 text-xs text-zinc-400"><MessageCircle size={14}/>Persistent chat with {agent.name}</div><div tabIndex={0} role="log" aria-label={"Conversation with "+agent.name} className="flex-1 space-y-4 overflow-y-auto px-5 pb-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60">{messages.map(m=><div key={m.id} className={cn("flex gap-3",m.role==="user"&&"justify-end")}>{m.role==="agent"&&<div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-sky-400/10 text-sky-300"><Bot size={14}/></div>}<div className={cn("max-w-[82%] rounded-lg px-3 py-2 text-sm",m.role==="agent"?"bg-white/[.045]":"bg-sky-400 text-slate-950")}><p>{m.body}</p>{m.actions?.map(a=><div key={a.label} className="mt-3 rounded-lg border border-sky-400/30 bg-black/20 p-3 text-zinc-100"><p>{a.label}</p><Button size="sm" className="mt-3" onClick={()=>confirm(a)}><Check size={14}/>Confirm and run</Button></div>)}</div></div>)}{busy&&<Loader2 className="animate-spin text-sky-300" size={16}/>}{error&&<p role="alert" className="text-sm text-red-300">{error}</p>}</div><form className="flex gap-2 border-t border-line p-4" onSubmit={e=>{e.preventDefault();if(text.trim()){send(text);setText("")}}}><input className="min-w-0 flex-1 rounded-lg border border-line bg-canvas p-2.5 text-sm outline-none focus:border-accent" value={text} onChange={e=>setText(e.target.value)} placeholder={"Message "+agent.name}/><Button aria-label={"Send message to "+agent.name} size="sm" disabled={busy}><Send size={14}/></Button></form></div></aside></div>
-}
-function Modal({title,close,children}:{title:string;close:()=>void;children:ReactNode}){return <div className="fixed inset-0 z-40 grid place-items-center bg-black/60 p-4" onMouseDown={close}><Card className="max-h-[90vh] w-full max-w-lg overflow-y-auto p-5 shadow-2xl" onMouseDown={e=>e.stopPropagation()}><div className="mb-5 flex justify-between"><h2 className="font-medium">{title}</h2><button aria-label="Close dialog" onClick={close}><X className="text-zinc-500" size={18}/></button></div>{children}</Card></div>}

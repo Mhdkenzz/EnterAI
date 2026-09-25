@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { expect, test as base, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import { signIn } from "./session";
 
 const API = process.env.E2E_API_URL || "http://127.0.0.1:8000/api";
 type Workspace = { token: string; memberToken: string; adminId: string; memberId: string; adminName: string; memberName: string };
@@ -45,7 +46,7 @@ with SessionLocal() as db:
 });
 
 async function enter(page: Page, token: string) {
-  await page.addInitScript(value => localStorage.setItem("enter-token", value), token);
+  await signIn(page.context(), token);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
 }
@@ -63,9 +64,8 @@ test("human admin sees usage, member has no Admin navigation", async ({ page, is
   await expect(page.getByText(/Tracked since Phase 7/)).toBeVisible();
   await expect(page.getByText(/Provider mode:/)).toBeVisible();
   await expect(page.getByText("No agents configured.")).toBeVisible();
-  await page.evaluate(token => localStorage.setItem("enter-token", token), workspace.memberToken);
-  // Clear init script through a new page is unnecessary: reload does re-run it,
-  // so replace storage after navigation using a dedicated context page instead.
+  // The session cookie belongs to the context, so a fresh page picks up the member.
+  await signIn(page.context(), workspace.memberToken);
   const memberPage = await page.context().newPage();
   await memberPage.goto("/");
   await expect(memberPage.getByRole("heading", { name: "Your workspace" })).toBeVisible();

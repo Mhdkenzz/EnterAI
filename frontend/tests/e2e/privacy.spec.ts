@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 import { expect, test as base, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
+import { signIn } from "./session";
 
 const API = process.env.E2E_API_URL || "http://127.0.0.1:8000/api";
 type Workspace = { token: string; memberToken: string; adminPassword: string; memberPassword: string; adminEmail: string };
@@ -45,7 +46,7 @@ with SessionLocal() as db:
 });
 
 async function enter(page: Page, token: string) {
-  await page.addInitScript(value => localStorage.setItem("enter-token", value), token);
+  await signIn(page.context(), token);
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
 }

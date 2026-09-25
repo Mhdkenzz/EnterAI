@@ -3,7 +3,7 @@ import hashlib
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable
 import jwt
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,7 +12,7 @@ from pydantic import BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
-from .auth import CONFIRMATION_SECRET, create_token, current_user, hash_password, verify_password
+from .auth import CONFIRMATION_SECRET, CSRF_HEADER, clear_session_cookie, create_token, current_user, hash_password, set_session_cookie, verify_password
 from .database import Base, engine, get_db
 from .models import Activity, AgentMessage, Attachment, Comment, CopilotConfirmation, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
 from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
@@ -134,7 +134,7 @@ app.add_middleware(
     allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "Accept", CSRF_HEADER],
 )
 
 @app.on_event("startup")
@@ -282,7 +282,7 @@ def root(): return {"service": "Enter AI API", "status": "ok"}
 _ABSENT_USER_HASH = hash_password(os.urandom(24).hex())
 
 @app.post("/api/auth/register")
-def register(data: Register, request: Request, db: Session = Depends(get_db)):
+def register(data: Register, request: Request, response: Response, db: Session = Depends(get_db)):
     """Self-serve signup: creates the organization and its first admin.
 
     A taken email address is answered with the same message as any other rejected
@@ -309,10 +309,11 @@ def register(data: Register, request: Request, db: Session = Depends(get_db)):
     verification = accounts.issue_verification(db, user)
     db.commit()
     mailer.send_verification(user.email, user.name, verification)
-    return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
+    token = create_token(user); set_session_cookie(response, token)
+    return {"token":token,"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
 
 @app.post("/api/auth/login")
-def login(data: SignIn, request: Request, db: Session = Depends(get_db)):
+def login(data: SignIn, request: Request, response: Response, db: Session = Depends(get_db)):
     enforce(_LOGIN_LIMITER, request)
     user = db.scalar(select(User).where(func.lower(User.email) == accounts.normalize(data.email)))
     if not user:
@@ -328,7 +329,14 @@ def login(data: SignIn, request: Request, db: Session = Depends(get_db)):
     if policy and policy.sso_only_enforced:
         raise HTTPException(403, "This organization requires signing in through SSO.")
     log(db,user.organization_id,user.id,"user",user.id,"logged_in"); db.commit()
-    org=db.get(Organization,user.organization_id); return {"token":create_token(user),"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
+    org=db.get(Organization,user.organization_id); token=create_token(user); set_session_cookie(response, token)
+    return {"token":token,"user":user_out(user),"organization":{"id":org.id,"name":org.name}}
+
+@app.post("/api/auth/logout", status_code=204)
+def logout(response: Response):
+    """Ends the browser's cookie session. A bearer token held by the CLI is not
+    affected; revoking every session is what a password reset (epoch bump) is for."""
+    clear_session_cookie(response)
 
 @app.get("/api/me")
 def me(user: User = Depends(current_user), db: Session = Depends(get_db)): return {"user":user_out(user),"organization":{"id":user.organization_id,"name":db.get(Organization,user.organization_id).name}}

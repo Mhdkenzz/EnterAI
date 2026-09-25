@@ -12,11 +12,19 @@ Enter AI is a dark, AI-native enterprise project management MVP.
 
 ```sh
 docker compose up --build
-cd frontend && npm run dev -- -p 6767
+cd frontend && npm run dev          # http://localhost:3000
 cd backend && uvicorn app.main:app --reload --port 8000
 ```
 
-The demo account is `admin@demo.enterai.com` / `enterai-demo`.
+With `ENVIRONMENT=development` the seeded demo login is `admin@demo.enterai.com` / `enterai-demo`.
+It is public, so production refuses to start with it: set `SEED_ADMIN_EMAIL` and
+`SEED_ADMIN_PASSWORD` instead (see `README.md` and `.env.example`).
+
+## Auth
+
+The browser session is an httpOnly cookie set by `/api/auth/login`; cookie-authenticated
+writes must send the `X-EnterAI-Client` header. The CLI and other non-browser clients
+send the same JWT as `Authorization: Bearer`.
 
 ## AI safety
 

@@ -4,7 +4,7 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 
 ## What is included
 
-- JWT authentication and organisation-scoped data
+- JWT authentication (httpOnly session cookie in the browser, bearer token for the CLI) and organisation-scoped data
 - Users, roles (`admin`, `manager`, `member`) and teams
 - Projects, list and Kanban views, tasks, subtasks, comments and file attachments
 - Activity history, notifications, My Work, Inbox, portfolio dashboard and global search

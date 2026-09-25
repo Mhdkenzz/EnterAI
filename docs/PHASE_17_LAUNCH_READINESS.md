@@ -2,7 +2,15 @@
 
 Status: PARTIAL (environment-blocked items marked BLOCKED below)
 Repo: https://github.com/Mhdkenzz/EnterAI.git
-Verified HEAD: d67ceb6193c8fd5f92d938f8b64eb34a444fcc70
+Verified HEAD: 0a7dfe9 (CI run 35755725488 green, 2026-09-22); originally written against d67ceb6
+
+**2026-09-25 status refresh.** Several lines below had fallen behind the code: OIDC
+login, the audit aggregation writer, the SCIM PATCH attribute set, the backup service,
+liveness/readiness probes, the multi-replica CI job and exact-SHA CI all landed after
+the 2026-09-18 pass but were still listed as missing. Each such line is now updated
+and marked *(updated 2026-09-25)*. The browser session also moved from a
+`localStorage` bearer token to an httpOnly, SameSite=Lax cookie with a CSRF header
+check on cookie-authenticated writes (see "Fixed 2026-09-25" below).
 
 **2026-09-18 correction pass.** An independent audit found several PASS lines below
 did not match the code: migrations were verified with `Base.metadata.create_all`,
@@ -13,8 +21,8 @@ provision or deactivate any user including admins; and IP allowlisting / session
 policies / SSO-only were stored settings with no enforcement anywhere. All three
 are fixed as of this pass (migration `0012_sso_enterprise`, dedicated SCIM
 service-token auth, and real enforcement in `auth.current_user`/login) -- see the
-corrected lines below, marked *(fixed 2026-09-18)*. Real SSO login (SAML/OIDC
-assertion or token verification) is still not implemented; SCIM provisioning is.
+corrected lines below, marked *(fixed 2026-09-18)*. OIDC login has since been
+implemented (`sso_oidc.py`); SAML is deliberately not supported *(updated 2026-09-25)*.
 
 ## Launch Readiness Gates
 
@@ -23,24 +31,26 @@ assertion or token verification) is still not implemented; SCIM provisioning is.
 - [PARTIAL] Phase 14 SCIM provisioning/deactivation implemented and now schema-backed
   and access-controlled *(fixed 2026-09-18: added alembic migration `0012_sso_enterprise`;
   `/scim/v2/*` now requires a dedicated per-IdP service token instead of accepting any
-  signed-in member's session token)*. SSO **login** itself (SAML assertion or OIDC token
-  verification) is still not implemented — admins can store IdP config and SCIM-provision
-  users, but nobody can actually sign in via SSO yet.
-- [PARTIAL] Phase 15 Enterprise controls: audit aggregation is read-only scaffolding
-  (nothing writes to it yet); IP allowlisting and session policy / SSO-only are now
+  signed-in member's session token)*. OIDC SSO login is implemented: authorization-code
+  flow with PKCE, ID-token signature/issuer/audience/nonce verification, JIT provisioning
+  *(updated 2026-09-25)*. SAML is intentionally not implemented (see `sso_oidc.py`
+  docstring); a provider configured as `saml` cannot sign anyone in.
+- [PASS] Phase 15 Enterprise controls: audit aggregation is written by
+  `observability.refresh_audit_aggregations`, run by a background loop and on demand
+  from the enterprise route *(updated 2026-09-25)*; IP allowlisting and session policy / SSO-only are now
   *enforced*, not just stored *(fixed 2026-09-18: `auth.current_user` checks the org's
   active `IPAllowlist`/`SessionPolicy` on every authenticated request, and
   `/api/auth/login` refuses password sign-in for `sso_only_enforced` orgs)*.
 - [PASS] Phase 16 Load/security tests (isolation, replay, sustained load, performance)
 - [PASS] Security review completed (blocking finding: client_secret truncation — FIXED; strict isolation preserved; no mutation routes for audit)
-- [BLOCKED] Real external IdP/OIDC endpoint integration (no endpoint configured — environment limitation; no ACS/OIDC callback exists yet either)
-- [BLOCKED] Playwright/axe for frontend SSO/admin UI (front-end UI not implemented — no pages to navigate)
+- [BLOCKED] Real external IdP/OIDC endpoint integration: the OIDC callback exists and is tested end to end against an in-process fake IdP, but has not been run against a real Okta/Entra/Google tenant *(updated 2026-09-25)*
+- [PARTIAL] Playwright/axe for frontend SSO/admin UI: the admin console, SSO sign-in button and SSO callback have Playwright+axe coverage (`admin.spec.ts`, `auth.spec.ts`); there is no admin UI for *configuring* an identity provider -- that is API-only *(updated 2026-09-25)*
 - [BLOCKED] External penetration scan (requires authorization/network access)
-- [PASS] Backup/restore procedure documented (docs/RESTORE_RUNBOOK.md exists); not scheduled automatically anywhere yet
+- [PASS] Backup/restore procedure documented (docs/RESTORE_RUNBOOK.md) and scheduled: the `backup` service in `docker-compose.prod.yml` runs `scripts/backup.sh` on a loop *(updated 2026-09-25)*
 - [PASS] Secrets management documented (docs/SECRETS_MANAGEMENT.md exists); still plain env vars, no rotation automation
 - [PASS] Monitoring/docs exist (docs/MONITORING.md); `/health` now checks DB+Redis reachability *(fixed 2026-09-18)*, still no external alerting sink
 
-VERDICT: PILOT READY = NO — blocked by real IdP SSO login, frontend SSO/admin UI, external scan. Without those, pilot can start in limited internal/demo mode (SCIM-based provisioning, password login) but not a full SSO-login enterprise pilot.
+VERDICT: PILOT READY = NO — blocked by an OIDC login verified against a real IdP tenant and an external scan. Without those, a pilot can start in limited internal mode (password login, SCIM provisioning, OIDC against a trusted IdP at the customer's own risk) *(updated 2026-09-25)*.
 
 ### PAID LAUNCH READY
 - [PASS] Database migrations/models verified against `alembic upgrade head` on a fresh
@@ -55,17 +65,17 @@ VERDICT: PILOT READY = NO — blocked by real IdP SSO login, frontend SSO/admin 
 - [PASS] Auth/session security verified (JWT epoch, session retirement, deactivation)
 - [PASS] SCIM provisioning/deactivation verified (happy path + deactivation + role mapping)
 - [PASS] Audit immutability enforced (read-only routes, no mutation endpoints)
-- [PARTIAL] Enterprise audit aggregation route exists but nothing populates it yet (read-only, always empty)
-- [PASS] Multi-replica/Redis docs present (not load-tested in multi-replica environment)
-- [BLOCKED] Production multi-replica load verification (local SQLite only for Phase 16 performance; real Postgres + Redis multi-replica not stress-tested)
+- [PASS] Enterprise audit aggregation populated by a background writer *(updated 2026-09-25)*
+- [PASS] Multi-replica/Redis docs present
+- [PARTIAL] Multi-replica verification: CI's `multi-replica` job runs two API replicas behind the nginx load balancer on Postgres + Redis and checks cross-replica behaviour; this is a functional check, not a sustained load/stress test *(updated 2026-09-25)*
 - [BLOCKED] Full penetration/security scan
 - [BLOCKED] Incident response/on-call process finalized (docs/RESTORE_RUNBOOK.md exists but incident response/on-call runbook not fully written)
-- [BLOCKED] Status/uptime endpoint (not implemented; docs exist)
+- [PARTIAL] Status/uptime: `/live`, `/ready` and `/health` probes exist; no public status page *(updated 2026-09-25)*
 - [BLOCKED] Game-day drill (not executed — requires production-like environment and authorization)
 - [PASS] Rollback procedure documented (docs/RESTORE_RUNBOOK.md)
 - [PASS] Deployment docs exist (docs/DEPLOY.md implied by deploy/docker-compose; docs/SECURITY_DEPLOY.md exists)
 
-VERDICT: PAID READY = NO — requires multi-replica performance verification, incident/on-call finalization, external security scan, game-day execution, and frontend SSO/admin UI.
+VERDICT: PAID READY = NO — requires multi-replica load/stress verification, incident/on-call finalization, external security scan, game-day execution, and billing proven against a real Stripe sandbox *(updated 2026-09-25)*.
 
 ### ENTERPRISE READY
 - [PASS] Strict org isolation enforced at DB query level (every route uses organization_id filter)
@@ -77,27 +87,29 @@ VERDICT: PAID READY = NO — requires multi-replica performance verification, in
 - [PASS] SCIM provisioning with role mapping (default safe member)
 - [PASS] SCIM deactivation immediate (user.active=False + session_epoch bump + audit log)
 - [PASS] Audit immutability (append-only, read-only routes, no mutation endpoints)
-- [BLOCKED] Enterprise audit aggregation/read-only export -- route exists, nothing writes to it
+- [PASS] Enterprise audit aggregation -- populated by a background writer; read-only route *(updated 2026-09-25)*
 - [PASS] IP allowlisting -- now enforced on every authenticated request, not just stored *(fixed 2026-09-18)*
 - [PASS] Session/org policies -- `max_session_days` and `sso_only_enforced` now enforced, not just stored *(fixed 2026-09-18)*
-- [BLOCKED] Real IdP SSO-only enforcement production-tested (and SSO login itself is not implemented yet -- see Phase 14 note above)
-- [BLOCKED] SCIM PATCH full spec coverage (only replace active covered; full spec broader)
+- [BLOCKED] Real IdP SSO-only enforcement production-tested (OIDC login exists; not yet run against a real IdP tenant) *(updated 2026-09-25)*
+- [PARTIAL] SCIM PATCH: `replace`/`add` of `active`, `displayName`/`name.formatted`, `userName` and `roles`, in both path and path-less forms; `remove` is ignored rather than applied *(updated 2026-09-25)*
 - [BLOCKED] Full external pen scan
 - [BLOCKED] Game-day / incident response finalized
 
-VERDICT: ENTERPRISE READY = NO — blocked by real SSO login, external pen scan, incident/on-call/game-day, full SCIM spec coverage, and a real secrets-rotation story.
+VERDICT: ENTERPRISE READY = NO — blocked by SSO verified against a real IdP (and no SAML), external pen scan, incident/on-call/game-day, SCIM `remove` support, and a real secrets-rotation story *(updated 2026-09-25)*.
 
 ## Blocked Items (honest)
-- BLOCKED: Real external OIDC/SAML identity provider endpoint -- no ACS/OIDC callback exists in code yet, not just unconfigured
-- BLOCKED: Playwright/axe frontend SSO/admin UI tests (no frontend UI pages exist)
+- BLOCKED: Real external OIDC identity provider -- the callback exists; untested against a real tenant. SAML is not supported
+- PARTIAL: No admin UI for configuring an identity provider (API only); the rest of the admin/SSO UI has Playwright+axe tests
 - BLOCKED: Full external penetration/security scan (requires authorization/network access)
-- BLOCKED: Production multi-replica load/stress verification (only SQLite memory tested)
+- BLOCKED: Production multi-replica load/stress verification (CI checks two replicas functionally, not under sustained load)
 - BLOCKED: Game-day / incident response/on-call runbook finalized (docs present but not executed/finalized)
-- BLOCKED: Status/uptime endpoint (`/health` now checks DB+Redis as of 2026-09-18; no public status page or alerting sink)
-- BLOCKED: Full SCIM PATCH operation spec (only replace active implemented)
-- BLOCKED: Enterprise audit aggregation is unpopulated (route exists, nothing writes rows to it)
+- BLOCKED: Public status page and external alerting sink (`/live`, `/ready`, `/health` exist)
+- PARTIAL: SCIM PATCH `remove` is ignored rather than applied
 - BLOCKED: Billing proven against a real Stripe sandbox end-to-end (enforcement now wired in, unverified against live Stripe)
-- BLOCKED: Exact-SHA CI verification (work exists as untracked/uncommitted files; not pushed per authorization)
+
+## Fixed 2026-09-25
+- Browser sessions use an httpOnly, SameSite=Lax `enterai_session` cookie (Secure in deployment environments, overridable with `SESSION_COOKIE_SECURE`) instead of a token in `localStorage`, so injected script cannot read it. Cookie-authenticated writes must send `X-EnterAI-Client`; a cross-site form cannot. SSO no longer hands the token to the frontend in a URL fragment. `POST /api/auth/logout` clears the cookie. Bearer tokens keep working for the CLI and automation.
+- Exact-SHA CI verified: run 35755725488 green on 0a7dfe9.
 
 ## Fixed this pass (2026-09-18)
 - Alembic migration `0012_sso_enterprise` for identity_providers, scim_user_mappings, ip_allowlists, session_policies, enterprise_audit_aggregations
@@ -112,10 +124,11 @@ VERDICT: ENTERPRISE READY = NO — blocked by real SSO login, external pen scan,
 
 ## Remaining Medium/Low Risks
 - MEDIUM: Multi-replica Redis/Postgres behavior under high sustained load not fully validated in real environment.
-- MEDIUM: Real SSO login (SAML assertion / OIDC token verification) still does not exist -- SCIM provisioning does.
-- LOW: SCIM PATCH broader operations (beyond replace active) not fully covered.
-- LOW: Frontend SSO/admin setup UI not built; user experience for admin identity setup unverified.
+- MEDIUM: OIDC login untested against a real IdP tenant; SAML not supported.
+- LOW: SCIM PATCH `remove` ignored.
+- LOW: No admin UI for identity-provider setup (API only).
+- LOW: The web app and API must be served from the same site (same registrable domain) for the SameSite=Lax session cookie to be sent.
 - LOW: Game-day/incident response/on-call not executed in production-like environment.
 - LOW: Performance targets (p95/p99) only simulated in memory SQLite; real-world variance unknown.
 
-Next: run the full suite against real Postgres, verify migrations from an empty database, commit and push, confirm exact-SHA CI is green; then build real SSO login (ACS/OIDC callback with signature/token verification), complete frontend SSO/admin UI, execute external pen scan, run a production-like game-day, and finalize on-call/status tooling.
+Next: verify OIDC against a real IdP tenant, build the identity-provider admin UI, prove billing against a Stripe sandbox, load-test the multi-replica stack, execute an external pen scan, run a production-like game-day, and finalize on-call/status tooling.

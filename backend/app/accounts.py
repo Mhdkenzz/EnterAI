@@ -18,14 +18,14 @@ import os
 from datetime import datetime
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from . import email as mailer
 from .admin import human_admin
-from .auth import create_token, current_user, hash_password
+from .auth import create_token, current_user, hash_password, set_session_cookie
 from .database import get_db
 from .models import AuthToken, Invite, Organization, Project, User
 from .ratelimit import build_rate_limiter
@@ -238,7 +238,7 @@ def preview_invite(token: str, request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/api/auth/accept-invite")
-def accept_invite(data: AcceptInvite, request: Request, db: Session = Depends(get_db)):
+def accept_invite(data: AcceptInvite, request: Request, response: Response, db: Session = Depends(get_db)):
     enforce(_TOKEN_LIMITER, request)
     invite = find_live_invite(db, data.token)
     if not invite:
@@ -256,7 +256,9 @@ def accept_invite(data: AcceptInvite, request: Request, db: Session = Depends(ge
     log(db, invite.organization_id, user.id, "user", user.id, "invite_accepted")
     db.commit()
     organization = db.get(Organization, user.organization_id)
-    return {"token": create_token(user), "user": account_out(user),
+    token = create_token(user)
+    set_session_cookie(response, token)
+    return {"token": token, "user": account_out(user),
             "organization": {"id": organization.id, "name": organization.name}}
 
 

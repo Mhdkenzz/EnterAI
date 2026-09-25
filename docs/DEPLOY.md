@@ -31,6 +31,9 @@ in hosted mode: `ENVIRONMENT=staging`, `DATABASE_URL`, `JWT_SECRET`, `REDIS_URL`
 `ENTERAI_FRONTEND_IMAGE` immutable digest references supplied by the workflow.
 The frontend image must be built with `BUILD_ENVIRONMENT=staging` and
 `NEXT_PUBLIC_API_URL=https://…`; runtime environment cannot change it.
+Browser sessions are an httpOnly, SameSite=Lax, Secure cookie scoped to `/api`, so
+`NEXT_PUBLIC_API_URL` must be on the same site as `APP_BASE_URL` (the bundled nginx
+serves both from one host), or signed-in requests will not carry the session.
 
 ## Release and rollback boundaries
 
