@@ -98,6 +98,14 @@ def configure_error_reporting() -> bool:
 
 
 def configure_logging():
+    # `kill -USR1 <worker pid>` prints every thread's stack to stderr: the fastest way
+    # to see what a hung worker is waiting on during an incident, without a debugger.
+    import faulthandler, signal
+    if hasattr(signal, "SIGUSR1"):
+        try:
+            faulthandler.register(signal.SIGUSR1, all_threads=True)
+        except (RuntimeError, ValueError):
+            pass  # not the main thread (e.g. under some test runners)
     # Preserve operator-provided handlers/levels; configure only the default case.
     if not logger.handlers:
         handler = logging.StreamHandler()

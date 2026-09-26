@@ -8,6 +8,7 @@ import pytest
 @pytest.mark.parametrize("secret", [None, "", "   "])
 def test_production_startup_requires_jwt_secret(secret):
     env = {**os.environ, "ENVIRONMENT": " production ", "DATABASE_URL": "sqlite://"}
+    env.pop("PYTEST_CURRENT_TEST", None)
     env.pop("JWT_SECRET", None)
     if secret is not None:
         env["JWT_SECRET"] = secret
@@ -31,6 +32,7 @@ def test_production_startup_rejects_insecure_jwt_secret(secret):
     docker-compose.yml verbatim, or sets a too-short secret, must fail closed --
     otherwise anyone can forge auth tokens using the publicly known placeholder."""
     env = {**os.environ, "ENVIRONMENT": "production", "DATABASE_URL": "sqlite://", "JWT_SECRET": secret}
+    env.pop("PYTEST_CURRENT_TEST", None)
     result = subprocess.run(
         [sys.executable, "-c", "import app.main"],
         env=env, capture_output=True, text=True, check=False,
@@ -54,6 +56,9 @@ def test_auth_and_copilot_share_startup_secret(environment, configured):
            "REDIS_URL": "redis://127.0.0.1:6379/0", "EMAIL_PROVIDER": "smtp",
            "SMTP_HOST": "smtp.example.com", "EMAIL_FROM": "bot@example.com",
            "APP_BASE_URL": "https://app.example.com"}
+    # The child is a clean interpreter, not another pytest worker. Inheriting this
+    # live-test marker can make some pytest/plugin combinations stall on shutdown.
+    env.pop("PYTEST_CURRENT_TEST", None)
     env.pop("JWT_SECRET", None)
     if configured:
         env["JWT_SECRET"] = secrets.token_hex(32)
@@ -79,6 +84,8 @@ class Database:
         return user if "users" in str(statement) else None
     def scalars(self, statement):
         return _EmptyResult()
+    def rollback(self):
+        pass  # current_user ends its read transaction before the endpoint runs
 
 session = auth.create_token(user)
 assert jwt.decode(session, expected, algorithms=["HS256"])["sub"] == user.id
@@ -107,6 +114,39 @@ assert auth.current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentia
     assert result.stdout == ""
     if configured:
         assert env["JWT_SECRET"] not in result.stderr
+
+
+def test_current_user_releases_the_authentication_read_transaction():
+    """Auth must not hold a scarce PostgreSQL connection until the endpoint runs."""
+    from app import auth
+    from app.models import User
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    user = User(id="pool-user", organization_id="pool-org", active=True)
+
+    class EmptyResults:
+        def all(self):
+            return []
+
+    class Database:
+        rollbacks = 0
+
+        def scalar(self, statement):
+            return user if "users" in str(statement) else None
+
+        def scalars(self, statement):
+            return EmptyResults()
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    db = Database()
+    session = auth.create_token(user)
+    actual = auth.current_user(
+        HTTPAuthorizationCredentials(scheme="Bearer", credentials=session), db
+    )
+    assert actual is user
+    assert db.rollbacks == 1
 
 
 @pytest.mark.parametrize("user_id,organization_id", [
