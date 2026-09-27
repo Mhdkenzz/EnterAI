@@ -71,6 +71,8 @@ class _EmptyResult:
     def all(self):
         return []
 class Database:
+    def __init__(self):
+        self.rollbacks = 0
     def scalar(self, statement):
         # The User lookup must resolve to the fake user; the IP-allowlist /
         # session-policy lookups current_user also makes must resolve to
@@ -79,10 +81,16 @@ class Database:
         return user if "users" in str(statement) else None
     def scalars(self, statement):
         return _EmptyResult()
+    def rollback(self):
+        self.rollbacks += 1
 
 session = auth.create_token(user)
 assert jwt.decode(session, expected, algorithms=["HS256"])["sub"] == user.id
-assert auth.current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=session), Database()) is user
+database = Database()
+assert auth.current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=session), database) is user
+# The connection must go back to the pool before the endpoint runs, not be held
+# across the gap between the dependency's thread and the endpoint's.
+assert database.rollbacks == 1, "current_user must roll back its read transaction"
 args = {"title": "Review"}
 confirmation = copilot.create_confirmation(user, "create_task", args)
 # The confirmation family is signed with a key derived from (but distinct to) the

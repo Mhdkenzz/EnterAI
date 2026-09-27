@@ -144,17 +144,32 @@ app.add_middleware(
 )
 
 @app.on_event("startup")
-def startup():
+async def startup():
+    # AnyIO's default is 40 threads, more than the 15 connections a worker has: the
+    # surplus threads could only wait on the pool, each holding its connection.
+    # Cap request threads to what the pool can actually serve once the background
+    # loops have taken their share. Resolved first, and allowed to raise: an
+    # invalid REQUEST_THREADS must stop the boot, and it has to do so before the
+    # seed below awaits a worker thread (REQUEST_THREADS=0 would otherwise
+    # deadlock startup rather than report the bad value).
+    import anyio.to_thread
+    from .database import resolve_request_thread_limit
+    limit = resolve_request_thread_limit()
     validate_deployment_configuration()
-    configure_logging()
-    with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
-    from .billing_service import sync_plans_from_env
-    with next(get_db()) as db: sync_plans_from_env(db)
+    configure_logging()  # on the main thread: it registers a signal handler
+    anyio.to_thread.current_default_thread_limiter().total_tokens = limit
+    await anyio.to_thread.run_sync(_seed_blocking)
+    # The background loops schedule themselves on this event loop.
     execution.start_background_loop()
     privacy_service.start_background_loop()
     from . import observability as _observability
     _observability.start_aggregation_background_loop()
     mailer.start_retry_loop()
+
+def _seed_blocking():
+    with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
+    from .billing_service import sync_plans_from_env
+    with next(get_db()) as db: sync_plans_from_env(db)
 
 @app.on_event("shutdown")
 def shutdown():
