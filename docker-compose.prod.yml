@@ -94,14 +94,23 @@ services:
       # Only required for OIDC login (Phase 14.2): the redirect_uri registered
       # with an IdP must resolve to this backend, not the frontend/APP_BASE_URL.
       API_BASE_URL: ${API_BASE_URL:?set API_BASE_URL}
-      # Only required once an OIDC identity provider's client_secret is stored
-      # (app/secrets_store.py fails closed in production if unset and one is).
-      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
+      # Required for every hosted release: the API must never fall back to a
+      # development-derived key for recoverable credentials.
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?set SECRETS_ENCRYPTION_KEY}
       SECRETS_ENCRYPTION_KEY_PREVIOUS: ${SECRETS_ENCRYPTION_KEY_PREVIOUS:-}
+      # Hosted pilots are invite-only by default. Set to false only for a
+      # deliberate, separately reviewed open-registration deployment.
+      INVITE_ONLY_REGISTRATION: ${INVITE_ONLY_REGISTRATION:-true}
+      TERMS_URL: ${TERMS_URL:?set TERMS_URL}
+      PRIVACY_URL: ${PRIVACY_URL:?set PRIVACY_URL}
       # The API only ever sees the load balancer's address, so rate limiting has to
       # read the client from the header nginx appends.
       TRUST_PROXY_HEADERS: "true"
       TRUSTED_HOSTS: ${TRUSTED_HOSTS:?set TRUSTED_HOSTS}
+      # The image healthcheck sends the first configured host, so
+      # TrustedHostMiddleware cannot turn a healthy API into an unhealthy
+      # container.
+      HEALTHCHECK_HOST: ${TRUSTED_HOSTS:?set TRUSTED_HOSTS}
       SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:?set SEED_ADMIN_EMAIL}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:?set SEED_ADMIN_PASSWORD}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:?set CORS_ALLOWED_ORIGINS}
@@ -115,6 +124,14 @@ services:
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_MODEL: ${AI_MODEL:-}
       AI_API_KEY: ${AI_API_KEY:-}
+      # RAG embeddings are explicit in hosted mode. The backend fails closed in
+      # production when this is omitted; keeping it in the release contract
+      # prevents uploads from silently using non-semantic test vectors.
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:?set EMBEDDING_PROVIDER}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1536}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       SENTRY_DSN: ${SENTRY_DSN:-}
       STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
       STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
@@ -164,11 +181,14 @@ services:
       STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://objectstore:9000}
       AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:?set STORAGE_ACCESS_KEY}
       AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:?set STORAGE_SECRET_KEY}
-      BACKUP_OBJECTS_BUCKET: ${BACKUP_OBJECTS_BUCKET:-}
+      # Do not run a green-looking no-op mirror. Hosted releases must provide
+      # an actual destination bucket and credentials (endpoint remains optional
+      # for AWS S3 or other default-region-compatible providers).
+      BACKUP_OBJECTS_BUCKET: ${BACKUP_OBJECTS_BUCKET:?set BACKUP_OBJECTS_BUCKET}
       BACKUP_OBJECTS_ENDPOINT_URL: ${BACKUP_OBJECTS_ENDPOINT_URL:-}
       BACKUP_OBJECTS_REGION: ${BACKUP_OBJECTS_REGION:-us-east-1}
-      BACKUP_OBJECTS_ACCESS_KEY: ${BACKUP_OBJECTS_ACCESS_KEY:-}
-      BACKUP_OBJECTS_SECRET_KEY: ${BACKUP_OBJECTS_SECRET_KEY:-}
+      BACKUP_OBJECTS_ACCESS_KEY: ${BACKUP_OBJECTS_ACCESS_KEY:?set BACKUP_OBJECTS_ACCESS_KEY}
+      BACKUP_OBJECTS_SECRET_KEY: ${BACKUP_OBJECTS_SECRET_KEY:?set BACKUP_OBJECTS_SECRET_KEY}
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
     depends_on:
       objectstore-init: {condition: service_completed_successfully}

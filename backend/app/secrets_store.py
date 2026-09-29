@@ -56,9 +56,9 @@ def _cipher() -> MultiFernet:
     environment = os.getenv("ENVIRONMENT", "development").strip().lower()
     raw_primary = os.getenv("SECRETS_ENCRYPTION_KEY", "").strip()
     if not raw_primary:
-        if environment == "production":
+        if environment in {"staging", "production"}:
             raise RuntimeError(
-                "SECRETS_ENCRYPTION_KEY must be set in production -- it encrypts IdP"
+                "SECRETS_ENCRYPTION_KEY must be set in staging or production -- it encrypts IdP"
                 " client secrets and other recoverable credentials at rest. Generate"
                 " one with: python -c \"from cryptography.fernet import Fernet;"
                 " print(Fernet.generate_key().decode())\""

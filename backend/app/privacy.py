@@ -28,6 +28,13 @@ admin_router = APIRouter(prefix="/api/admin/privacy", tags=["admin", "privacy"])
 CURRENT_TOS_VERSION = os.getenv("TERMS_VERSION", "2026-01-01").strip()[:20]
 
 
+def terms_are_published() -> bool:
+    """The API enforces consent when both legal URLs are configured."""
+    terms_url = (os.getenv("TERMS_URL") or os.getenv("NEXT_PUBLIC_TERMS_URL") or "").strip()
+    privacy_url = (os.getenv("PRIVACY_URL") or os.getenv("NEXT_PUBLIC_PRIVACY_URL") or "").strip()
+    return bool(terms_url and privacy_url)
+
+
 class Reauth(BaseModel):
     password: str
     reason: str | None = Field(default=None, max_length=500)

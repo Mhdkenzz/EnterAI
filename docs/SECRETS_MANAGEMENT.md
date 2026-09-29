@@ -18,8 +18,9 @@
    - Call `POST /api/admin/sso/rotate-secrets` (human admin, org-scoped) to
      re-encrypt every stored secret under the new key.
    - Remove `SECRETS_ENCRYPTION_KEY_PREVIOUS` once done.
-   - Production refuses to boot -- fails closed -- with no `SECRETS_ENCRYPTION_KEY`
-     set (see `secrets_store._cipher`), the same pattern as JWT_SECRET.
+   - Staging and production refuse to boot -- fail closed -- with no
+     `SECRETS_ENCRYPTION_KEY` set (see `secrets_store._cipher`), the same pattern
+     as JWT_SECRET.
 
 ## Where the key itself should live
 Where the environment allows a real external secrets manager (AWS Secrets Manager,

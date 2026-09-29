@@ -25,7 +25,8 @@ from .ratelimit import build_rate_limiter
 from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
 from .storage import get_storage
 from .indexing import index_document
-from .deployment_config import is_deployment_environment, migration_revision_status, validate_deployment_configuration
+from .deployment_config import (is_deployment_environment, migration_revision_status,
+                                registration_requires_invite, validate_deployment_configuration)
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
 demo_seed_enabled = os.getenv("ENABLE_DEMO_SEED", "false" if is_deployment_environment(environment) else "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -340,6 +341,8 @@ def register(data: Register, request: Request, response: Response, db: Session =
     slug gets a random suffix when the plain one is in use.
     """
     enforce(_SIGNUP_LIMITER, request)
+    if registration_requires_invite():
+        raise HTTPException(403, "New workspace registration is invite-only for this pilot.")
     address = accounts.normalize(data.email)
     accounts.require_strong_password(data.password, address)
     slug = re.sub(r"[^a-z0-9]+", "-", data.organization_name.lower()).strip("-")[:70] or "workspace"

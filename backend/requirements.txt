@@ -17,7 +17,12 @@ pypdf==6.19.0
 httpx==0.28.1
 # Phase 10.1 - RAG
 pgvector==0.2.5
-openai==1.35.0
+# OpenAI 1.35.0 passes the removed ``proxies`` keyword to httpx.Client and
+# cannot initialize with the httpx 0.28 runtime used by the API.  Keep the
+# current httpx line and use the first maintained 1.x release that supports
+# its constructor API; this preserves the embeddings interface without taking
+# an unreviewed major-SDK migration.
+openai==1.58.1
 tiktoken==0.7.0
 # Optional error reporting (SENTRY_DSN; Sentry or self-hosted GlitchTip).
 sentry-sdk==2.70.0

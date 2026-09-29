@@ -149,8 +149,10 @@ class AcceptInvite(BaseModel):
 def record_terms_acceptance(user: User, accepted: bool) -> None:
     """Signup and invite acceptance are where people agree to the terms (the form
     requires the box whenever terms are published), so record it there, per version."""
+    from .privacy import CURRENT_TOS_VERSION, terms_are_published
+    if terms_are_published() and not accepted:
+        raise HTTPException(400, "You must accept the Terms of Service and Privacy Policy.")
     if accepted:
-        from .privacy import CURRENT_TOS_VERSION
         user.tos_accepted_at = datetime.utcnow()
         user.tos_version = CURRENT_TOS_VERSION
 
@@ -305,10 +307,14 @@ def list_invites(user: User = Depends(human_admin), db: Session = Depends(get_db
 
 @router.delete("/api/auth/invites/{invite_id}", status_code=204)
 def revoke_invite(invite_id: str, user: User = Depends(human_admin), db: Session = Depends(get_db)):
-    invite = db.get(Invite, invite_id)
+    # Include the tenant predicate in the locked query so an admin from another
+    # workspace cannot hold a lock on somebody else's invitation as a DoS vector.
+    invite = db.scalar(select(Invite).where(
+        Invite.id == invite_id, Invite.organization_id == user.organization_id
+    ).with_for_update())
     # Tenancy before existence: an admin of another workspace gets the same 404 as
     # for an id that does not exist.
-    if not invite or invite.organization_id != user.organization_id:
+    if not invite:
         raise HTTPException(404, "Invite not found")
     if invite.accepted_at is not None:
         raise HTTPException(409, "That invitation has already been accepted.")
@@ -335,7 +341,9 @@ def preview_invite(token: str, request: Request, db: Session = Depends(get_db)):
 @router.post("/api/auth/accept-invite")
 def accept_invite(data: AcceptInvite, request: Request, response: Response, db: Session = Depends(get_db)):
     enforce(_TOKEN_LIMITER, request)
-    invite = find_live_invite(db, data.token)
+    # Lock the invite before checking or mutating it. This serializes acceptance
+    # with another acceptance and with an administrator revoking the link.
+    invite = find_live_invite(db, data.token, for_update=True)
     if not invite:
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
     if db.scalar(select(User).where(func.lower(User.email) == invite.email)):

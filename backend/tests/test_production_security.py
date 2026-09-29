@@ -26,7 +26,10 @@ def _run_startup(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
            "SMTP_HOST": "smtp.example.com", "EMAIL_FROM": "bot@example.com",
            "APP_BASE_URL": "https://app.example.com", "API_BASE_URL": "https://api.example.com",
            "CORS_ALLOWED_ORIGINS": "https://app.example.com", "TRUSTED_HOSTS": "app.example.com,api.example.com",
-           "TRUST_PROXY_HEADERS": "true", "SEED_ADMIN_EMAIL": "admin@example.com", **env_overrides}
+           "TRUST_PROXY_HEADERS": "true", "SEED_ADMIN_EMAIL": "admin@example.com",
+           "TERMS_URL": "https://app.example.com/terms", "PRIVACY_URL": "https://app.example.com/privacy",
+           **env_overrides}
+    env.setdefault("SECRETS_ENCRYPTION_KEY", "hosted-test-encryption-key")
     script = (
         "import alembic.config, alembic.command\n"
         "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"

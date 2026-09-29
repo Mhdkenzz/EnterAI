@@ -116,6 +116,11 @@ def _catalog_predicates(conn):
     INDEX text, predicate included.
     """
     try:
+        # See 0021: PostgreSQL has no sqlite_master, and the aborted transaction its
+        # absence causes would break the rest of this migration. Reflection carries
+        # postgresql_where there, so the catalog is not needed on that dialect.
+        if conn.dialect.name != "sqlite":
+            return {}
         rows = conn.execute(sa.text(
             "SELECT name, sql FROM sqlite_master "
             "WHERE type = 'index' AND tbl_name = :t"), {'t': TABLE}).all()

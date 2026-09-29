@@ -274,6 +274,14 @@ def test_secrets_rotation_endpoint_reencrypts_this_orgs_provider_secrets(monkeyp
             assert secrets_store.decrypt(idp.client_secret_encrypted) == 'super-secret-value'
 
 
+def test_secrets_store_fails_closed_in_staging_without_a_key(monkeypatch):
+    from app import secrets_store
+    monkeypatch.setenv("ENVIRONMENT", "staging")
+    monkeypatch.delenv("SECRETS_ENCRYPTION_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="SECRETS_ENCRYPTION_KEY"):
+        secrets_store.encrypt("must-not-use-dev-fallback")
+
+
 def test_max_session_days_rejects_an_aged_token_but_grandfathers_tokens_without_iat():
     from app.auth import _enforce_session_policy
     key = uuid4().hex[:12]

@@ -27,7 +27,7 @@ USER enterai
 
 EXPOSE 8000
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:8000/health || exit 1
+    CMD-SHELL host="$${HEALTHCHECK_HOST:-localhost}"; host="$${host%%,*}"; test -n "$$host"; curl -fsS -H "Host: $$host" http://127.0.0.1:8000/health || exit 1
 
 # Migrations run from the image's entrypoint for a single-node deployment. With
 # more than one replica, run `alembic upgrade head` once as a release step instead

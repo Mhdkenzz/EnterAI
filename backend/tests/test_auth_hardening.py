@@ -237,6 +237,33 @@ def test_signup_records_which_terms_version_was_accepted():
             assert user.tos_accepted_at is not None and user.tos_version == CURRENT_TOS_VERSION
 
 
+def test_signup_requires_terms_when_both_legal_urls_are_configured(monkeypatch):
+    monkeypatch.setenv("TERMS_URL", "https://example.test/terms")
+    monkeypatch.setenv("PRIVACY_URL", "https://example.test/privacy")
+    with TestClient(app) as c:
+        key = uuid4().hex
+        rejected = c.post("/api/auth/register", json={
+            "organization_name": f"Terms required {key}", "name": "Owner",
+            "email": f"{key}@example.com", "password": "test-password"})
+        assert rejected.status_code == 400
+        accepted = c.post("/api/auth/register", json={
+            "organization_name": f"Terms accepted {key}", "name": "Owner",
+            "email": f"{key}-accepted@example.com", "password": "test-password",
+            "accept_terms": True})
+        assert accepted.status_code == 200
+
+
+def test_signup_is_blocked_when_pilot_registration_is_invite_only(monkeypatch):
+    monkeypatch.setattr("app.main.registration_requires_invite", lambda: True)
+    with TestClient(app) as c:
+        key = uuid4().hex
+        response = c.post("/api/auth/register", json={
+            "organization_name": f"Closed pilot {key}", "name": "Owner",
+            "email": f"{key}@example.com", "password": "test-password"})
+        assert response.status_code == 403
+        assert "invite-only" in response.json()["detail"]
+
+
 @pytest.mark.parametrize("password", ["password", "12345678", "aaaaaaaa", "Qwerty123"])
 def test_signup_refuses_the_most_common_passwords(password):
     with TestClient(app) as c:

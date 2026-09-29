@@ -109,6 +109,12 @@ def _catalog_predicates(bind, table) -> dict:
     the literal CREATE INDEX text, predicate included.
     """
     try:
+        # PostgreSQL has no sqlite_master, and a failed statement there leaves the
+        # transaction aborted, which poisons every later statement in this migration.
+        # Its reflection carries postgresql_where (read below), so skip the catalog
+        # on that dialect rather than probing a table that cannot exist.
+        if bind.dialect.name != "sqlite":
+            return {}
         rows = bind.execute(sa.text(
             "SELECT name, sql FROM sqlite_master "
             "WHERE type = 'index' AND tbl_name = :t"), {'t': table}).all()
