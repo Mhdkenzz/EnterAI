@@ -372,7 +372,7 @@ def test_composite_fk_rejects_the_cross_org_row():
         _insert_user(conn, 'u-a', 'org-A', 'a@a.example')
         _insert_user(conn, 'u-b', 'org-B', 'b@b.example')
         _insert_idp(conn, 'idp-A', 'org-A')
-    _run(engine, '0023_mapping_organization_alignment')
+    _run(engine, '0023_mapping_org_alignment')
     with engine.connect() as conn:
         conn.execute(sa.text("PRAGMA foreign_keys=ON"))
         from sqlalchemy.exc import IntegrityError as SAIntegrityError
@@ -387,7 +387,7 @@ def test_same_org_mapping_is_still_accepted():
     with engine.begin() as conn:
         _insert_user(conn, 'u-a', 'org-A', 'a@a.example')
         _insert_idp(conn, 'idp-A', 'org-A')
-    _run(engine, '0023_mapping_organization_alignment')
+    _run(engine, '0023_mapping_org_alignment')
     with engine.connect() as conn:
         conn.execute(sa.text("PRAGMA foreign_keys=ON"))
         _insert_mapping(conn, 'm-ok', 'org-A', 'u-a', 'ext', 'idp-A')
@@ -401,7 +401,7 @@ def test_cross_org_provider_is_also_rejected():
     with engine.begin() as conn:
         _insert_user(conn, 'u-a', 'org-A', 'a@a.example')
         _insert_idp(conn, 'idp-B', 'org-B')
-    _run(engine, '0023_mapping_organization_alignment')
+    _run(engine, '0023_mapping_org_alignment')
     with engine.connect() as conn:
         conn.execute(sa.text("PRAGMA foreign_keys=ON"))
         from sqlalchemy.exc import IntegrityError as SAIntegrityError
@@ -420,7 +420,7 @@ def test_migration_quarantines_inconsistent_rows_instead_of_failing():
         _insert_idp(conn, 'idp-A', 'org-A')
         _insert_idp(conn, 'idp-B', 'org-B')
         _insert_mapping(conn, 'm-1', 'org-A', 'u-b', 'ext', 'idp-B')
-    _run(engine, '0023_mapping_organization_alignment')          # must not raise
+    _run(engine, '0023_mapping_org_alignment')          # must not raise
     with engine.connect() as conn:
         row = conn.execute(sa.text(
             "SELECT identity_provider_id FROM scim_user_mappings WHERE id='m-1'")).one()
@@ -437,7 +437,7 @@ def test_inconsistent_mapping_deactivates_the_affected_user():
         _insert_idp(conn, 'idp-A', 'org-A')
         _insert_idp(conn, 'idp-B', 'org-B')
         _insert_mapping(conn, 'm-1', 'org-A', 'u-b', 'ext', 'idp-B')
-    _run(engine, '0023_mapping_organization_alignment')
+    _run(engine, '0023_mapping_org_alignment')
     with engine.connect() as conn:
         row = conn.execute(sa.text(
             'SELECT active, session_epoch FROM users WHERE id = :i'),

@@ -7,7 +7,8 @@ candidate (the defect was reintroduced and the test observed to fail).
 
 Blockers pinned here
 --------------------
-1. `0023_mapping_organization_alignment.py` wrote `active = 0` / `active = 1`
+1. `0023_mapping_organization_alignment.py` (revision `0023_mapping_org_alignment`)
+   wrote `active = 0` / `active = 1`
    into a BOOLEAN column. SQLite accepts that by dynamic typing; PostgreSQL
    rejects it. No test covered 0023 at all -- the v3 portability check only
    read 0021.
@@ -38,6 +39,7 @@ import importlib.util
 import io
 import os
 import pathlib
+import re
 import tempfile
 import threading
 import tokenize
@@ -71,24 +73,37 @@ VERSIONS = BACKEND / "alembic" / "versions"
 # helpers
 # --------------------------------------------------------------------------- #
 
+def _migration_path(revision: str):
+    """Resolve a migration by revision id, even when its filename is legacy."""
+    matches = [p for p in VERSIONS.glob(f"{revision}*.py")]
+    if not matches:
+        revision_pattern = re.compile(
+            rf"^revision\s*=\s*['\"]{re.escape(revision)}['\"]\s*$",
+            re.MULTILINE,
+        )
+        matches = [
+            path for path in VERSIONS.glob("*.py")
+            if revision_pattern.search(path.read_text())
+        ]
+    assert len(matches) == 1, f"expected one {revision} migration, got {matches}"
+    return matches[0]
+
+
 def _load(revision: str):
     """Import a migration file by path.
 
     alembic/ is not a package, and a module name beginning with a digit cannot
     be imported by name at all, so this goes through the filesystem.
     """
-    matches = [p for p in VERSIONS.glob(f"{revision}*.py")]
-    assert len(matches) == 1, f"expected one {revision} migration, got {matches}"
-    spec = importlib.util.spec_from_file_location(f"_mig_{revision}", matches[0])
+    path = _migration_path(revision)
+    spec = importlib.util.spec_from_file_location(f"_mig_{revision}", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 def _source(revision: str) -> str:
-    matches = [p for p in VERSIONS.glob(f"{revision}*.py")]
-    assert len(matches) == 1, matches
-    return matches[0].read_text()
+    return _migration_path(revision).read_text()
 
 
 def _code_only(source: str) -> str:
@@ -189,7 +204,7 @@ def _run(engine, revision: str):
 MIGRATIONS_WITH_SQL = [
     '0021_scim_provider_ownership',
     '0022_domain_ownership',
-    '0023_mapping_organization_alignment',
+    '0023_mapping_org_alignment',
 ]
 
 
@@ -223,7 +238,7 @@ def test_0023_compiles_boolean_writes_for_postgresql():
     PostgreSQL server exists in this environment, so this is NOT a claim that
     the migration ran on PostgreSQL.
     """
-    module = _load('0023_mapping_organization_alignment')
+    module = _load('0023_mapping_org_alignment')
     captured = []
 
     class _Conn:
@@ -314,7 +329,7 @@ def test_upgrade_adds_composite_fk_with_correct_child_and_parent_columns():
                     'scim_user_mappings')}, (
                 f"fixture already declares {pid}; the upgrade would be a no-op")
 
-    _run(engine, '0023_mapping_organization_alignment')
+    _run(engine, '0023_mapping_org_alignment')
 
     with engine.connect() as conn:
         fks = {fk.get('name'): fk
@@ -355,7 +370,7 @@ def test_upgrade_rejects_a_cross_org_mapping_and_accepts_a_correct_one():
                     verified_at=datetime.now(timezone.utc))
         _insert_idp(conn, 'idp-B', 'org-B', 'b.example',
                     verified_at=datetime.now(timezone.utc))
-    _run(engine, '0023_mapping_organization_alignment')
+    _run(engine, '0023_mapping_org_alignment')
 
     with engine.connect() as conn:
         conn.execute(sa.text("PRAGMA foreign_keys = ON"))
@@ -385,7 +400,7 @@ def test_rerun_does_not_duplicate_a_correct_alternate_name_fk():
     'organization_id']` -- never true. A correct pre-existing FK was therefore
     "missing" and got created a second time.
     """
-    module = _load('0023_mapping_organization_alignment')
+    module = _load('0023_mapping_org_alignment')
     engine = _pre_0023_engine()
     with engine.begin() as conn:
         _insert_user(conn, 'u-a', 'org-A', 'a@a.example')
@@ -416,7 +431,7 @@ def test_rerun_does_not_duplicate_a_correct_alternate_name_fk():
             " identity_provider_id, scim_active) VALUES "
             "('m-1', 'org-A', 'u-a', 'ext-1', 'idp-A', 1)"))
 
-    _run(engine, '0023_mapping_organization_alignment')
+    _run(engine, '0023_mapping_org_alignment')
 
     def _composite_user_fks(conn):
         return [fk for fk in sa.inspect(conn).get_foreign_keys('scim_user_mappings')
@@ -440,8 +455,8 @@ def test_rerun_does_not_duplicate_a_correct_alternate_name_fk():
 
     # And running the whole upgrade twice changes nothing.
     before = sorted(str(n) for n in names)
-    _run(engine, '0023_mapping_organization_alignment')
-    _run(engine, '0023_mapping_organization_alignment')
+    _run(engine, '0023_mapping_org_alignment')
+    _run(engine, '0023_mapping_org_alignment')
     with engine.connect() as conn:
         assert len(_composite_user_fks(conn)) == 1, (
             "re-running duplicated the composite FK")
@@ -456,7 +471,7 @@ def test_has_composite_fk_matches_on_actual_column_lists():
     Guards the specific v5 defect: the call passed the parent column names in
     the child position, so no real mapping could ever match.
     """
-    module = _load('0023_mapping_organization_alignment')
+    module = _load('0023_mapping_org_alignment')
     engine = _pre_0023_engine()
     with engine.begin() as conn:
         _insert_user(conn, 'u-a', 'org-A', 'a@a.example')

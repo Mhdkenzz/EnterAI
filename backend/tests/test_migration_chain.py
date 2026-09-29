@@ -4,7 +4,10 @@ SQLite never enforced foreign keys, so only a metadata-sort check (and, in CI,
 real PostgreSQL) can catch cyclic-FK schema defects.
 """
 import warnings
+from pathlib import Path
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import exc
 
 
@@ -39,3 +42,32 @@ def test_cycle_edges_are_named_and_use_alter():
         assert fk.constraint.name, f"{table_name}.{column_name} FK needs an explicit name"
         if needs_alter:
             assert fk.constraint.use_alter, f"{table_name}.{column_name} must use_alter to break the create/drop cycle"
+
+
+def test_revision_ids_fit_postgresql_version_num_and_chain_is_single_headed():
+    """Every migration id fits PostgreSQL's Alembic version_num column.
+
+    Alembic's default PostgreSQL version table stores revision identifiers in
+    ``VARCHAR(32)``. Loading the real script directory also validates that all
+    ``down_revision`` links resolve while the head check catches accidental
+    branches.
+    """
+    backend_root = Path(__file__).resolve().parent.parent
+    config = Config()
+    config.set_main_option("script_location", str(backend_root / "alembic"))
+    script = ScriptDirectory.from_config(config)
+
+    revisions = list(script.walk_revisions())
+    assert revisions, "the Alembic script directory contains no revisions"
+    oversized = {
+        revision.revision: len(revision.revision)
+        for revision in revisions
+        if len(revision.revision) > 32
+    }
+    assert not oversized, (
+        "revision identifiers exceed PostgreSQL alembic_version.version_num "
+        f"VARCHAR(32): {oversized}"
+    )
+    assert len(script.get_heads()) == 1, (
+        f"migration graph must remain single-headed, got {script.get_heads()}"
+    )

@@ -65,7 +65,9 @@ def _boot(env_overrides):
            "REDIS_URL": "redis://127.0.0.1:6379/0", "SEED_ADMIN_PASSWORD": "a-genuinely-unique-password-123",
            "API_BASE_URL": "https://api.example.com", "CORS_ALLOWED_ORIGINS": "https://app.example.com",
            "TRUSTED_HOSTS": "app.example.com,api.example.com", "TRUST_PROXY_HEADERS": "true",
-           "SEED_ADMIN_EMAIL": "admin@example.com",
+           "SEED_ADMIN_EMAIL": "admin@example.com", "TERMS_URL": "https://app.example.com/terms",
+           "PRIVACY_URL": "https://app.example.com/privacy",
+           "SECRETS_ENCRYPTION_KEY": "hosted-test-encryption-key",
            **env_overrides}
     script = ("import alembic.config, alembic.command\n"
               "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"
