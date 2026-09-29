@@ -28,6 +28,7 @@ from urllib.parse import urlencode, urlsplit
 
 import httpx
 import jwt
+import sqlalchemy as sa
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -36,7 +37,8 @@ from .auth import SECRET, create_token
 from .deployment_config import is_deployment_environment
 from .models import User
 from .services import log
-from .sso_auth import resolve_role_mapping
+from . import domain_verification
+from .sso_auth import resolve_role_mapping, scim_mapping_for_provider
 from .sso_models import IdentityProvider, SCIMUserMapping
 
 # Derived from the same JWT_SECRET as everything else in auth.py/copilot.py, so
@@ -294,9 +296,22 @@ def provision_or_update_user(db: Session, idp: IdentityProvider, claims: dict) -
     name = claims.get("name") or claims.get("preferred_username") or email
     role_claim = _role_claim(claims)
 
-    mapping = db.scalar(select(SCIMUserMapping).where(
-        SCIMUserMapping.organization_id == idp.organization_id,
-        SCIMUserMapping.scim_external_id == external_id))
+    # One validator + one domain gate, before any User.email lookup.
+    #
+    # Previously this only checked the domain when a claim carried an email, and
+    # never checked the address itself, so a claim with a malformed or empty
+    # email reached the email query. It is a provisioning path: it creates users
+    # and links them, so it must be gated exactly like SCIM. Placing the whole
+    # check before the lookup also keeps the account-existence oracle closed --
+    # an out-of-domain address is refused identically whether or not it is
+    # already taken.
+    try:
+        email = domain_verification.assert_provisioning_address_allowed(idp, email)
+    except ValueError as exc:
+        raise OIDCError(str(exc)) from exc
+
+    mapping = scim_mapping_for_provider(
+        db, idp.organization_id, external_id, idp.id)
     if mapping:
         user = db.get(User, mapping.user_id)
         if not user or user.organization_id != idp.organization_id:
@@ -328,12 +343,44 @@ def provision_or_update_user(db: Session, idp: IdentityProvider, claims: dict) -
     )
     user.password_hash = ""  # this identity only ever authenticates via SSO
     db.add(user)
-    db.flush()
+
+    # Both inserts are flushed HERE, and both conflicts are translated here --
+    # inside the same transaction, so a failure on either discards BOTH rows and
+    # cannot leave a user whose identity row was never created.
+    #
+    # v5 flushed only the user and left the mapping to complete_login's
+    # db.commit(). A collision on the mapping row then surfaced outside every
+    # handler, untranslated, as a raw IntegrityError and a 500. That is exactly
+    # the concurrent same-provider/same-subject case: both sessions pass the
+    # mapping lookup, both insert, and the loser must be a controlled OIDC
+    # failure with no orphan left behind.
+    #
+    # Two flushes are required, not a stylistic choice: the mapping needs
+    # user.id, which does not exist until the user row is written.
+    #
+    # Scoped by table name so an unrelated integrity error is not mislabelled
+    # as a conflict.
+    def _flush_or_conflict():
+        try:
+            db.flush()
+        except sa.exc.IntegrityError as exc:
+            # Rolls back the whole transaction, so the other row goes too.
+            db.rollback()
+            detail = str(getattr(exc, "orig", exc)).lower()
+            if "email" in detail or "scim" in detail:
+                raise OIDCError(
+                    "An account with this email was provisioned concurrently; "
+                    "retry the login"
+                ) from exc
+            raise
+
+    _flush_or_conflict()
     db.add(SCIMUserMapping(
         organization_id=idp.organization_id, user_id=user.id,
-        scim_external_id=external_id, scim_active=True,
-        last_synced_at=datetime.now(timezone.utc),
+        scim_external_id=external_id, identity_provider_id=idp.id,
+        scim_active=True, last_synced_at=datetime.now(timezone.utc),
     ))
+    _flush_or_conflict()
     log(db, idp.organization_id, user.id, "user", user.id, "sso_provisioned",
         scim_identity_provider_id=idp.id, role=user.role)
     return user

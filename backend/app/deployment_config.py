@@ -14,10 +14,28 @@ from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 
 DEPLOYMENT_ENVIRONMENTS = {"staging", "production"}
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off"}
 
 
 def is_deployment_environment(value: str | None = None) -> bool:
     return (value if value is not None else os.getenv("ENVIRONMENT", "development")).strip().lower() in DEPLOYMENT_ENVIRONMENTS
+
+
+def registration_requires_invite(environ: dict[str, str] | None = None) -> bool:
+    """Hosted environments default to invite-only; local/CI stays self-serve."""
+    env = os.environ if environ is None else environ
+    raw = env.get("INVITE_ONLY_REGISTRATION", "").strip().lower()
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    mode = env.get("REGISTRATION_MODE", "").strip().lower()
+    if mode in {"invite_only", "invite-only", "pilot"}:
+        return True
+    if mode in {"open", "self_serve", "self-serve"}:
+        return False
+    return is_deployment_environment(env.get("ENVIRONMENT", "development"))
 
 
 def _is_public_url(value: str) -> bool:
@@ -31,9 +49,10 @@ def deployment_configuration_errors(environ: dict[str, str] | None = None) -> li
         return []
     errors: list[str] = []
     required = ("DATABASE_URL", "JWT_SECRET", "REDIS_URL", "APP_BASE_URL", "API_BASE_URL",
-                "CORS_ALLOWED_ORIGINS", "TRUSTED_HOSTS", "SEED_ADMIN_EMAIL", "SEED_ADMIN_PASSWORD")
+                "CORS_ALLOWED_ORIGINS", "TRUSTED_HOSTS", "SEED_ADMIN_EMAIL", "SEED_ADMIN_PASSWORD",
+                "TERMS_URL", "PRIVACY_URL")
     errors.extend(name for name in required if not env.get(name, "").strip())
-    for name in ("APP_BASE_URL", "API_BASE_URL"):
+    for name in ("APP_BASE_URL", "API_BASE_URL", "TERMS_URL", "PRIVACY_URL"):
         value = env.get(name, "").strip()
         if value and not _is_public_url(value):
             errors.append(f"{name} must be an HTTPS non-localhost URL")
@@ -54,8 +73,8 @@ def deployment_configuration_errors(environ: dict[str, str] | None = None) -> li
         for name in ("STORAGE_BUCKET", "STORAGE_ENDPOINT_URL", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
             if not env.get(name, "").strip():
                 errors.append(name)
-    if env.get("OIDC_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"} and not env.get("SECRETS_ENCRYPTION_KEY", "").strip():
-        errors.append("SECRETS_ENCRYPTION_KEY is required when OIDC_ENABLED=true")
+    if not env.get("SECRETS_ENCRYPTION_KEY", "").strip():
+        errors.append("SECRETS_ENCRYPTION_KEY is required in hosted environments")
     return errors
 
 

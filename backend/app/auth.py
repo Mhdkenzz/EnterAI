@@ -207,6 +207,12 @@ def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db
         raise HTTPException(status_code=401, detail="Invalid session")
     _enforce_session_policy(db, user, payload)
     _enforce_ip_allowlist(db, user, request)
+    # End the read transaction so the connection goes back to the pool now. FastAPI
+    # runs this dependency and the endpoint in separate threadpool calls; holding the
+    # connection across the gap let requests park every connection while waiting for
+    # a thread, as every thread waited for a connection -- a deadlock under load.
+    # (`user` is reloaded on next access; the endpoint's queries open a new transaction.)
+    db.rollback()
     # Agents authenticate with session tokens too (their writes are still gated by
     # per-route role checks); only confirmation tokens are barred above via the
     # pinned `kind` claim and the separate confirmation signing key.

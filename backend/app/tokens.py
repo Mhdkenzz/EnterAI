@@ -58,7 +58,11 @@ def redeem_auth_token(db: Session, raw: str, purpose: str) -> AuthToken | None:
     """Returns the token only if it matches, is for this purpose, has not been used
     and has not expired -- and marks it used in the same breath, so a replay of the
     same link finds it spent. The caller commits."""
-    token = db.scalar(select(AuthToken).where(AuthToken.token_hash == hash_token(raw)))
+    # Serialize the read/check/claim sequence. PostgreSQL makes a concurrent
+    # request wait here; after the first transaction commits, the waiting SELECT
+    # sees used_at and refuses the replay.
+    token = db.scalar(select(AuthToken).where(
+        AuthToken.token_hash == hash_token(raw)).with_for_update())
     if not token or token.purpose != purpose or token.used_at is not None:
         return None
     if token.expires_at < datetime.utcnow():
@@ -67,8 +71,12 @@ def redeem_auth_token(db: Session, raw: str, purpose: str) -> AuthToken | None:
     return token
 
 
-def find_live_invite(db: Session, raw: str) -> Invite | None:
-    invite = db.scalar(select(Invite).where(Invite.token_hash == hash_token(raw)))
+def find_live_invite(db: Session, raw: str, *, for_update: bool = False) -> Invite | None:
+    """Return a usable invite, locking its row when a mutation will follow."""
+    query = select(Invite).where(Invite.token_hash == hash_token(raw))
+    if for_update:
+        query = query.with_for_update()
+    invite = db.scalar(query)
     if not invite or invite.accepted_at is not None or invite.revoked_at is not None:
         return None
     if invite.expires_at < datetime.utcnow():

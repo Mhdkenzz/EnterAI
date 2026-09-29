@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import (Boolean, DateTime, ForeignKey, Index, Integer, JSON, String,
+                        Text)
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from .database import Base
@@ -72,6 +73,15 @@ class User(Base):
     anonymized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     tos_accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     tos_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # (id, organization_id) unique, so scim_user_mappings' composite
+    # cross-organization foreign key can legally reference it. `id` is already
+    # the primary key so this is trivially true data-wise; declaring it is what
+    # makes the reference legal. An Index rather than a UniqueConstraint,
+    # because SQLite only honours a PRIMARY KEY or UNIQUE INDEX as a foreign
+    # key parent. See alembic/versions/0023_mapping_organization_alignment.py.
+    __table_args__ = (
+        Index("uq_users_id_organization", "id", "organization_id", unique=True),
+    )
 
 class Team(Base):
     __tablename__ = "teams"
@@ -292,6 +302,29 @@ class Invite(Base):
     accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class FeedbackReport(Base):
+    """A support report submitted by one member of one organization.
+
+    Diagnostics are generated from a deliberately small allow-list in the API;
+    this table must never become a request-header, cookie, or environment dump.
+    """
+    __tablename__ = "feedback_reports"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    reporter_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
+    category: Mapped[str] = mapped_column(String(30), index=True)
+    impact: Mapped[str] = mapped_column(String(20), index=True)
+    description: Mapped[str] = mapped_column(Text)
+    page: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    diagnostics: Mapped[dict] = mapped_column(JSON, default=dict)
+    release_identifier: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="new", index=True)
+    assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    admin_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
 class DocumentChunk(Base):

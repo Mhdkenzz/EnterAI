@@ -16,6 +16,7 @@ from datetime import date, datetime, timezone
 import logging
 import json
 import re
+import threading
 import time
 from sqlalchemy import event, func, select, text
 from sqlalchemy import update as sa_update
@@ -32,6 +33,12 @@ _NO_TENANT = '__system__'
 _context = ContextVar('audit_context', default=None)
 _run_id: ContextVar[str | None] = ContextVar('execution_run_id', default=None)
 logger = logging.getLogger('enterai.observability')
+
+# SIGUSR1 stack-dump registration is process-global and happens at most once;
+# see _register_sigusr1_stack_dumps. The lock is process-local and permanent --
+# it guards the guard, so it must not be reset between callers.
+_sigusr1_registered = False
+_sigusr1_lock = threading.Lock()
 
 
 class StructuredFormatter(logging.Formatter):
@@ -97,7 +104,71 @@ def configure_error_reporting() -> bool:
     return True
 
 
+def _register_sigusr1_stack_dumps():
+    """`kill -USR1 <worker pid>` prints every thread's stack to stderr: the fastest way
+    to see what a hung worker is waiting on during an incident, without a debugger.
+
+    `chain` is decided from the disposition SIGUSR1 already has, because the
+    dispositions fail in opposite directions and a single fixed value is wrong
+    for one of them:
+
+    * A real handler (an operator's log-reopen hook, a profiler) must be chained,
+      i.e. `chain=True`. `faulthandler.register` defaults to `chain=False`, which
+      *replaces* the signal's existing handler -- so a stack dump installed here
+      would silently displace that operator, the same way the rest of this module
+      refuses to clobber log handlers below. `SIG_IGN` also chains: the dump
+      prints, then the signal is ignored as before.
+    * `SIG_DFL` must NOT be chained. The default action for SIGUSR1 is to
+      terminate, so `chain=True` makes the first `kill -USR1` during an incident
+      kill the very worker it was meant to diagnose -- observed as exit 138
+      (128+SIGUSR1) with the dump printed but the process never reaching its next
+      statement. Here the dump fully replaces the default, so the worker lives.
+      `getsignal` returning `None` does *not* mean that: it means the handler was
+      not installed from Python, so a C-level or native handler may own the
+      signal. That is an unknown handler rather than a known default, and the
+      replacement it would suffer is unrecoverable, so `None` chains too. Only
+      `SIG_DFL` -- the one disposition whose action we know and whose action is
+      safe to displace -- gives `chain=False`.
+
+    Registration happens at most once per process: re-arming on every
+    `configure_logging()` call would stack dump handlers on each other. The
+    check, the registration and the success flag are all done under
+    `_sigusr1_lock` -- `configure_logging()` runs on every worker start, and two
+    starts that overlap would otherwise both read the flag as unset and both
+    register, leaving two dump handlers each chaining through the other. The
+    guard is set on *success* only -- a failed attempt (off the main thread under
+    some test runners) is transient, and a guard set by the attempt would make
+    diagnostics permanently unarmable for the rest of the process.
+    """
+    global _sigusr1_registered
+    if _sigusr1_registered:
+        return  # fast path: the flag is only ever set under the lock
+    import faulthandler, signal
+    if not hasattr(signal, "SIGUSR1"):
+        with _sigusr1_lock:
+            if not _sigusr1_registered:
+                _sigusr1_registered = True  # nothing to arm; do not retry on every call
+        return
+    with _sigusr1_lock:
+        if _sigusr1_registered:
+            return  # re-check: another caller may have won while we waited
+        previous = signal.getsignal(signal.SIGUSR1)
+        # Chain to everything except the one disposition we can identify and safely
+        # displace: SIG_DFL. `None` is an unknown (non-Python) handler, not a default.
+        chain = previous != signal.SIG_DFL
+        try:
+            faulthandler.register(signal.SIGUSR1, all_threads=True, chain=chain)
+        except (RuntimeError, ValueError):
+            # Registration is genuinely unavailable here (e.g. called off the main thread
+            # under some test runners). A missing stack dump must not stop worker startup.
+            # Leave the guard unset so a later call -- e.g. the main-thread worker start
+            # that follows this one -- can still arm it.
+            return
+        _sigusr1_registered = True
+
+
 def configure_logging():
+    _register_sigusr1_stack_dumps()
     # Preserve operator-provided handlers/levels; configure only the default case.
     if not logger.handlers:
         handler = logging.StreamHandler()

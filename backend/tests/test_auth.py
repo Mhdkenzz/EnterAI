@@ -8,6 +8,7 @@ import pytest
 @pytest.mark.parametrize("secret", [None, "", "   "])
 def test_production_startup_requires_jwt_secret(secret):
     env = {**os.environ, "ENVIRONMENT": " production ", "DATABASE_URL": "sqlite://"}
+    env.pop("PYTEST_CURRENT_TEST", None)
     env.pop("JWT_SECRET", None)
     if secret is not None:
         env["JWT_SECRET"] = secret
@@ -31,6 +32,7 @@ def test_production_startup_rejects_insecure_jwt_secret(secret):
     docker-compose.yml verbatim, or sets a too-short secret, must fail closed --
     otherwise anyone can forge auth tokens using the publicly known placeholder."""
     env = {**os.environ, "ENVIRONMENT": "production", "DATABASE_URL": "sqlite://", "JWT_SECRET": secret}
+    env.pop("PYTEST_CURRENT_TEST", None)
     result = subprocess.run(
         [sys.executable, "-c", "import app.main"],
         env=env, capture_output=True, text=True, check=False,
@@ -54,6 +56,9 @@ def test_auth_and_copilot_share_startup_secret(environment, configured):
            "REDIS_URL": "redis://127.0.0.1:6379/0", "EMAIL_PROVIDER": "smtp",
            "SMTP_HOST": "smtp.example.com", "EMAIL_FROM": "bot@example.com",
            "APP_BASE_URL": "https://app.example.com"}
+    # The child is a clean interpreter, not another pytest worker. Inheriting this
+    # live-test marker can make some pytest/plugin combinations stall on shutdown.
+    env.pop("PYTEST_CURRENT_TEST", None)
     env.pop("JWT_SECRET", None)
     if configured:
         env["JWT_SECRET"] = secrets.token_hex(32)
@@ -71,6 +76,8 @@ class _EmptyResult:
     def all(self):
         return []
 class Database:
+    def __init__(self):
+        self.rollbacks = 0
     def scalar(self, statement):
         # The User lookup must resolve to the fake user; the IP-allowlist /
         # session-policy lookups current_user also makes must resolve to
@@ -79,10 +86,16 @@ class Database:
         return user if "users" in str(statement) else None
     def scalars(self, statement):
         return _EmptyResult()
+    def rollback(self):
+        self.rollbacks += 1
 
 session = auth.create_token(user)
 assert jwt.decode(session, expected, algorithms=["HS256"])["sub"] == user.id
-assert auth.current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=session), Database()) is user
+database = Database()
+assert auth.current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials=session), database) is user
+# The connection must go back to the pool before the endpoint runs, not be held
+# across the gap between the dependency's thread and the endpoint's.
+assert database.rollbacks == 1, "current_user must roll back its read transaction"
 args = {"title": "Review"}
 confirmation = copilot.create_confirmation(user, "create_task", args)
 # The confirmation family is signed with a key derived from (but distinct to) the

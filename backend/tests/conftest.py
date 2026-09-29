@@ -41,6 +41,61 @@ def link_token(body: str, parameter: str) -> str:
     return match.group(1)
 
 
+def make_verified_provider(client, admin_headers, name, domain=None, role_map=None):
+    """Create an identity provider whose email domain is genuinely verified.
+
+    Returns (provider_id, scim_headers, domain).
+
+    Existing SCIM/SSO tests provision users through a provider, and since
+    domain ownership landed, a provider that has not proven its domain may not
+    provision anything at all. The correct fix is for those tests to use a
+    provider that has actually completed verification -- NOT to relax the
+    production gate. This helper is that legitimate setup, in one place.
+
+    `domain` must be unique per provider: exclusivity is global, so two
+    providers cannot bind the same domain. When omitted a random one is
+    generated, which is the normal case for a test that only needs a working
+    provider.
+
+    DNS is mocked here, exactly as the application would require in reality.
+    A real deployment publishes the TXT record; a test asserts the provider
+    would accept it. No test performs a real public DNS lookup.
+    """
+    import uuid as _uuid
+
+    from unittest import mock
+
+    from app import domain_verification
+
+    if domain is None:
+        safe = "".join(ch for ch in name.lower() if ch.isalnum()) or "idp"
+        domain = f"{safe}-{_uuid.uuid4().hex[:10]}.example"
+
+    payload = {"name": name, "protocol": "oidc", "domain_binding": domain}
+    if role_map:
+        payload["role_mapping_json"] = role_map
+    created = client.post("/api/admin/sso/providers", headers=admin_headers,
+                          json=payload)
+    assert created.status_code == 200, created.text
+    provider_id = created.json()["id"]
+
+    txt_value = domain_verification.expected_txt_value(domain)
+    with mock.patch.object(domain_verification, "lookup_txt",
+                           return_value=[txt_value]):
+        verified = client.post(
+            f"/api/admin/sso/providers/{provider_id}/domain-verification",
+            headers=admin_headers, json={"domain": domain})
+    assert verified.status_code == 200, (
+        f"domain verification failed for {domain}: {verified.text}")
+
+    rotated = client.post(f"/api/admin/sso/providers/{provider_id}/scim-token",
+                          headers=admin_headers)
+    assert rotated.status_code == 200, rotated.text
+    return (provider_id,
+            {"Authorization": f'Bearer {rotated.json()["scim_token"]}'},
+            domain)
+
+
 # SQLite test DB initialization: create tables before any test that relies on them.
 # Production uses PostgreSQL + Alembic; this only affects SQLite test runs.
 from sqlalchemy import inspect

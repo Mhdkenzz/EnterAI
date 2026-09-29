@@ -1,0 +1,1343 @@
+ENTER AI REPOSITORY AUDIT, HARDENING PHASES, VALIDATION HISTORY,
+DEMO-READINESS STATUS, AND NEXT-ACTION RUNBOOK
+
+Generated: 2026-09-29 (Asia/Dubai)
+Repository: /media/kenz/2E48DE1848DDDF212/enter ai/enter-ai
+Current branch: harden/sso-scim-demo-readiness
+Current HEAD: e0b0168f3ab28026ef3777bb1054761bba318224
+Remote: https://github.com/Mhdkenzz/EnterAI.git
+Document status: requested handoff file; intentionally not committed or pushed
+
+===============================================================================
+0. PURPOSE, SCOPE, AND EVIDENCE LEVELS
+===============================================================================
+
+This is the complete handoff for the repository audit and Phases 0 through 3.
+It records the starting condition, architecture, risks, changes, commits, tests,
+failed/invalid test attempts, final evidence, remaining blockers, and exact next
+steps. It deliberately separates these different evidence levels:
+
+- CONFIRMED CURRENT LOCAL: directly observed in this checkout during this work.
+- CONFIRMED CURRENT SOURCE: verified by reading the current files or Git history.
+- CONFIRMED OLDER REMOTE CI: useful evidence from another SHA, not certification
+  of the current local HEAD.
+- NOT RUN / ENVIRONMENT BLOCKED: code exists, but required infrastructure,
+  credentials, domain, or authorization was unavailable.
+- NOT AUTHORIZED: no push, deployment, public tunnel, real-user invitation, or
+  other external change was made without explicit approval and a target.
+
+No secret values are included. Configuration names are included so the release
+owner knows what must be supplied.
+
+===============================================================================
+1. EXECUTIVE CONCLUSION
+===============================================================================
+
+The branch is substantially safer and more demo-ready than the starting checkout.
+The highest-risk local SSO/SCIM ownership work was preserved, completed, reviewed,
+committed, and extensively tested. The final local backend, frontend, migration,
+and desktop/mobile browser gates are green.
+
+Strongest current local evidence:
+
+- Backend: 690 passed, 6 skipped.
+- Frontend TypeScript/lint gate: passed.
+- Frontend production build: passed.
+- Fresh and repeated SQLite migration to Alembic head 0023: passed.
+- Final clean browser acceptance: 78 passed, 2 expected project-specific skips,
+  0 failed across desktop Chromium and a mobile Pixel 5 profile.
+- Branch delta whitespace/conflict check: passed.
+- Phase 0 recovery snapshot: every SHA-256 checksum passed.
+- Temporary Phase 3 frontend/backend services: stopped after verification.
+
+Readiness verdict:
+
+- Local engineering acceptance: PASS.
+- Internal review candidate: PASS.
+- Invited demo on isolated staging: READY TO PREPARE, but not deployed yet.
+- Public/paid production: NOT READY.
+- Enterprise production: NOT READY.
+
+Remaining blockers are mainly external release gates:
+
+- The branch is local, has no upstream, and has no hosted CI run at current HEAD.
+- No staging target or staging credentials were provided.
+- Real PostgreSQL, Redis, SMTP, S3-compatible storage, TLS, and multiple live API
+  replicas were not run locally because Docker daemon access was denied and the
+  native service binaries were unavailable.
+- OIDC was not proven against a real Entra/Okta/Google tenant for this candidate.
+- Stripe was not proven end to end in a real sandbox for this candidate.
+- Restore, rollback, alert-delivery, sustained load, game-day, and external
+  penetration-test evidence remain outstanding.
+- Nothing was pushed, deployed, exposed publicly, or opened to real demo users.
+
+===============================================================================
+2. CURRENT REPOSITORY STATE
+===============================================================================
+
+2.1 Git state before this report was written
+--------------------------------------------
+
+- Branch: harden/sso-scim-demo-readiness
+- HEAD: e0b0168f3ab28026ef3777bb1054761bba318224
+- Tracked worktree: clean
+- Staged changes: none
+- Untracked application/source changes: none
+- Branch upstream: none configured
+- Difference from origin/main: 7 local commits
+- Aggregate branch delta: 42 files changed, 10,163 insertions, 191 deletions
+- git diff --check across that delta: passed
+
+After this requested report is written, auditphasessummery.txt is expected to be
+the only new untracked file unless the user or another process changes the repo.
+The report has not been committed or pushed.
+
+2.2 Commit sequence, newest first
+---------------------------------
+
+1. e0b0168 docs: add invite-only demo runbook
+2. 029cd2c test: isolate auth subprocess environments
+3. ce3ff40 security: enforce verified provider ownership across SSO and SCIM
+4. 6d73976 [verified] observability: harden SIGUSR1 stack diagnostics
+5. 0b0e3cf [verified] routes: offload blocking upload work
+6. 330ba94 [verified] billing: offload Stripe webhook processing
+7. 8c8c083 [verified] runtime: bound database connection concurrency
+8. 160c811 origin/main: Real URLs, subtasks/labels/drag-and-drop, project and
+   member management, clearer AI proposals, polish
+
+The first three commits are Phase 1. The next four were pre-existing verified
+local commits discovered and preserved in Phase 0. No rebase, reset, force push,
+destructive clean, or file deletion was used.
+
+2.3 Files, mount, and services at handoff
+-----------------------------------------
+
+- The repository is on a read/write fuseblk mount.
+- No temporary listener remains on port 3000 or 8000 from Phase 3.
+- Docker CLI exists, but Docker daemon access returns permission denied.
+- Native psql, postgres, and redis-server are not available.
+- Ignored Playwright output may remain, but it is not tracked application code.
+- The Phase 0 recovery snapshot is stored outside the repository at:
+  /home/kenz/.codex/.chatgpt-projects/
+  g-p-6aaa40836b2c81918b492024341ad33f/phase0-snapshot-5Jya4c
+
+===============================================================================
+3. ORIGINAL AUDIT FINDINGS
+===============================================================================
+
+3.1 Starting Git and preservation risk
+--------------------------------------
+
+The initial checkout was not clean or disposable. It was on
+product/routing-features-polish at 6d73976 and four commits ahead of its remote:
+
+- 8c8c083 bounded database connection concurrency.
+- 330ba94 offloaded Stripe webhook processing.
+- 0b0e3cf offloaded blocking upload work.
+- 6d73976 hardened SIGUSR1 stack diagnostics.
+
+The worktree also held substantial uncommitted SSO, SCIM, domain-verification,
+migration, and test work:
+
+- 12 modified tracked files.
+- 21 untracked security/migration/test files, plus the demo runbook work.
+- Three new migrations, 0021 through 0023.
+- A new domain_verification.py module.
+- Large ownership, race, portability, and migration test coverage.
+
+The first risk was therefore preservation: a reset, checkout, cleanup, or broad
+rewrite could have destroyed meaningful security work. Phase 0 was mandatory.
+
+3.2 Architecture
+----------------
+
+Frontend:
+
+- Next.js 15 App Router application.
+- React 19 and TypeScript.
+- Tailwind CSS and Radix-based UI components.
+- Root workspace, catch-all product routes, and SSO callback route.
+- Components for auth, onboarding, navigation, projects, agents, Copilot, admin,
+  billing, privacy, and invitations.
+- Playwright browser tests and axe accessibility checks.
+
+Backend:
+
+- FastAPI modular monolith.
+- SQLAlchemy sessions/models and Alembic migrations.
+- JWT/session authentication with organization-scoped routes.
+- Project/task/team/user/admin/privacy/billing functionality.
+- OIDC/SSO and SCIM enterprise routes.
+- Copilot planning and confirmed execution.
+- Uploads, indexing, embeddings, citations, and storage adapters.
+- Structured observability, health/readiness, and optional Sentry support.
+
+Production data plane:
+
+- PostgreSQL/pgvector is the intended database.
+- Redis supports distributed rate limiting and multi-replica coordination.
+- S3-compatible storage holds documents and attachments.
+- SMTP handles invites, verification, and recovery.
+- Nginx terminates TLS and routes API/web traffic.
+
+CLI:
+
+- Python CLI supports auth, dashboards, projects, tasks, subtasks, comments,
+  attachments, teams, users, inbox, activity, search, risks, and confirmed AI.
+- Browser sessions use httpOnly cookies; CLI/automation can use bearer tokens.
+
+3.3 Product functionality already present
+-----------------------------------------
+
+- Workspace registration and sign-in.
+- Organization-scoped users, roles, and teams.
+- Project create/archive/restore/delete.
+- Tasks, subtasks, labels, assignees, due dates, comments, and attachments.
+- List and Kanban flows with keyboard-accessible movement.
+- Real URLs, refresh, browser Back, and deep links.
+- Portfolio, My Work, Inbox, activity, notifications, and search.
+- Admin console, usage controls, billing, and membership.
+- Privacy export/deletion and retention controls.
+- Agent hierarchy and chat.
+- Copilot reads and confirmation-gated writes.
+- Multi-format project-brief ingestion.
+- OIDC/SSO and SCIM enterprise capabilities.
+- Migration, backup, restore, monitoring, deployment, and security docs.
+
+3.4 Authentication and security already present
+------------------------------------------------
+
+- Browser auth uses an httpOnly SameSite=Lax session cookie.
+- Cookie-authenticated writes require an application header as a CSRF barrier.
+- Production/staging startup rejects absent, weak, or published JWT placeholders.
+- SSO-only policy can disable password login.
+- Session epochs revoke old sessions after retirement/deactivation.
+- Production API docs are disabled by default.
+- Trusted-host, CORS, proxy-header, and secure-cookie controls exist.
+- Security headers are applied centrally.
+- SCIM service tokens are separate from human user sessions.
+
+3.5 AI/Copilot safety boundary
+------------------------------
+
+- Models never receive a live database session or application credentials.
+- Backend read tools produce minimized organization-scoped snapshots.
+- /api/ai/plan reads and proposes; it does not directly perform the write.
+- Proposed writes carry a short-lived signed confirmation token.
+- /api/ai/confirm binds the token to the signed-in user and organization.
+- Mutation arguments pass through existing application schemas.
+- Raw arbitrary tool/argument execution is not accepted from the browser.
+- Durable confirmation redemption protects against repeat execution.
+- Deterministic offline AI is the safe default for tests/demos.
+- A real AI provider must prove structured tool-call and failure behavior before
+  it is trusted for a demo.
+
+3.6 Migration chain
+-------------------
+
+The repository contains 23 revisions:
+
+0001 initial
+0002 project documents
+0003 task completion
+0004 agent hierarchy
+0005 agent execution
+0006 observability
+0007 agent retirement
+0008 auth hardening
+0009 RAG chunks
+0010 billing
+0011 privacy
+0012 SSO enterprise
+0013 OIDC login
+0014 audit aggregation uniqueness
+0015 provider-call observability
+0016 document chunk provenance
+0017 Copilot confirmation redemption
+0018 email outbox and revoked sessions
+0019 organization names not unique
+0020 trial end dates
+0021 SCIM provider ownership
+0022 domain ownership
+0023 mapping/organization alignment
+
+The final three revisions were part of the high-risk uncommitted work at audit
+time and became the center of Phase 1.
+
+3.7 Docker and production configuration
+---------------------------------------
+
+Development Compose defines PostgreSQL/pgvector, Redis, Mailpit, Versity S3
+Gateway, bucket initialization, API, and web services.
+
+Production Compose:
+
+- Uses immutable image references and never rebuilds the host worktree.
+- Refuses to render when mandatory configuration is absent.
+- Runs migration once before replicas.
+- Defines two API replicas behind Nginx.
+- Uses shared PostgreSQL, Redis, and S3-compatible storage.
+- Defines database backup and object-store mirroring services.
+- Requires TLS material.
+- Disables API docs/demo seeding.
+- Does not bind-mount source into production services.
+
+The current read-only config check fails closed because no staging values were
+supplied. Missing required values include API_BASE_URL, APP_BASE_URL,
+DATABASE_URL, JWT_SECRET, REDIS_URL, CORS_ALLOWED_ORIGINS, TRUSTED_HOSTS, SMTP,
+storage credentials/bucket, seed-admin credentials, PostgreSQL credentials,
+immutable image digests, and TLS paths. That is safe behavior and also proves a
+deployable staging configuration was not present.
+
+3.8 CI/CD coverage
+------------------
+
+.github/workflows/ci.yml defines:
+
+- backend
+- backend-postgres
+- frontend
+- browser
+- api-security-and-load
+- multi-replica
+- container-validation
+- security-scans
+
+Together they cover Python/Alembic, PostgreSQL, TypeScript/build, Playwright/axe,
+Schemathesis, K6, ZAP, two API replicas, Compose/deployment invariants, Gitleaks,
+Trivy, and OWASP Dependency-Check.
+
+The latest remote main run inspected was 36140848263 against old commit 160c811,
+not current e0b0168. Frontend, backend, container validation, security scans,
+PostgreSQL, API security/load, and multi-replica passed; browser failed. The
+current branch passed browsers locally but has not been pushed for current CI.
+
+3.9 Documentation
+-----------------
+
+Useful documents include README.md, QA_REPORT.md, docs/DEMO_RUNBOOK.md,
+DEPLOY.md, MONITORING.md, PHASE_17_LAUNCH_READINESS.md,
+PRODUCTION_RUNBOOK_PHASE17.md, RESTORE_RUNBOOK.md, SECRETS_MANAGEMENT.md, and
+SECURITY_DEPLOY.md. Historical PASS labels reference older SHAs and should be
+treated as checklists/supporting evidence, not current certification.
+
+3.10 Initial risks and blockers
+-------------------------------
+
+A. Preservation: large dirty security work could be lost.
+
+B. SCIM provider boundary: mappings lacked durable provider ownership, so two
+   IdPs in one organization could collide in one external-ID namespace.
+
+C. Domain claim: control needed proof, normalization, active/verified exclusivity,
+   expiry, and race-safe writes. Typing a domain must not reserve it globally.
+
+D. Mapping tenancy: independent organization/user/provider references could form
+   a cross-organization mapping without composite database constraints.
+
+E. Migration safety: legacy rows had no reliable owner. Guessing one would
+   silently transfer identities.
+
+F. Race/portability: partial-index predicates, concurrent claims, DNS races,
+   SQLite/PostgreSQL differences, and migration reruns needed explicit coverage.
+
+G. Evidence: SQLite/unit success would not prove real Postgres, Redis, replicas,
+   IdP, SMTP, S3, TLS, backups, alerts, or deployment.
+
+H. Operations: no real staging target, secrets, public domain, real IdP tenant,
+   external scan, on-call roster, or completed game-day was available.
+
+===============================================================================
+4. PHASE MODEL
+===============================================================================
+
+Executed:
+
+- Phase 0: preserve and baseline the exact state.
+- Phase 1: complete/commit the SSO, SCIM, and domain security boundary.
+- Phase 2: validate migrations, backend, frontend, and integrity locally.
+- Phase 3: execute browser/demo acceptance and release-gate evaluation.
+
+Recommended future phases:
+
+- Phase 4: branch review, push, exact-SHA CI, and staging provisioning.
+- Phase 5: real integration, restore, load, security, and operational acceptance.
+- Phase 6: controlled invited demo/pilot and post-demo evidence review.
+- Phase 7: paid/public readiness only after all external gates pass.
+
+The ordering prevents unreviewed security work from being deployed and prevents a
+local green result from being mislabeled as staging/production evidence.
+
+===============================================================================
+5. PHASE 0 - PRESERVATION AND BASELINE
+===============================================================================
+
+Objective:
+
+Make the starting state recoverable before editing and record exact mount, branch,
+commit, modified, staged, and untracked state.
+
+Actions:
+
+- Confirmed exact repository path and read/write mount.
+- Recorded branch status/recent commits.
+- Recorded modified/untracked files.
+- Saved unstaged changes as worktree.patch.
+- Saved staged changes as index.patch.
+- Saved untracked file list and archive.
+- Created a manifest and SHA-256 checksum file.
+- Created harden/sso-scim-demo-readiness without discarding work.
+
+Snapshot location:
+
+/home/kenz/.codex/.chatgpt-projects/
+g-p-6aaa40836b2c81918b492024341ad33f/phase0-snapshot-5Jya4c
+
+Snapshot files:
+
+- manifest.txt
+- worktree.patch
+- index.patch
+- untracked-files.txt
+- untracked-files.tgz
+- checksums.txt
+
+The index patch is empty because nothing was staged. The manifest captured branch
+product/routing-features-polish at 6d73976, four unpublished commits, 12 modified
+tracked files, and 21 untracked security/migration/test files.
+
+Final re-verification:
+
+- manifest.txt: OK
+- worktree.patch: OK
+- index.patch: OK
+- untracked-files.txt: OK
+- untracked-files.tgz: OK
+
+Phase 0 result: PASS. Original state remains recoverable.
+
+===============================================================================
+6. PHASE 1 - SSO/SCIM/DOMAIN SECURITY AND DEMO GUARDRAILS
+===============================================================================
+
+6.1 Main commit
+---------------
+
+ce3ff40 security: enforce verified provider ownership across SSO and SCIM
+
+- 30 files changed.
+- 8,609 insertions.
+- 177 deletions.
+- Migrations 0021-0023 added.
+- domain_verification.py added.
+- Extensive security/migration/race/portability tests added.
+
+6.2 Migration 0021: provider-owned SCIM mappings
+------------------------------------------------
+
+Before: mappings used organization plus SCIM external ID, not a durable owner
+provider. Provider A could collide with or potentially mutate provider B identity
+records inside the same organization.
+
+After:
+
+- identity_provider_id owns each new mapping.
+- Provider foreign key and partial unique index on
+  (identity_provider_id, scim_external_id) enforce the boundary.
+- Reads/writes/OIDC subject resolution require exact provider ownership.
+- New live writes cannot create unowned mappings.
+
+Legacy policy:
+
+- The migration does not guess ownership.
+- Ambiguous rows remain NULL/unowned and invisible to every provider.
+- Affected identities are deactivated/session-revoked when quarantined.
+- Recovery requires an operator to identify and explicitly rebind the correct
+  provider out of band.
+
+This operational cost is intentional: silent transfer to an arbitrary provider
+would be a cross-tenant disclosure.
+
+6.3 Migration 0022: verified domain ownership
+---------------------------------------------
+
+- Added domain_verified_at.
+- Canonicalized legacy domain spellings.
+- Resolved duplicates fail-closed.
+- Added global uniqueness only for active, verified claims.
+- Prevented inactive/unverified/expired rows from permanently locking domains.
+- Compared index columns, uniqueness, and WHERE predicate, not merely names.
+- Added DNS TXT challenge generation/verification and claim expiry/reclaim.
+- Added conflict handling for simultaneous claims.
+
+DNS race defense:
+
+The verification write conditionally matches the exact domain that was checked.
+If an admin patches domain A to domain B while DNS lookup is in flight, proof for
+A cannot be stamped onto B.
+
+6.4 Migration 0023: mapping organization alignment
+--------------------------------------------------
+
+Before: mapping.organization_id, user_id, and provider_id were independent. A row
+could reference organization A, a user from B, and a provider from C.
+
+After:
+
+- Unique parent keys on (id, organization_id).
+- Composite foreign keys align mapping/user and mapping/provider organization.
+- Inconsistent historical rows are quarantined, not deleted or guessed.
+- Affected users are deactivated and session epochs advanced.
+- Constraint/index repair is shape-based for portability and reruns.
+
+6.5 Application enforcement
+---------------------------
+
+- Provider-scoped mapping lookup.
+- Exact organization/provider validation.
+- Domain normalization/validation.
+- DNS challenge and verification endpoints.
+- Verified-domain gating for provisioning and OIDC/JIT.
+- Claim conflicts, expiry, and audit events.
+- Provider patch invalidates stale domain proof.
+- OIDC respects provider ownership/domain state.
+- DB constraints backstop route checks.
+
+6.6 Test matrix
+---------------
+
+Added/expanded coverage includes domain lifecycle/ownership, provider patch/OIDC
+gating, migration claims/portability/semantics, SCIM domain enforcement,
+lifecycle/tenant guards, mutation boundaries, operation semantics, ownership
+corrections, provider isolation/matrix/migrations, race boundaries, OIDC, and
+extended security/load behavior.
+
+6.7 Test subprocess isolation
+-----------------------------
+
+029cd2c test: isolate auth subprocess environments
+
+Startup security tests spawn a clean Python interpreter. Inheriting
+PYTEST_CURRENT_TEST can make some pytest/plugin combinations stall at shutdown.
+The commit removes that live-test marker in those children without weakening the
+production JWT/startup checks.
+
+6.8 Demo runbook
+----------------
+
+e0b0168 docs: add invite-only demo runbook
+
+The README and docs/DEMO_RUNBOOK.md now require a clean checkout, staging mode,
+unique secrets, dedicated Postgres/Redis/SMTP/S3, exact HTTPS host/CORS values,
+same-site cookie topology, invited accounts, synthetic demo data, deterministic
+AI unless validated, confirmation before writes, disabled docs, and backups.
+
+Phase 1 result: PASS. Three focused commits were created locally; none were pushed.
+
+===============================================================================
+7. PHASE 2 - MIGRATIONS, TESTS, BUILD, AND INTEGRITY
+===============================================================================
+
+7.1 Migration validation
+------------------------
+
+- Fresh disposable SQLite upgrade to 0023: passed.
+- Repeated upgrade/head check: passed.
+- Migration quarantine summary reported zero affected identities in the empty
+  disposable database.
+
+SQLite proves the chain/imports in containment, not all PostgreSQL locking,
+BOOLEAN, constraint, and concurrency semantics.
+
+7.2 Backend
+-----------
+
+- 690 passed.
+- 6 skipped.
+- 0 failed.
+
+The suite covers auth/session, roles, projects/tasks, billing, privacy, SSO/OIDC,
+SCIM, migrations, domains, provider isolation, Copilot/confirmation, runtime
+capacity, upload offloading, webhook behavior, and observability.
+
+7.3 Frontend
+------------
+
+- npm run lint (TypeScript no-emit gate): passed.
+- npm run build (Next.js production build): passed.
+
+These prove compile/type/build integrity, not browser behavior; Phase 3 covers it.
+
+7.4 Environment limitation
+--------------------------
+
+Current local real-PostgreSQL/Redis validation was blocked because Docker daemon
+access was denied and native psql/postgres/redis-server were unavailable. Older
+CI passed those jobs on older SHAs, but current HEAD still needs exact-SHA CI.
+
+Phase 2 result: PASS locally for code/build/SQLite; PARTIAL for production data
+plane due to unavailable Postgres/Redis and no current CI.
+
+===============================================================================
+8. PHASE 3 - BROWSER/DEMO ACCEPTANCE AND RELEASE GATES
+===============================================================================
+
+8.1 Temporary stack
+-------------------
+
+Backend:
+
+- Uvicorn on 127.0.0.1:8000.
+- ENVIRONMENT=ci.
+- Disposable /tmp SQLite database migrated to 0023.
+- Long non-production JWT secret.
+- CI-matching high auth-rate limits.
+- Deterministic AI and contained local dependencies.
+
+Frontend:
+
+- Next.js on 127.0.0.1:3000.
+- NEXT_PUBLIC_API_URL=http://127.0.0.1:8000/api.
+- No public tunnel or deployment.
+
+Health:
+
+{"ok":true,"db":"ok","redis":"not_configured","migrations":"ok"}
+
+Redis absence was allowed only in this CI-mode local stack. Staging must use Redis.
+
+8.2 Browser inventory
+---------------------
+
+80 scenarios across desktop Chromium and mobile Pixel 5 from:
+
+- accessibility.spec.ts
+- admin.spec.ts
+- agents.spec.ts
+- auth.spec.ts
+- enter-ai.spec.ts
+- privacy.spec.ts
+- workspace-navigation.spec.ts
+
+Coverage includes accessibility, admin roles/controls, audit behavior, agents,
+signup, SSO callback, logout, recovery, invites, verification, project/task
+flows, responsive navigation, brief drafting, Copilot confirmation, privacy
+export/deletion/retention, deep links, Back/refresh, drag-and-drop/keyboard flow,
+subtasks/labels, project lifecycle, AI rejection, and member protections.
+
+8.3 Every attempt and its interpretation
+----------------------------------------
+
+Attempt A - invalid harness configuration:
+
+- 33 passed, 2 skipped, 45 failed.
+- E2E_DATABASE_URL omitted, rate limits too low, and optional Terms/Privacy URLs
+  enabled a required checkbox absent from canonical CI.
+- Harness/config failure; not product evidence.
+
+Attempt B - DB/rate limits corrected, consent mismatch remained:
+
+- 74 passed, 2 skipped, 4 failed.
+- Signup/invite tests did not tick the checkbox created by optional URL settings.
+- Still noncanonical; not final evidence.
+
+Attempt C - canonical settings but reused DB:
+
+- 76 passed, 2 skipped, 2 failed.
+- Desktop/mobile core project test showed “A project with this name or code
+  already exists.”
+- Tests use unique names but fixed codes PWD/PWM; earlier runs contaminated DB.
+- Test-state contamination, not a product regression.
+
+Attempt D - fresh DB, malformed invocation path:
+
+- Direct fixtures reached /auth/register instead of /api/auth/register and got
+  immediate 404s.
+- Interrupted at 20 passed, 1 skipped, 30 failed, 1 interrupted, 28 not run.
+- Browser-driven flows with compiled API URL passed, proving runner-path error.
+- Invocation error; not product evidence.
+
+Focused corrected check:
+
+- One desktop admin scenario: 1 passed.
+- Backend showed /api/auth/register and normal behavior.
+
+Final authoritative run:
+
+- Third untouched disposable DB.
+- Alembic upgrade to 0023.
+- Backend/frontend health rechecked.
+- Correct /api base.
+- Complete suite run once.
+- 78 passed, 2 expected skips, 0 failed in about 3.7 minutes.
+
+Expected skips are project-specific: a mobile-only agent test is skipped on
+desktop, and a desktop drag/keyboard scenario is skipped in the mobile project.
+
+8.4 Production-shape evaluation
+-------------------------------
+
+- Production Compose was inspected and evaluated read-only.
+- It failed closed because required secrets, URLs, images, credentials, and TLS
+  paths were absent.
+- Docker daemon access remained unavailable, so containers were not started.
+- Real TLS/load balancer/replicas/S3/SMTP/Redis/Postgres were not locally proven.
+
+8.5 Remote CI history
+---------------------
+
+Run: https://github.com/Mhdkenzz/EnterAI/actions/runs/36140848263
+SHA: old main 160c811, not current e0b0168.
+
+Passed: frontend, backend, container validation, security scans, backend-postgres,
+API security/load, multi-replica. Failed: browser.
+
+This supports the architecture but does not certify current HEAD. The current
+branch needs its own hosted run.
+
+8.6 Cleanup/integrity
+---------------------
+
+- Temporary API stopped.
+- Temporary frontend stopped.
+- No remaining 3000/8000 listener from the work.
+- Tracked worktree clean before this report.
+- Commit sequence rechecked.
+- Phase 0 checksums all OK.
+- Nothing pushed or deployed.
+
+Phase 3 result: PASS for local browser/demo acceptance; PARTIAL/BLOCKED for real
+staging acceptance.
+
+Accurate claim: “The current branch passes comprehensive local desktop/mobile
+acceptance against a fresh migrated disposable database. Real staging and its
+external dependencies have not yet been provisioned or verified.”
+
+===============================================================================
+9. WHAT IS WORKING NOW
+===============================================================================
+
+Core product:
+
+- Signup/sign-in/session flow.
+- Projects/tasks/subtasks/labels/assignees/comments/files.
+- Project archive/restore/delete.
+- Real routes/deep links/navigation history.
+- Admin/member/manager controls covered by tests.
+- Agents and Copilot.
+- Privacy/export/deletion/retention.
+- Invites, email-verification UI, recovery, and logout.
+- Responsive desktop/mobile layouts and accessibility coverage.
+
+Security:
+
+- httpOnly browser cookie and CSRF application header.
+- Fail-closed production startup.
+- Organization filtering and role gates.
+- Dedicated SCIM tokens.
+- Provider-owned SCIM mappings.
+- Verified-domain gate, normalization, exclusivity, expiry, and race safety.
+- Database-enforced mapping organization alignment.
+- Fail-closed legacy quarantine and session revocation.
+- Confirmation-gated, replay-resistant Copilot writes.
+
+Data/deployment design:
+
+- Alembic reaches 0023.
+- Immutable production images.
+- One-shot migration before replicas.
+- Two APIs behind Nginx.
+- Required Redis/Postgres and shared object storage.
+- Database/object backup services.
+- Liveness/readiness and security headers.
+
+Engineering:
+
+- Backend, frontend, migration, and full browser gates green locally.
+- CI defines Postgres/security/container/load/browser/multi-replica jobs.
+- Recovery snapshot exists and verifies.
+
+===============================================================================
+10. WHAT IS INCOMPLETE OR RISKY
+===============================================================================
+
+Release blockers:
+
+1. No current hosted CI. Branch has no upstream and is seven commits ahead of
+   origin/main.
+
+2. No real staging target. No host, cluster, VM, or managed environment was
+   supplied, so no external demo account should be invited yet.
+
+3. Current HEAD has not exercised real Postgres, Redis, shared S3, SMTP, Nginx
+   TLS, multiple live API replicas, or offsite backup storage.
+
+4. No real OIDC tenant. Real issuer metadata, redirect registration, secrets,
+   claim shapes, tenant policy, groups/roles, clock skew, and logout/session
+   behavior remain unproven.
+
+5. No authorized external penetration test of a deployed target.
+
+6. No current restore, rollback, alert-delivery, or production-like game-day
+   evidence; docs alone are not a drill.
+
+7. Stripe test-mode end-to-end acceptance remains outstanding for checkout,
+   webhook, duplicate delivery, state transitions, limits, portal, and retries.
+
+High operational risks:
+
+- Migration 0021 intentionally quarantines legacy ownerless SCIM mappings. Count
+  them before deployment, identify owners out of band, schedule access impact,
+  and prepare explicit rebind steps. Never bind everything to the first IdP.
+- DNS TXT permissions and claim expiry/reverification are operational dependencies.
+- Web/API must share a registrable site for SameSite cookie behavior.
+- A real secrets manager and practiced rotation are still required.
+
+Known medium/product gaps:
+
+- SAML intentionally unsupported.
+- SCIM PATCH remove is not fully implemented.
+- Identity-provider setup lacks a complete admin UI and remains API-first.
+- Multi-replica CI is functional, not sustained realistic stress.
+- No public status page or fully configured external paging sink.
+- Actual-hosting p95/p99 performance is unknown.
+- Test seeding emits datetime.utcnow deprecation warnings; not a failure, but a
+  future cleanup item.
+- Keep AI deterministic until a provider proves structured tool calls/timeouts/
+  malformed response behavior.
+
+Intentionally not executed:
+
+- Push or PR.
+- Deployment or public tunnel.
+- DNS changes.
+- Real invitations.
+- Credential creation/rotation.
+- Paid service activation or Stripe live mode.
+- Destructive repository/user-data operations.
+
+===============================================================================
+11. PHASE 4 - NEXT: REVIEW, CI, AND STAGING
+===============================================================================
+
+Not yet executed.
+
+11.1 Review before push
+-----------------------
+
+1. Confirm only expected files differ from origin/main.
+2. Review all seven commits and aggregate diff.
+3. Review migrations 0021-0023 and quarantine impact line by line.
+4. Confirm no secrets or DB artifacts are newly tracked.
+5. Decide whether to commit this report.
+6. Re-run git diff --check.
+7. Re-run full gates after any code change.
+
+Useful commands:
+
+git status --short --branch
+git log --oneline --decorate origin/main..HEAD
+git diff --stat origin/main..HEAD
+git diff --check origin/main..HEAD
+
+11.2 Push/review, only with explicit authorization
+--------------------------------------------------
+
+1. Push harden/sso-scim-demo-readiness.
+2. Open a PR against the intended base.
+3. Call out migration quarantine behavior prominently.
+4. Attach local evidence without calling it hosted evidence.
+5. Require SSO/SCIM and migration-aware review.
+
+11.3 Exact-SHA CI requirement
+-----------------------------
+
+Require backend, backend-postgres, frontend, browser, api-security-and-load,
+multi-replica, container-validation, and security-scans on the exact candidate
+SHA. Do not merge when jobs are missing, unexpectedly skipped, or on another SHA.
+
+If CI fails, preserve logs/traces, classify product versus environment/harness,
+fix the root cause, and rerun the relevant full matrix rather than retrying until
+a flaky pass appears.
+
+11.4 Isolated staging components
+--------------------------------
+
+- HTTPS web/API on one registrable site.
+- Dedicated PostgreSQL 16/pgvector.
+- Dedicated Redis.
+- Dedicated S3-compatible primary and backup buckets.
+- SMTP sandbox/controlled transactional staging account.
+- Immutable image digests from the exact green SHA.
+- TLS certificates.
+- Central secrets storage.
+- Log aggregation and alert destination.
+- Backup storage outside the primary volume.
+
+11.5 Required config categories
+-------------------------------
+
+Core:
+
+- ENVIRONMENT=staging
+- ENABLE_API_DOCS=false
+- ENABLE_DEMO_SEED=false
+- JWT_SECRET=<unique random staging value>
+- DATABASE_URL=<staging PostgreSQL>
+- REDIS_URL=<staging Redis>
+
+Routing/cookies:
+
+- APP_BASE_URL=<exact HTTPS web URL>
+- API_BASE_URL=<exact HTTPS API URL>
+- NEXT_PUBLIC_API_URL=<exact API URL ending /api>
+- CORS_ALLOWED_ORIGINS=<exact web origin>
+- TRUSTED_HOSTS=<exact hosts>
+- TRUST_PROXY_HEADERS=true behind approved proxy
+- SESSION_COOKIE_SECURE=true
+
+Email:
+
+- EMAIL_PROVIDER=smtp
+- SMTP_HOST / SMTP_PORT
+- SMTP_USERNAME / SMTP_PASSWORD where needed
+- SMTP_STARTTLS as required
+- EMAIL_FROM on a controlled domain
+
+Storage:
+
+- STORAGE_BACKEND=s3
+- STORAGE_BUCKET / STORAGE_ENDPOINT_URL
+- Storage access/secret credentials
+- BACKUP_OBJECTS_BUCKET and backup credentials/endpoint
+
+Images/TLS:
+
+- ENTERAI_BACKEND_IMAGE=<immutable digest>
+- ENTERAI_FRONTEND_IMAGE=<immutable digest>
+- TLS_CERT_PATH / TLS_KEY_PATH
+
+Bootstrap/encryption:
+
+- SEED_ADMIN_EMAIL / unique SEED_ADMIN_PASSWORD
+- SECRETS_ENCRYPTION_KEY for stored IdP client secrets
+- Previous encryption key only during controlled rotation
+
+AI/billing:
+
+- AI_PROVIDER=deterministic first.
+- Only configure AI_BASE_URL/MODEL/KEY after provider validation.
+- Stripe test-mode keys/prices only if billing is in demo scope.
+
+Never commit these values or put real secrets in a repository .env.
+
+11.6 Migration preflight
+------------------------
+
+1. Take/verify DB backup.
+2. Inventory ownerless SCIM mappings.
+3. Inventory duplicate/canonicalized domains.
+4. Identify accounts that may be quarantined.
+5. Notify operators.
+6. Use one-shot migrate service, not per-replica Alembic.
+7. Verify current=heads.
+8. Review quarantine counts/logs.
+9. Start replicas only after successful migration.
+
+Phase 4 definition of done:
+
+- Reviewed/pushed exact SHA.
+- All eight CI jobs green.
+- Immutable images built.
+- Staging provisioned with Postgres/Redis/SMTP/S3/TLS/secrets.
+- Production Compose renders with protected external env.
+- Migration succeeds once.
+- HTTPS /live, /ready, /health green.
+- No default secret accepted.
+- No real demo users invited yet.
+
+===============================================================================
+12. PHASE 5 - REAL INTEGRATION AND OPERATIONS ACCEPTANCE
+===============================================================================
+
+Not yet executed.
+
+12.1 Real OIDC
+--------------
+
+Verify discovery/JWKS, issuer/audience, auth code, PKCE, state, nonce, exact API
+redirect URI, verified-domain JIT, subject matching, cross-provider isolation,
+wrong/unverified/expired domains, disabled provider, expired/replayed callbacks,
+client-secret encryption/rotation, SSO-only enforcement, deactivation/session
+revocation, token-free browser URLs, and safe audit details.
+
+12.2 SCIM with two providers
+----------------------------
+
+Verify provider A cannot see/change provider B; external IDs can repeat across
+providers but not inside one provider; composite organization constraints reject
+malformed rows; create/get/list/filter/put/patch/deactivate/reactivate; safe role
+defaults; no admin escalation; token rotation/revocation; quarantine reporting and
+manual rebind; document SCIM remove limitation.
+
+12.3 Email
+----------
+
+Verify real receipt of invitation, verification, and reset; expiry/reuse; correct
+from domain and SPF/DKIM/DMARC as applicable; exact HTTPS links; no enumeration;
+retry/outbox behavior; alerting on delivery failure.
+
+12.4 Object storage
+-------------------
+
+Verify upload/download/delete, size/type controls, organization boundary, access
+from either replica, backup mirroring, deletion policy, versioning/lifecycle, no
+public access, and least-privilege bucket credentials.
+
+12.5 Stripe sandbox if in scope
+-------------------------------
+
+Verify checkout, test price/currency, signature, duplicate idempotency,
+subscription/period transitions, failure/cancel states, seat/AI limits, portal,
+cancellation/downgrade, and that no live key/price appears in staging.
+
+12.6 Multi-replica/load
+-----------------------
+
+Verify both replicas receive traffic; sessions/rate limits/replay protection work
+across replicas; migration does not race; uploads are shared; background work is
+not duplicated. Run sustained load and record p50/p95/p99, errors, CPU, memory,
+DB pool/connections, and Redis latency. Exercise graceful restart/replica loss.
+
+12.7 Backup/restore/rollback
+----------------------------
+
+- Run backup and pg_restore --list.
+- Copy off primary storage.
+- Restore into a separately named disposable DB with verify_restore.sh and exact
+  safety confirmation.
+- Restore matching object versions into a fresh bucket.
+- Check document/attachment references.
+- Record RPO/RTO and evidence.
+- Redeploy previous approved image in staging and verify health, login, projects,
+  audit, SSO settings, and uploads.
+
+Never restore over active staging automatically.
+
+12.8 Monitoring/incident
+------------------------
+
+Configure and test alerts for HTTPS/readiness, restarts, sustained 5xx, Postgres/
+Redis outage/pressure, migration failure, backup/object-backup failure, AI errors,
+auth/reset/SSO spikes, and disk pressure. Prove a named human receives alerts.
+
+12.9 External security
+----------------------
+
+With authorization, run exact-SHA ZAP/Schemathesis/security gates and an
+independent penetration test focused on auth, tenancy, OIDC, SCIM, uploads, SSRF,
+webhooks, rate limits, and privilege transitions. Fix/retest blockers and record
+accepted risks.
+
+Phase 5 definition of done:
+
+- Real OIDC and two-provider SCIM pass.
+- SMTP and S3/backup pass.
+- Stripe sandbox passes if in scope.
+- Sustained multi-replica test passes agreed targets.
+- Restore/rollback pass.
+- Alerts reach a named human.
+- External security blockers close.
+- Evidence maps to exact SHA/image digests.
+
+===============================================================================
+13. PHASE 6 - CONTROLLED INVITED DEMO/PILOT
+===============================================================================
+
+Not yet executed.
+
+Boundary:
+
+- Invite-only, small user count, separate workspace.
+- Synthetic/approved data only.
+- No live customer records or Stripe live mode.
+- Deterministic AI unless Phase 5 validates another provider.
+- Named operator with rollback/support access.
+
+Pre-demo:
+
+- Confirm deployed SHA/digests and green CI.
+- Confirm /live, /ready, /health and dependencies.
+- Take/verify backup and restore access.
+- Smoke invite/reset/upload/project/task/Copilot/logout.
+- Ensure docs/default credentials are not exposed.
+- Confirm secret redaction and alert delivery.
+- Verify invited roles and approved demo content.
+
+During:
+
+- Monitor 5xx, DB/Redis, restarts, email, and storage.
+- Never bypass Copilot confirmation.
+- Avoid live IdP/domain changes unless planned.
+- Record errors/timestamps.
+
+After:
+
+- Revoke temporary accounts no longer needed.
+- Review audit logs and preserve evidence.
+- Confirm backups.
+- Separate product feedback from incidents.
+- Make explicit continue/pause/rollback decision.
+
+Stop immediately for cross-user/org data, surviving sessions after deactivation,
+unconfirmed AI writes, cross-provider SCIM access, failing backups/health, material
+error spikes, leaked secrets/tokens, wrong-host email links, or public/inconsistent
+storage.
+
+===============================================================================
+14. PHASE 7 - PAID/PUBLIC PRODUCTION READINESS
+===============================================================================
+
+Not authorized or complete. It requires repeated stable staging releases, formal
+service ownership/on-call, incident/customer communications, status/uptime,
+capacity/SLOs, privacy/legal review, accepted-risk register, KMS/rotation,
+offsite recovery, billing/reconciliation/support, identity-migration rollback,
+customer documentation, a SAML decision, and either SCIM remove completion or an
+explicit support limitation.
+
+Do not infer Phase 7 readiness from the green local browser suite.
+
+===============================================================================
+15. PRIORITY-ORDERED NEXT ACTIONS
+===============================================================================
+
+Priority 0 - protect evidence:
+
+1. Keep Phase 0 snapshot.
+2. Do not reset/clean destructively.
+3. Decide whether to commit this report.
+4. Record final reviewed SHA.
+
+Priority 1 - review/push:
+
+1. Review origin/main..HEAD.
+2. Focus on migrations 0021-0023.
+3. Confirm quarantine plan.
+4. Explicitly authorize push.
+5. Open PR.
+
+Priority 2 - exact-SHA CI:
+
+1. Require all eight jobs.
+2. Investigate browser failures with traces/logs.
+3. Do not use old run 36140848263 as current certification.
+4. Rerun after every change.
+
+Priority 3 - staging:
+
+1. Choose same-site HTTPS domains/hosting.
+2. Create Postgres, Redis, object/backup storage, SMTP, and secrets entries.
+3. Build immutable images.
+4. Render production Compose.
+5. Execute safe migration preflight.
+
+Priority 4 - live integrations:
+
+1. Real OIDC.
+2. Two-provider SCIM isolation.
+3. SMTP links.
+4. S3 upload/delete/backup.
+5. Stripe sandbox if demoed.
+6. Multi-replica/load.
+
+Priority 5 - operations:
+
+1. Backup/disposable restore.
+2. Rollback.
+3. Alert delivery.
+4. Game-day.
+5. External penetration test.
+
+Priority 6 - invite demo users only after the above, or after the owner explicitly
+documents acceptance of any remaining noncritical risk.
+
+===============================================================================
+16. SUGGESTED DEMO WALKTHROUGH AFTER STAGING IS READY
+===============================================================================
+
+1. Sign in with invited admin.
+2. Show dashboard/roles.
+3. Create project.
+4. Create task, subtasks, labels, assignee, due date.
+5. Move task and show activity/audit.
+6. Demonstrate real URL, refresh, and Back.
+7. Upload safe brief and show editable draft.
+8. Ask Copilot a read-only question.
+9. Ask Copilot to propose a write.
+10. Pause at confirmation; explain no write occurred.
+11. Reject one proposal.
+12. Confirm another proposal explicitly.
+13. Show resulting audit/activity.
+14. Show agent hierarchy/chat.
+15. Show privacy export/password confirmation.
+16. Show admin usage/audit/execution controls.
+17. Demo OIDC only after Phase 5.
+18. Demo SCIM provision/deactivate only after Phase 5.
+19. Sign out and show session is not restored.
+
+Do not demo production data, live charges, unvalidated AI, destructive org
+deletion, unprepared real-user deactivation, or external flows that did not pass
+Phase 5.
+
+===============================================================================
+17. VALIDATION COMMAND REFERENCE
+===============================================================================
+
+Git:
+
+git status --short --branch
+git log --oneline --decorate -15
+git diff --check origin/main..HEAD
+git diff --stat origin/main..HEAD
+
+Backend:
+
+cd backend
+.venv/bin/python -m alembic upgrade head
+.venv/bin/python -m pytest -q
+
+Frontend:
+
+cd frontend
+npm run lint
+npm run build
+
+Browser against disposable DB:
+
+E2E_API_URL='http://127.0.0.1:8000/api' \
+PLAYWRIGHT_BASE_URL='http://127.0.0.1:3000' \
+E2E_DATABASE_URL='sqlite:////tmp/<disposable>/acceptance.sqlite' \
+E2E_PYTHON='<absolute-path>/backend/.venv/bin/python' \
+npm run test:e2e
+
+Browser rules:
+
+- Fresh database for authoritative full run.
+- Do not reuse DB containing PWD/PWM projects.
+- Match canonical CI.
+- Do not enable optional Terms/Privacy URLs unless tests handle consent UI.
+- E2E_API_URL must end in /api.
+- Near-instant fixture failures suggest harness/API-base errors; inspect backend
+  paths before classifying a UI defect.
+
+Production config:
+
+docker compose --env-file /secure/path/staging.env \
+  -f docker-compose.prod.yml config
+
+Health:
+
+curl --fail --silent --show-error https://<staging-host>/live
+curl --fail --silent --show-error https://<staging-host>/ready
+curl --fail --silent --show-error https://<staging-host>/health
+
+Restore:
+
+RESTORE_DATABASE_URL='<disposable PostgreSQL URL>' \
+RESTORE_ARCHIVE='<verified archive path>' \
+RESTORE_CONFIRM=RESTORE_TO_DISPOSABLE_DATABASE \
+./scripts/verify_restore.sh
+
+Never point the restore URL at active staging/production.
+
+===============================================================================
+18. IMPORTANT FILES FOR CONTINUATION
+===============================================================================
+
+Overview:
+
+- README.md
+- QA_REPORT.md
+- .env.example
+
+Phase 1 security:
+
+- backend/app/domain_verification.py
+- backend/app/sso_auth.py
+- backend/app/sso_models.py
+- backend/app/sso_oidc.py
+- backend/app/sso_routes.py
+- backend/alembic/versions/0021_scim_provider_ownership.py
+- backend/alembic/versions/0022_domain_ownership.py
+- backend/alembic/versions/0023_mapping_organization_alignment.py
+
+AI:
+
+- backend/app/copilot.py
+- backend/app/execution.py
+- backend/app/ai/
+
+Runtime/operations:
+
+- backend/app/database.py
+- backend/app/observability.py
+- backend/app/deployment_config.py
+- backend/app/storage.py
+- backend/app/email.py
+- docker-compose.yml
+- docker-compose.prod.yml
+- deploy/nginx.conf
+- .github/workflows/ci.yml
+
+Runbooks:
+
+- docs/DEMO_RUNBOOK.md
+- docs/DEPLOY.md
+- docs/MONITORING.md
+- docs/PHASE_17_LAUNCH_READINESS.md
+- docs/PRODUCTION_RUNBOOK_PHASE17.md
+- docs/RESTORE_RUNBOOK.md
+- docs/SECRETS_MANAGEMENT.md
+- docs/SECURITY_DEPLOY.md
+
+Tests:
+
+- backend/tests/ (71 modules at final inventory)
+- frontend/tests/e2e/ (7 spec files)
+- qa/
+
+===============================================================================
+19. FINAL HANDOFF
+===============================================================================
+
+Completed:
+
+- Read-only audit and architecture/security/data/deployment/CI/docs review.
+- Phase 0 snapshot and hardening branch.
+- Provider/domain/mapping security hardening.
+- Test isolation and invited-demo documentation.
+- SQLite migration, 690-test backend suite, frontend lint/build.
+- Full clean desktop/mobile browser acceptance.
+- Production config fail-closed check and remote CI-history inspection.
+- Cleanup of temporary services and final integrity checks.
+
+Not completed:
+
+- Push/PR and exact-SHA hosted CI.
+- Real staging deployment.
+- Current-head Postgres/Redis/S3/SMTP/TLS acceptance.
+- Real IdP OIDC and Stripe sandbox.
+- Sustained load, external pen test, restore/rollback/game-day.
+- External alerts/status/on-call completion.
+- Demo invitations or paid/public/enterprise launch.
+
+Bottom line:
+
+The repository now contains a strong, locally validated release candidate with
+meaningful security improvements and comprehensive browser evidence. The next
+work is to turn it into an exact-SHA, green-CI, production-shaped staging release
+and prove every external integration and operational response before inviting
+demo users. Local green tests are not proof of real OIDC, storage, email, billing,
+backup, or multi-replica operations without staging evidence.
+
+END OF REPORT

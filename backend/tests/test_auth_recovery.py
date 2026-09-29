@@ -5,17 +5,70 @@ the same: the link works once, stops working when it expires, and a database
 containing the tokens cannot be turned back into a working link.
 """
 from datetime import datetime, timedelta
+import threading
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.database import SessionLocal
+import pytest
+from sqlalchemy import delete
+
+from app.database import SessionLocal, engine
 from app.main import app
-from app.models import AuthToken, User
-from app.tokens import PASSWORD_RESET, hash_token
+from app.models import AuthToken, Organization, User
+from app.tokens import PASSWORD_RESET, hash_token, issue_auth_token, redeem_auth_token
 
 from conftest import link_token
 from test_observability import workspace
+
+postgres_only = pytest.mark.skipif(
+    engine.dialect.name != "postgresql", reason="row-lock concurrency requires PostgreSQL"
+)
+
+
+@postgres_only
+def test_concurrent_token_redemption_has_one_winner():
+    """Two API workers racing a link must not both claim it."""
+    with SessionLocal() as db:
+        organization = db.scalar(select(Organization))
+        user = User(organization_id=organization.id, name="Token race", email=f"{uuid4().hex}@example.com",
+                    password_hash="unused", role="member", email_verified_at=datetime.utcnow())
+        db.add(user)
+        db.flush()
+        raw = issue_auth_token(db, user.id, PASSWORD_RESET, timedelta(minutes=5))
+        db.commit()
+        user_id = user.id
+
+    barrier = threading.Barrier(2)
+    results, errors = [], []
+    result_lock = threading.Lock()
+
+    def worker():
+        try:
+            with SessionLocal() as db:
+                barrier.wait(timeout=10)
+                claimed = redeem_auth_token(db, raw, PASSWORD_RESET)
+                db.commit()
+                with result_lock:
+                    results.append(claimed is not None)
+        except Exception as error:  # pragma: no cover - included in assertion below
+            with result_lock:
+                errors.append(error)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    assert not errors, errors
+    assert results == [True, False] or results == [False, True]
+
+    # The fixture user is otherwise empty, so remove it and its token safely.
+    with SessionLocal() as db:
+        db.execute(delete(AuthToken).where(AuthToken.user_id == user_id))
+        db.execute(delete(User).where(User.id == user_id))
+        db.commit()
 
 
 def reset_token_for(client, outbox, email):

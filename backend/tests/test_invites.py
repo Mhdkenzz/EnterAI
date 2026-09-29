@@ -6,18 +6,26 @@ admin did not grant, cannot be used twice, and cannot be created at all by someo
 who is not a human administrator of the organization it names.
 """
 from datetime import datetime, timedelta
+import threading
 from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.database import SessionLocal
+import pytest
+from sqlalchemy import delete
+
+from app.database import SessionLocal, engine
 from app.main import app
-from app.models import Invite, User
-from app.tokens import hash_token
+from app.models import Invite, Organization, User
+from app.tokens import find_live_invite, hash_token, mint
 
 from conftest import link_token
 from test_observability import identity, workspace
+
+postgres_only = pytest.mark.skipif(
+    engine.dialect.name != "postgresql", reason="row-lock concurrency requires PostgreSQL"
+)
 
 
 def address(prefix: str) -> str:
@@ -180,3 +188,61 @@ def test_an_unverified_admin_gets_a_small_invite_allowance(outbox, monkeypatch):
         blocked = c.post("/api/auth/invites", headers=headers, json={"email": address("spam"), "role": "member"})
         assert blocked.status_code == 429
         assert "Confirm your email" in blocked.json()["detail"]
+
+
+def test_invite_acceptance_requires_terms_when_legal_urls_are_published(outbox, monkeypatch):
+    with TestClient(app) as c:
+        headers, _account = workspace(c)
+        monkeypatch.setenv("TERMS_URL", "https://example.test/terms")
+        monkeypatch.setenv("PRIVACY_URL", "https://example.test/privacy")
+        email = address("terms-invite")
+        token, _ = invite(c, headers, outbox, email)
+        rejected = c.post("/api/auth/accept-invite", json={
+            "token": token, "name": "Terms Invite", "password": "invite-password-1"})
+        assert rejected.status_code == 400
+        with SessionLocal() as db:
+            assert db.scalar(select(User).where(User.email == email)) is None
+
+
+@postgres_only
+def test_concurrent_invite_claim_has_one_winner():
+    """Acceptance and revocation share the invite row lock, so one claim wins."""
+    with SessionLocal() as db:
+        organization = db.scalar(select(Organization))
+        raw, token_hash = mint()
+        invite_row = Invite(organization_id=organization.id, email=address("invite-race"),
+                            role="member", token_hash=token_hash,
+                            expires_at=datetime.utcnow() + timedelta(minutes=5))
+        db.add(invite_row)
+        db.commit()
+        invite_id = invite_row.id
+
+    barrier = threading.Barrier(2)
+    results, errors = [], []
+    result_lock = threading.Lock()
+
+    def worker():
+        try:
+            with SessionLocal() as db:
+                barrier.wait(timeout=10)
+                row = find_live_invite(db, raw, for_update=True)
+                if row is not None:
+                    row.accepted_at = datetime.utcnow()
+                db.commit()
+                with result_lock:
+                    results.append(row is not None)
+        except Exception as error:  # pragma: no cover - included in assertion below
+            with result_lock:
+                errors.append(error)
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=20)
+    assert not errors, errors
+    assert results == [True, False] or results == [False, True]
+
+    with SessionLocal() as db:
+        db.execute(delete(Invite).where(Invite.id == invite_id))
+        db.commit()

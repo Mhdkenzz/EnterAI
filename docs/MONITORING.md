@@ -1,5 +1,9 @@
 # Minimum staging monitoring
 
+The measurable pilot and paid-launch SLO targets, evidence fields, and alert
+ownership gate are maintained in [`PRODUCTION_GO_NO_GO.md`](PRODUCTION_GO_NO_GO.md).
+This page describes the signals that must feed those targets.
+
 Use any approved monitoring system. For application errors the API speaks the
 Sentry protocol when `SENTRY_DSN` is set -- Sentry itself or a self-hosted
 GlitchTip -- with cookies, auth headers, IPs and request bodies stripped from every

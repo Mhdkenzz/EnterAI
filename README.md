@@ -28,6 +28,10 @@ For local, non-production evaluation only, set `ENVIRONMENT=development` in `.en
 
 The API docs are available for local development at `http://localhost:8000/docs`. The Compose configuration disables `/docs`, `/redoc`, and `/openapi.json` by default; enable them explicitly with `ENABLE_API_DOCS=true` only in a trusted development or CI environment.
 
+For a small invited demo, use the staging configuration and follow the
+[demo-user runbook](docs/DEMO_RUNBOOK.md). It keeps the demonstration separate
+from a public or paid launch and calls out the remaining release gates.
+
 ## Development
 
 Frontend: `cd frontend && npm install && npm run dev`.

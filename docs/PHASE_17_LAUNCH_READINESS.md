@@ -1,8 +1,15 @@
 # Phase 17 Launch Readiness — Final Checklist
 
-Status: PARTIAL (environment-blocked items marked BLOCKED below)
+Status: SUPERSEDED BY THE CURRENT GO/NO-GO PACKAGE (environment-blocked items marked BLOCKED below)
 Repo: https://github.com/Mhdkenzz/EnterAI.git
-Verified HEAD: 0a7dfe9 (CI run 35755725488 green, 2026-09-22); originally written against d67ceb6
+Historical verified HEAD: 0a7dfe9 (CI run 35755725488 green, 2026-09-22); originally written against d67ceb6
+
+For the current Phase 3–7 decision, use
+[`docs/PRODUCTION_GO_NO_GO.md`](PRODUCTION_GO_NO_GO.md). It defines the scope-specific
+gates, measurable reliability targets, security and external-provider evidence,
+rotation and recovery drills, host-resilience limit, on-call ownership, and the
+launch decision record. The checklist below is retained as historical context;
+its PASS labels do not substitute for fresh evidence on the final release SHA.
 
 **2026-09-25 status refresh.** Several lines below had fallen behind the code: OIDC
 login, the audit aggregation writer, the SCIM PATCH attribute set, the backup service,

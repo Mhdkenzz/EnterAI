@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Loader2 } from "lucide-react";
 import { API_BASE, api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -357,19 +357,25 @@ export function ResetPassword({ token, done }: { token: string; done: () => void
 export function VerifyEmail({ token, done }: { token: string; done: () => void }) {
   const [state, setState] = useState<"working" | "ok" | "failed">("working"),
     [error, setError] = useState("");
+  // Redeeming the token is not idempotent: `redeem_auth_token` marks it spent in the
+  // same breath it returns it, so a second POST is a guaranteed 400. StrictMode's
+  // dev-only double-invoke of this effect would send exactly that second POST, and
+  // its 400 would then overwrite the success the first request earned. Aborting is
+  // not a fix here -- the first request has already reached the server and consumed
+  // the token by the time the abort fires, so the retry fails regardless. The
+  // request has to be prevented instead: this ref survives the double-invoke (React
+  // keeps the same component instance and only re-runs the effect), so the second
+  // pass sees the token already submitted and sends nothing.
+  const submitted = useRef<string | null>(null);
   useEffect(() => {
-    let live = true;
+    if (submitted.current === token) return;
+    submitted.current = token;
     api("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) })
-      .then(() => live && setState("ok"))
+      .then(() => setState("ok"))
       .catch((err: any) => {
-        if (live) {
-          setError(err.message);
-          setState("failed");
-        }
+        setError(err.message);
+        setState("failed");
       });
-    return () => {
-      live = false;
-    };
   }, [token]);
   return (
     <AuthShell title="Confirming your email" subtitle="One moment">

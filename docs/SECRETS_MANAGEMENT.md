@@ -1,5 +1,12 @@
 # Secrets Manager Integration
 
+## Secret rotation and launch evidence
+
+The launch decision requires a staging rotation drill and redacted evidence for
+each credential class. Use the rotation gate in
+[`PRODUCTION_GO_NO_GO.md`](PRODUCTION_GO_NO_GO.md) alongside this procedure;
+configuration documentation alone does not count as a completed rotation.
+
 ## Two different kinds of secret, handled differently
 1. **Process secrets** (JWT_SECRET, DATABASE_URL, OPENAI_API_KEY, STRIPE_*, etc.) --
    environment variables injected at deploy time, never committed. Rotation is a
@@ -18,8 +25,9 @@
    - Call `POST /api/admin/sso/rotate-secrets` (human admin, org-scoped) to
      re-encrypt every stored secret under the new key.
    - Remove `SECRETS_ENCRYPTION_KEY_PREVIOUS` once done.
-   - Production refuses to boot -- fails closed -- with no `SECRETS_ENCRYPTION_KEY`
-     set (see `secrets_store._cipher`), the same pattern as JWT_SECRET.
+   - Staging and production refuse to boot -- fail closed -- with no
+     `SECRETS_ENCRYPTION_KEY` set (see `secrets_store._cipher`), the same pattern
+     as JWT_SECRET.
 
 ## Where the key itself should live
 Where the environment allows a real external secrets manager (AWS Secrets Manager,

@@ -196,3 +196,122 @@ def test_stripe_webhook_route_is_actually_wired_into_the_app(monkeypatch):
         good = c.post("/webhooks/stripe", content=body, headers={"Stripe-Signature": header})
         assert good.status_code == 200
         assert good.json()["status"] == "processed"
+
+
+# --- The async route must not run blocking billing work on the event loop ----
+#
+# BillingService.process_webhook is synchronous and blocking: it verifies the
+# Stripe signature and then issues SQLAlchemy queries and commits. The route
+# that calls it is `async def`, so calling it directly would block the event
+# loop for the whole duration of that database work -- every other concurrent
+# request in the process stalls until this webhook returns. The route hands the
+# call to a worker thread instead.
+#
+# These tests assert the *observable* consequence of that handoff: the blocking
+# processor runs on a different thread from the event loop that drives the
+# route. Asserting "run_in_threadpool was called" would only test a mock
+# substituting the behavior; thread identity is the real contract, and it goes
+# red the moment someone inlines the call back onto the event loop.
+
+
+def _stripe_request(body: bytes, header: str):
+    """A genuine Starlette Request carrying a real webhook body, so the route's
+    `await request.body()` is exercised rather than stubbed out."""
+    from starlette.requests import Request
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "path": "/webhooks/stripe",
+        "query_string": b"",
+        "headers": [(b"stripe-signature", header.encode("utf-8"))],
+    }
+    return Request(scope, receive)
+
+
+def test_webhook_route_runs_blocking_processor_off_the_event_loop(db_session, monkeypatch):
+    """The regression this pins: the route must offload process_webhook to a
+    worker thread. A direct `service.process_webhook(...)` on the async route
+    runs it on the event loop thread and fails this assertion."""
+    import asyncio
+    import threading
+    from app.billing_webhook import stripe_webhook
+    from app.billing_service import BillingService
+
+    body, header = _signed_request({"id": "evt_thread_1", "type": "ping"}, "whsec_thread_test")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_thread_test")
+
+    observed = {}
+
+    def recording_processor(self, payload, sig_header):
+        observed["thread"] = threading.get_ident()
+        observed["calls"] = observed.get("calls", 0) + 1
+        observed["payload"] = payload
+        observed["sig_header"] = sig_header
+        return {"status": "processed", "event_id": "evt_thread_1"}
+
+    monkeypatch.setattr(BillingService, "process_webhook", recording_processor)
+
+    async def drive():
+        observed["loop_thread"] = threading.get_ident()
+        return await stripe_webhook(_stripe_request(body, header), header, db_session)
+
+    result = asyncio.run(drive())
+
+    # The processor really ran, exactly once, with the bytes and signature the
+    # request carried -- so the assertions below are about a real call.
+    assert observed["calls"] == 1
+    assert observed["payload"] == body
+    assert observed["sig_header"] == header
+
+    # The handoff: different thread than the event loop driving the route.
+    assert observed["thread"] != observed["loop_thread"], (
+        "process_webhook ran on the event loop thread; the async route is calling "
+        "the blocking processor directly instead of handing it to a worker thread"
+    )
+
+    # And the route still returns the processor's result to the caller.
+    assert result == {"status": "processed", "event_id": "evt_thread_1"}
+
+
+def test_webhook_route_maps_processor_value_error_to_400_across_the_thread_handoff(
+    db_session, monkeypatch
+):
+    """The ValueError -> 400 mapping must survive the thread handoff: an
+    exception raised inside the worker thread has to propagate back out through
+    the `await` for the route's except clause to see it. If the try/except were
+    left wrapping the call but not the await (or the other way round), a bad
+    Stripe signature would surface as an opaque 500 that Stripe retries forever
+    instead of the 400 that stops the retry storm."""
+    import asyncio
+    import threading
+    from fastapi import HTTPException
+    from app.billing_webhook import stripe_webhook
+    from app.billing_service import BillingService
+
+    body, header = _signed_request({"id": "evt_thread_bad", "type": "ping"}, "whsec_thread_test")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_thread_test")
+
+    observed = {}
+
+    def rejecting_processor(self, payload, sig_header):
+        observed["thread"] = threading.get_ident()
+        raise ValueError("Invalid webhook signature")
+
+    monkeypatch.setattr(BillingService, "process_webhook", rejecting_processor)
+
+    async def drive():
+        observed["loop_thread"] = threading.get_ident()
+        return await stripe_webhook(_stripe_request(body, header), header, db_session)
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(drive())
+
+    assert excinfo.value.status_code == 400
+    assert "Invalid webhook signature" in str(excinfo.value.detail)
+    # The failing processor still ran off-loop, so a bad signature from a
+    # concurrent flood cannot block the loop either.
+    assert observed["thread"] != observed["loop_thread"]

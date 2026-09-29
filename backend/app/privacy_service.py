@@ -31,8 +31,9 @@ from sqlalchemy.orm import Session
 
 from .auth import hash_password
 from .models import (Activity, AgentMessage, Attachment, AuditEvent, AuthToken, Comment,
-                     DocumentChunk, ExecutionRun, HierarchyConfig, Invite, Notification,
-                     Organization, Project, ProjectDocument, ProviderCall, Task, Team, User)
+                     DocumentChunk, ExecutionRun, FeedbackReport, HierarchyConfig, Invite,
+                     Notification, Organization, Project, ProjectDocument, ProviderCall,
+                     Task, Team, User)
 from .privacy_models import DeletionRequest, RetentionPolicy
 from .services import log
 from .storage import get_storage
@@ -71,6 +72,7 @@ def export_user_data(db: Session, user: User) -> dict:
     documents = db.scalars(select(ProjectDocument).where(ProjectDocument.uploaded_by == user.id)).all()
     messages = db.scalars(select(AgentMessage).where(AgentMessage.author_id == user.id)).all()
     audit_events = db.scalars(select(AuditEvent).where(AuditEvent.actor_id == user.id)).all()
+    feedback = db.scalars(select(FeedbackReport).where(FeedbackReport.reporter_id == user.id)).all()
     return {
         "profile": {"id": user.id, "name": user.name, "email": user.email, "role": user.role,
                     "title": user.title, "created_at": user.created_at.isoformat()},
@@ -85,6 +87,9 @@ def export_user_data(db: Session, user: User) -> dict:
                             "created_at": m.created_at.isoformat()} for m in messages],
         "audit_events": [{"id": a.id, "action": a.action, "entity_type": a.entity_type,
                           "entity_id": a.entity_id, "created_at": a.created_at.isoformat()} for a in audit_events],
+        "feedback_reports": [{"id": f.id, "category": f.category, "impact": f.impact,
+                              "description": f.description, "status": f.status,
+                              "created_at": f.created_at.isoformat()} for f in feedback],
     }
 
 
@@ -101,6 +106,7 @@ def export_organization_data(db: Session, organization_id: str) -> dict:
     tasks = db.scalars(select(Task).where(Task.project_id.in_(project_ids))).all() if project_ids else []
     documents = db.scalars(select(ProjectDocument).where(ProjectDocument.organization_id == organization_id)).all()
     audit_events = db.scalars(select(AuditEvent).where(AuditEvent.organization_id == organization_id)).all()
+    feedback = db.scalars(select(FeedbackReport).where(FeedbackReport.organization_id == organization_id)).all()
     return {
         "organization": {"id": org.id, "name": org.name, "slug": org.slug,
                          "created_at": org.created_at.isoformat()} if org else None,
@@ -113,6 +119,9 @@ def export_organization_data(db: Session, organization_id: str) -> dict:
         "documents": [{"id": d.id, "file_name": d.file_name, "project_id": d.project_id} for d in documents],
         "audit_events": [{"id": a.id, "action": a.action, "entity_type": a.entity_type,
                           "entity_id": a.entity_id, "created_at": a.created_at.isoformat()} for a in audit_events],
+        "feedback_reports": [{"id": f.id, "reporter_id": f.reporter_id, "category": f.category,
+                              "impact": f.impact, "description": f.description, "status": f.status,
+                              "created_at": f.created_at.isoformat()} for f in feedback],
     }
 
 
@@ -198,6 +207,7 @@ def delete_organization_data(db: Session, organization_id: str) -> None:
     db.execute(delete(Activity).where(Activity.organization_id == organization_id))
     db.execute(delete(ExecutionRun).where(ExecutionRun.organization_id == organization_id))
     db.execute(delete(ProviderCall).where(ProviderCall.organization_id == organization_id))
+    db.execute(delete(FeedbackReport).where(FeedbackReport.organization_id == organization_id))
     try:
         from .billing_models import OrganizationSubscription, UsageRecord
         db.execute(delete(UsageRecord).where(UsageRecord.organization_id == organization_id))

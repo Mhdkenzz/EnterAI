@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   backend:
@@ -19,6 +20,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
+      - name: Verify runtime AI dependency compatibility
+        # This is intentionally a no-network constructor check.  It catches a
+        # broken OpenAI/httpx combination before the broader suite runs and
+        # mirrors the production embedding provider's startup path.
+        run: PYTHONPATH=. pytest -q tests/test_release_readiness.py
       - run: PYTHONPATH=. alembic upgrade head
         env:
           DATABASE_URL: sqlite:///./ci.db
@@ -193,7 +199,7 @@ jobs:
         run: |
           kill "$(cat /tmp/enter-ai-api.pid)"
           for attempt in $(seq 1 30); do ! curl -sS http://127.0.0.1:8000/health >/dev/null 2>&1 && break || sleep 1; done
-          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SEED_ADMIN_EMAIL=admin@staging.example.test SEED_ADMIN_PASSWORD=ci-only-seed-admin-password EMAIL_PROVIDER=smtp SMTP_HOST=127.0.0.1 EMAIL_FROM=ci@enterai.test APP_BASE_URL=https://staging.example.test API_BASE_URL=https://api.staging.example.test CORS_ALLOWED_ORIGINS=https://staging.example.test TRUSTED_HOSTS=staging.example.test,api.staging.example.test TRUST_PROXY_HEADERS=true AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
+          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SECRETS_ENCRYPTION_KEY=ci-only-secrets-encryption-key TERMS_URL=https://staging.example.test/terms PRIVACY_URL=https://staging.example.test/privacy SEED_ADMIN_EMAIL=admin@staging.example.test SEED_ADMIN_PASSWORD=ci-only-seed-admin-password EMAIL_PROVIDER=smtp SMTP_HOST=127.0.0.1 EMAIL_FROM=ci@enterai.test APP_BASE_URL=https://staging.example.test API_BASE_URL=https://api.staging.example.test CORS_ALLOWED_ORIGINS=https://staging.example.test TRUSTED_HOSTS=staging.example.test,api.staging.example.test TRUST_PROXY_HEADERS=true AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS -H 'Host: api.staging.example.test' http://127.0.0.1:8000/health && break || sleep 1; done
           curl -fsS -H 'Host: api.staging.example.test' http://127.0.0.1:8000/health || { echo "::error::API failed to come back up in production mode"; cat /tmp/enter-ai-api-zap.log; exit 1; }
       - uses: zaproxy/action-baseline@v0.14.0
@@ -218,23 +224,34 @@ jobs:
       ENTERAI_BACKEND_IMAGE: enterai-backend:ci
       ENTERAI_FRONTEND_IMAGE: enterai-frontend:ci
       ENVIRONMENT: ci
+      AI_PROVIDER: deterministic
       REDIS_URL: redis://redis:6379/0
       SEED_ADMIN_EMAIL: admin@ci.enterai.test
       SEED_ADMIN_PASSWORD: ci-only-seed-admin-password
       STORAGE_BUCKET: enterai-uploads
       STORAGE_ACCESS_KEY: enterai_storage_ci
       STORAGE_SECRET_KEY: enterai_storage_ci_password
+      BACKUP_OBJECTS_BUCKET: enterai-backup-ci
+      BACKUP_OBJECTS_ACCESS_KEY: enterai_backup_ci
+      BACKUP_OBJECTS_SECRET_KEY: enterai_backup_ci_password
       SMTP_HOST: 127.0.0.1
       EMAIL_FROM: ci@enterai.test
       APP_BASE_URL: http://127.0.0.1:3000
       API_BASE_URL: http://127.0.0.1:8000
+      TERMS_URL: https://ci.enterai.test/terms
+      PRIVACY_URL: https://ci.enterai.test/privacy
       CORS_ALLOWED_ORIGINS: http://127.0.0.1:3000
       TRUSTED_HOSTS: localhost,127.0.0.1
       EMAIL_PROVIDER: smtp
       SMTP_PORT: "587"
+      SECRETS_ENCRYPTION_KEY: ci-only-secrets-encryption-key
+      EMBEDDING_PROVIDER: deterministic
       TLS_CERT_PATH: /tmp/enterai-ci.crt
       TLS_KEY_PATH: /tmp/enterai-ci.key
       AI_PLAN_RATE_LIMIT_PER_MINUTE: "3"
+      # Exercise the hosted invite-only admission path. The QA harness signs in
+      # with this job's isolated seed admin and accepts a consented invite.
+      INVITE_ONLY_REGISTRATION: "true"
     steps:
       - uses: actions/checkout@v4
       - name: Build immutable-artifact stand-ins and test TLS certificate
@@ -274,6 +291,7 @@ jobs:
       JWT_SECRET: ci-only-secret-that-is-long-enough-for-the-production-check
       REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: staging
+      AI_PROVIDER: deterministic
       EMAIL_PROVIDER: smtp
       SMTP_HOST: smtp.example.test
       SMTP_PORT: "587"
@@ -282,11 +300,20 @@ jobs:
       API_BASE_URL: https://api.staging.example.test
       CORS_ALLOWED_ORIGINS: https://staging.example.test
       TRUSTED_HOSTS: staging.example.test,api.staging.example.test
+      TRUST_PROXY_HEADERS: "true"
+      INVITE_ONLY_REGISTRATION: "true"
       SEED_ADMIN_EMAIL: admin@example.test
       SEED_ADMIN_PASSWORD: ci-only-seed-admin-password
       STORAGE_BUCKET: enterai-uploads
       STORAGE_ACCESS_KEY: ci-access-key
       STORAGE_SECRET_KEY: ci-secret-key
+      BACKUP_OBJECTS_BUCKET: enterai-backup-ci
+      BACKUP_OBJECTS_ACCESS_KEY: ci-backup-access-key
+      BACKUP_OBJECTS_SECRET_KEY: ci-backup-secret-key
+      EMBEDDING_PROVIDER: deterministic
+      SECRETS_ENCRYPTION_KEY: ci-only-secrets-encryption-key
+      TERMS_URL: https://staging.example.test/terms
+      PRIVACY_URL: https://staging.example.test/privacy
       TLS_CERT_PATH: /tmp/enterai-ci.crt
       TLS_KEY_PATH: /tmp/enterai-ci.key
       ENTERAI_BACKEND_IMAGE: enterai-backend:ci
@@ -301,14 +328,15 @@ jobs:
       - name: Validate hosted frontend build arguments and images
         run: |
           if docker build --build-arg BUILD_ENVIRONMENT=staging -t enterai-frontend:missing-api ./frontend; then echo 'missing hosted API URL unexpectedly built' >&2; exit 1; fi
-          docker build --build-arg BUILD_ENVIRONMENT=staging --build-arg NEXT_PUBLIC_API_URL=https://api.staging.example.test/api -t "$ENTERAI_FRONTEND_IMAGE" ./frontend
+          docker build --build-arg BUILD_ENVIRONMENT=staging --build-arg NEXT_PUBLIC_API_URL=https://api.staging.example.test/api --build-arg NEXT_PUBLIC_TERMS_URL=https://staging.example.test/terms --build-arg NEXT_PUBLIC_PRIVACY_URL=https://staging.example.test/privacy -t "$ENTERAI_FRONTEND_IMAGE" ./frontend
           docker build -t "$ENTERAI_BACKEND_IMAGE" ./backend
       - name: Validate release scripts and deployment invariants
         run: |
-          bash -n scripts/backup.sh scripts/verify_restore.sh
-          docker run --rm -v "$PWD:/work:ro" --entrypoint shellcheck koalaman/shellcheck-alpine:stable /work/scripts/backup.sh /work/scripts/verify_restore.sh
+          bash -n scripts/backup.sh scripts/verify_restore.sh scripts/verify_staging_config.sh scripts/staging_smoke.sh
+          docker run --rm -v "$PWD:/work:ro" --entrypoint shellcheck koalaman/shellcheck-alpine:stable /work/scripts/backup.sh /work/scripts/verify_restore.sh /work/scripts/verify_staging_config.sh /work/scripts/staging_smoke.sh
           ! grep -En '^[^#]*(up -d --build|StrictHostKeyChecking=accept-new|:latest)' .github/workflows/deploy.yml docker-compose.prod.yml
           grep -En 'sha-\$REF|containerimage.digest|ENTERAI_BACKEND_IMAGE|ENTERAI_FRONTEND_IMAGE' .github/workflows/deploy.yml
+          grep -En 'verify_staging_config|staging_smoke' .github/workflows/deploy.yml
 
   security-scans:
     runs-on: ubuntu-latest

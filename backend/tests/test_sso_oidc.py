@@ -34,6 +34,7 @@ from sqlalchemy import select
 from uuid import uuid4
 
 from app import secrets_store, sso_oidc
+from app import domain_verification
 from app.database import SessionLocal
 from app.main import app as backend_app
 from app.models import Organization, User
@@ -52,13 +53,18 @@ class FakeIdP:
         self.private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         self.sessions: dict[str, dict] = {}  # code -> {nonce, code_challenge, redirect_uri, client_id}
         self.client_secret = "fake-idp-client-secret-" + secrets.token_hex(8)
-        # This app enforces a real, deliberate global-uniqueness constraint on
-        # users.email (login resolves by email alone, with no org
-        # disambiguation) -- every test here shares one real database with
-        # every other test in the suite, so a fixed literal email would
-        # collide across test functions exactly like it would in production
-        # if two people really did share an address.
-        self.default_email = f"employee-{secrets.token_hex(6)}@fakeidp.example"
+        # The fake IdP issues addresses in whatever domain the provider under
+        # test is bound to, because OIDC provisioning refuses an address
+        # outside the provider's own verified domain. Tests drive that with
+        # _org_and_idp, which points this at the domain it just bound.
+        self.email_domain = "fakeidp.example"
+        # A per-test unique local part: this app enforces a real, deliberate
+        # global-uniqueness constraint on users.email (login resolves by email
+        # alone, with no org disambiguation) -- every test here shares one real
+        # database with every other test in the suite, so a fixed literal email
+        # would collide across test functions exactly like it would in
+        # production if two people really did share an address.
+        self.default_email = f"employee-{secrets.token_hex(6)}@{self.email_domain}"
         self.next_claims_override: dict | None = None
         # /jwks always serves self.private_key's public component; a test that
         # wants to simulate a forged/wrong-key-signed token sets this instead
@@ -187,9 +193,19 @@ def _org_and_idp(db_session, fake_idp, *, domain=None, role_mapping=None):
         client_id="test-client-id", client_secret_encrypted=secrets_store.encrypt(fake_idp.client_secret),
         oidc_issuer=fake_idp.base_url, domain_binding=domain, active=True,
         role_mapping_json=role_mapping or {},
+        # OIDC routing and provisioning are both gated on a verified domain
+        # (app/domain_verification.py), so the fixture has to carry the proof.
+        # Set directly rather than through the admin endpoints: the DNS
+        # resolver is not reachable from a unit test, and the gate reads only
+        # this column, so this is equivalent to a completed verification.
+        domain_verified_at=domain_verification.utcnow(),
     )
     db_session.add(idp)
     db_session.commit()
+    # Point the fake IdP at the domain this provider owns, so the address it
+    # issues inside the end-to-end login is one the provider may provision.
+    fake_idp.email_domain = domain
+    fake_idp.default_email = f"employee-{secrets.token_hex(6)}@{domain}"
     return org, idp
 
 
@@ -331,13 +347,17 @@ def test_two_orgs_logins_stay_isolated_even_via_the_same_fake_idp(db_session, fa
     # users.email is a genuine, deliberate global-uniqueness constraint (login
     # resolves by email alone), so this is not an artificial test
     # restriction, it is the realistic shape of "two orgs, same fake IdP".
-    fake_idp.next_claims_override = {"email": f"person-a-{uuid4().hex[:8]}@fakeidp.example"}
+    # Each address sits in the domain its own provider owns, since OIDC
+    # provisioning refuses an address outside the provider's verified domain.
+    fake_idp.next_claims_override = {
+        "email": f"person-a-{uuid4().hex[:8]}@{idp_a.domain_binding}"}
     url_a = sso_oidc.build_authorization_url(db_session, idp_a, redirect_uri)
     db_session.commit()
     code_a, state_a = _drive_full_login(fake_idp, redirect_uri, url_a)
     user_a, _ = sso_oidc.handle_callback(db_session, code=code_a, state=state_a, idp_error=None)
 
-    fake_idp.next_claims_override = {"email": f"person-b-{uuid4().hex[:8]}@fakeidp.example"}
+    fake_idp.next_claims_override = {
+        "email": f"person-b-{uuid4().hex[:8]}@{idp_b.domain_binding}"}
     url_b = sso_oidc.build_authorization_url(db_session, idp_b, redirect_uri)
     db_session.commit()
     code_b, state_b = _drive_full_login(fake_idp, redirect_uri, url_b)

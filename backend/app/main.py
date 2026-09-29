@@ -25,7 +25,8 @@ from .ratelimit import build_rate_limiter
 from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
 from .storage import get_storage
 from .indexing import index_document
-from .deployment_config import is_deployment_environment, migration_revision_status, validate_deployment_configuration
+from .deployment_config import (is_deployment_environment, migration_revision_status,
+                                registration_requires_invite, validate_deployment_configuration)
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
 demo_seed_enabled = os.getenv("ENABLE_DEMO_SEED", "false" if is_deployment_environment(environment) else "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -113,11 +114,14 @@ from .privacy import router as privacy_router, admin_router as admin_privacy_rou
 from . import privacy_service
 from .sso_routes import router_admin as sso_admin_router, router_login as sso_login_router, router_scim as scim_router
 from .enterprise_routes import router as enterprise_router
+from .feedback import router as feedback_router, admin_router as feedback_admin_router
 app.include_router(admin_router)
 app.include_router(sso_admin_router)
 app.include_router(sso_login_router)
 app.include_router(scim_router)
 app.include_router(enterprise_router)
+app.include_router(feedback_router)
+app.include_router(feedback_admin_router)
 app.include_router(accounts_router)
 app.include_router(billing_webhook_router)
 app.include_router(billing_router)
@@ -144,17 +148,32 @@ app.add_middleware(
 )
 
 @app.on_event("startup")
-def startup():
+async def startup():
+    # AnyIO's default is 40 threads, more than the 15 connections a worker has: the
+    # surplus threads could only wait on the pool, each holding its connection.
+    # Cap request threads to what the pool can actually serve once the background
+    # loops have taken their share. Resolved first, and allowed to raise: an
+    # invalid REQUEST_THREADS must stop the boot, and it has to do so before the
+    # seed below awaits a worker thread (REQUEST_THREADS=0 would otherwise
+    # deadlock startup rather than report the bad value).
+    import anyio.to_thread
+    from .database import resolve_request_thread_limit
+    limit = resolve_request_thread_limit()
     validate_deployment_configuration()
-    configure_logging()
-    with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
-    from .billing_service import sync_plans_from_env
-    with next(get_db()) as db: sync_plans_from_env(db)
+    configure_logging()  # on the main thread: it registers a signal handler
+    anyio.to_thread.current_default_thread_limiter().total_tokens = limit
+    await anyio.to_thread.run_sync(_seed_blocking)
+    # The background loops schedule themselves on this event loop.
     execution.start_background_loop()
     privacy_service.start_background_loop()
     from . import observability as _observability
     _observability.start_aggregation_background_loop()
     mailer.start_retry_loop()
+
+def _seed_blocking():
+    with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
+    from .billing_service import sync_plans_from_env
+    with next(get_db()) as db: sync_plans_from_env(db)
 
 @app.on_event("shutdown")
 def shutdown():
@@ -325,6 +344,8 @@ def register(data: Register, request: Request, response: Response, db: Session =
     slug gets a random suffix when the plain one is in use.
     """
     enforce(_SIGNUP_LIMITER, request)
+    if registration_requires_invite():
+        raise HTTPException(403, "New workspace registration is invite-only for this pilot.")
     address = accounts.normalize(data.email)
     accounts.require_strong_password(data.password, address)
     slug = re.sub(r"[^a-z0-9]+", "-", data.organization_name.lower()).strip("-")[:70] or "workspace"
@@ -428,8 +449,10 @@ def project_tasks(project_id: str,user: User=Depends(current_user),db:Session=De
     ensure_project(db,user,project_id); return [task_out(t,db) for t in db.scalars(select(Task).where(Task.project_id==project_id).order_by(Task.position)).all()]
 
 @app.post("/api/project-drafts/assist", status_code=201)
-async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(current_user), db: Session=Depends(get_db)):
-    raw=await file.read()
+def assist_project_draft(file: UploadFile=File(...), user: User=Depends(current_user), db: Session=Depends(get_db)):
+    # Plain `def`: this does blocking database and storage work, which in an `async`
+    # endpoint would run on the event loop and stall every other request on the worker.
+    raw=file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Documents must be 5 MB or smaller")
     try: extracted=extract_document_text(file.filename or "document.txt",raw)
     except ValueError as error: raise HTTPException(415,str(error)) from error
@@ -458,9 +481,9 @@ def project_documents(project_id:str,user:User=Depends(current_user),db:Session=
     return [{"id":d.id,"file_name":d.file_name,"content_type":d.content_type,"created_at":d.created_at} for d in db.scalars(select(ProjectDocument).where(ProjectDocument.project_id==project_id)).all()]
 
 @app.post("/api/projects/{project_id}/documents",status_code=201)
-async def add_project_document(project_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
+def add_project_document(project_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
     ensure_project(db,user,project_id)
-    raw=await file.read()
+    raw=file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Documents must be 5 MB or smaller")
     try: extracted=extract_document_text(file.filename or "document.txt",raw)
     except ValueError as error: raise HTTPException(415,str(error)) from error
@@ -587,11 +610,11 @@ def add_comment(task_id:str,data:CommentIn,user:User=Depends(current_user),db:Se
         notify(db, recipient, user, f"{user.name} commented on “{t.title}”", data.body[:280], f"project:{p.id}")
     db.commit(); return {"id":c.id,"body":c.body}
 @app.post("/api/tasks/{task_id}/attachments",status_code=201)
-async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
+def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
     if not t: raise HTTPException(404,"Task not found")
     ensure_project(db,user,t.project_id)
-    raw=await file.read()
+    raw=file.file.read(MAX_UPLOAD_BYTES + 1)
     if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Attachments must be 5 MB or smaller")
     path=get_storage().save("task-attachments", file.filename or "attachment", raw); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename or "attachment",path=path,content_type=file.content_type); db.add(a); log(db,user.organization_id,user.id,"task",task_id,"attachment_uploaded"); db.commit(); return {"id":a.id,"file_name":a.file_name}
 
