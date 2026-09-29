@@ -1,5 +1,12 @@
 # Secrets Manager Integration
 
+## Secret rotation and launch evidence
+
+The launch decision requires a staging rotation drill and redacted evidence for
+each credential class. Use the rotation gate in
+[`PRODUCTION_GO_NO_GO.md`](PRODUCTION_GO_NO_GO.md) alongside this procedure;
+configuration documentation alone does not count as a completed rotation.
+
 ## Two different kinds of secret, handled differently
 1. **Process secrets** (JWT_SECRET, DATABASE_URL, OPENAI_API_KEY, STRIPE_*, etc.) --
    environment variables injected at deploy time, never committed. Rotation is a

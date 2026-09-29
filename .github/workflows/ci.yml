@@ -223,6 +223,7 @@ jobs:
       ENTERAI_BACKEND_IMAGE: enterai-backend:ci
       ENTERAI_FRONTEND_IMAGE: enterai-frontend:ci
       ENVIRONMENT: ci
+      AI_PROVIDER: deterministic
       REDIS_URL: redis://redis:6379/0
       SEED_ADMIN_EMAIL: admin@ci.enterai.test
       SEED_ADMIN_PASSWORD: ci-only-seed-admin-password
@@ -247,6 +248,9 @@ jobs:
       TLS_CERT_PATH: /tmp/enterai-ci.crt
       TLS_KEY_PATH: /tmp/enterai-ci.key
       AI_PLAN_RATE_LIMIT_PER_MINUTE: "3"
+      # Exercise the hosted invite-only admission path. The QA harness signs in
+      # with this job's isolated seed admin and accepts a consented invite.
+      INVITE_ONLY_REGISTRATION: "true"
     steps:
       - uses: actions/checkout@v4
       - name: Build immutable-artifact stand-ins and test TLS certificate
@@ -286,6 +290,7 @@ jobs:
       JWT_SECRET: ci-only-secret-that-is-long-enough-for-the-production-check
       REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: staging
+      AI_PROVIDER: deterministic
       EMAIL_PROVIDER: smtp
       SMTP_HOST: smtp.example.test
       SMTP_PORT: "587"
@@ -294,6 +299,8 @@ jobs:
       API_BASE_URL: https://api.staging.example.test
       CORS_ALLOWED_ORIGINS: https://staging.example.test
       TRUSTED_HOSTS: staging.example.test,api.staging.example.test
+      TRUST_PROXY_HEADERS: "true"
+      INVITE_ONLY_REGISTRATION: "true"
       SEED_ADMIN_EMAIL: admin@example.test
       SEED_ADMIN_PASSWORD: ci-only-seed-admin-password
       STORAGE_BUCKET: enterai-uploads
@@ -324,10 +331,11 @@ jobs:
           docker build -t "$ENTERAI_BACKEND_IMAGE" ./backend
       - name: Validate release scripts and deployment invariants
         run: |
-          bash -n scripts/backup.sh scripts/verify_restore.sh
-          docker run --rm -v "$PWD:/work:ro" --entrypoint shellcheck koalaman/shellcheck-alpine:stable /work/scripts/backup.sh /work/scripts/verify_restore.sh
+          bash -n scripts/backup.sh scripts/verify_restore.sh scripts/verify_staging_config.sh scripts/staging_smoke.sh
+          docker run --rm -v "$PWD:/work:ro" --entrypoint shellcheck koalaman/shellcheck-alpine:stable /work/scripts/backup.sh /work/scripts/verify_restore.sh /work/scripts/verify_staging_config.sh /work/scripts/staging_smoke.sh
           ! grep -En '^[^#]*(up -d --build|StrictHostKeyChecking=accept-new|:latest)' .github/workflows/deploy.yml docker-compose.prod.yml
           grep -En 'sha-\$REF|containerimage.digest|ENTERAI_BACKEND_IMAGE|ENTERAI_FRONTEND_IMAGE' .github/workflows/deploy.yml
+          grep -En 'verify_staging_config|staging_smoke' .github/workflows/deploy.yml
 
   security-scans:
     runs-on: ubuntu-latest

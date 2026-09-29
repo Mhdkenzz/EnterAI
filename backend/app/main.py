@@ -114,11 +114,14 @@ from .privacy import router as privacy_router, admin_router as admin_privacy_rou
 from . import privacy_service
 from .sso_routes import router_admin as sso_admin_router, router_login as sso_login_router, router_scim as scim_router
 from .enterprise_routes import router as enterprise_router
+from .feedback import router as feedback_router, admin_router as feedback_admin_router
 app.include_router(admin_router)
 app.include_router(sso_admin_router)
 app.include_router(sso_login_router)
 app.include_router(scim_router)
 app.include_router(enterprise_router)
+app.include_router(feedback_router)
+app.include_router(feedback_admin_router)
 app.include_router(accounts_router)
 app.include_router(billing_webhook_router)
 app.include_router(billing_router)

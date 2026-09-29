@@ -1,5 +1,10 @@
 # Backup and restore drill
 
+The launch decision requires a completed disposable restore with measured RTO/RPO
+and matching object-store evidence; record it using
+[`PRODUCTION_GO_NO_GO.md`](PRODUCTION_GO_NO_GO.md). This procedure must never
+target the active staging or production database.
+
 `backup.sh` creates a compressed PostgreSQL archive, verifies it with
 `pg_restore --list`, retains archives for `BACKUP_RETENTION_DAYS` (14 by default),
 and exits nonzero on dump, verification, or optional off-host-copy failure. It

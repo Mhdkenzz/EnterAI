@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { BillingSection } from "@/components/billing-settings";
 import { TeamInvitesSection } from "@/components/team-invites";
+import { AdminFeedbackSection } from "@/components/feedback";
 
 type Settings = { execution_enabled: boolean };
 type AdminUser = { id: string; name: string; email?: string; role: "admin" | "manager" | "member"; active: boolean };
@@ -112,6 +113,7 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
     <p role="status" aria-live="polite" className="text-sm text-sky-200">{pending ? "Saving changes…" : notice}</p>
     <BillingSection />
     <TeamInvitesSection />
+    <AdminFeedbackSection users={users} />
     {!loading && !loadError && usage && settings && <>
       <section aria-labelledby="usage-heading" className="space-y-3">
         <div className="flex flex-wrap items-start justify-between gap-3">

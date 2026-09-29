@@ -13,6 +13,7 @@ import { Home, Portfolio, Work, InboxView, Teams, ProjectView } from "@/componen
 import { AI, AI_GREETING, Command } from "@/components/workspace/assistant";
 import { routeToUrl, urlToRoute, type Route } from "@/lib/routes";
 import { ProjectForm, ProjectEditForm, TaskForm, TeamForm, Drawer } from "@/components/workspace/forms";
+import { FeedbackDialog } from "@/components/feedback";
 import { Agents, AgentInspector } from "@/components/workspace/agents";
 import type {
   User,
@@ -61,6 +62,7 @@ export default function EnterAI() {
     [agentMessages, setAgentMessages] = useState<AgentMsg[]>([]),
     [agentChatBusy, setAgentChatBusy] = useState(false),
     [agentChatError, setAgentChatError] = useState("");
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   async function refresh() {
     try {
       const [me, d, p, u, t, n, a] = await Promise.all([
@@ -517,6 +519,7 @@ export default function EnterAI() {
               <i className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-sky-400" />
             )}
           </button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => setFeedbackOpen(true)}>Report a problem</Button>
           <Button aria-label="New project" size="sm" onClick={() => setProjectForm(true)}>
             <Plus size={15} />
             <span className="hidden sm:inline">New project</span>
@@ -655,6 +658,7 @@ export default function EnterAI() {
           confirm={confirmAgentAction}
         />
       )}
+      <FeedbackDialog open={feedbackOpen} close={() => setFeedbackOpen(false)} />
     </div>
   );
 }

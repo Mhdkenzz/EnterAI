@@ -1,5 +1,10 @@
 # Production Runbooks — Phase 17 Launch Readiness
 
+Use [`PRODUCTION_GO_NO_GO.md`](PRODUCTION_GO_NO_GO.md) as the current decision
+package for Phases 3–7 and broader launch. This file records the operational
+procedures and their evidence limits; documented procedures are not proof that a
+live drill has run.
+
 Repo: https://github.com/Mhdkenzz/EnterAI.git
 Verified HEAD reference: d67ceb6193c8fd5f92d938f8b64eb34a444fcc70
 
@@ -20,7 +25,9 @@ Status: DOCUMENTED; not executed in production environment. BLOCKED: requires pr
 - Escalation: Human admin (user with role=admin) verifies issue; cross-org isolation ensures no data leakage.
 - Recovery: Rollback procedure above + session retirement (user.session_epoch bump for compromised accounts) + SCIM deactivation for deprovisioned accounts.
 - Communication: Admin audit events logged; incident details captured in AuditEvent table.
-Status: DOCUMENTED; full on-call execution BLOCKED (requires production authorization/on-call roster).
+Status: PROCEDURE DOCUMENTED in `PRODUCTION_GO_NO_GO.md`; execution remains
+BLOCKED until named primary/secondary owners, an approved alert sink, and an
+authorized game-day exist.
 
 ## 3. Status / Uptime Process
 - Current: docs/MONITORING.md exists; monitoring concepts documented.
@@ -44,7 +51,9 @@ BLOCKED: full rotation drill requires live IdP endpoint.
 Status: DOCUMENTED; not executed. BLOCKED: requires production-like multi-replica environment (real Postgres + Redis + multiple replicas) and authorization.
 
 ## 7. Pilot / Paid Launch Readiness Gate (Summary)
-- Pilot READY: NO (blocked: real IdP integration, Playwright/frontend UI, external scan)
-- Paid READY: NO (blocked: multi-replica verification, full external scan, incident/on-call finalized, status endpoint)
-- Enterprise READY: NO (blocked: real IdP production validation, external pen scan, full SCIM spec, production runbook execution)
-- All critical/high security/regression findings from independent review RESOLVED (secret hash fixed, isolation verified, audit read-only, no mutation endpoints for audit, session retirement active).
+The authoritative scope-specific gate and measurable SLO table are in
+`PRODUCTION_GO_NO_GO.md`. The current state remains:
+- Pilot READY: NO (blocked: live HTTPS journey evidence, real IdP if SSO is in scope, external security review, restore/game-day/alert evidence)
+- Paid READY: NO (blocked: measured SLO/load evidence, Stripe test-mode proof, external security review, rollback/game-day, and named on-call ownership)
+- Enterprise READY: NO (blocked: real IdP validation, SCIM `remove` decision, external pen test, secret rotation drill, and production runbook execution)
+- Code-level critical/high regressions have targeted coverage; that does not close external security findings or prove live isolation, recovery, or alert delivery.

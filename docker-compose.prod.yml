@@ -79,6 +79,7 @@ services:
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     environment:
       ENVIRONMENT: ${ENVIRONMENT:?set ENVIRONMENT to staging or production}
+      RELEASE_SHA: ${RELEASE_SHA:-}
       ENABLE_API_DOCS: "false"
       ENABLE_DEMO_SEED: "false"
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
@@ -120,7 +121,10 @@ services:
       AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:?set STORAGE_ACCESS_KEY}
       AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:?set STORAGE_SECRET_KEY}
       AI_PLAN_RATE_LIMIT_PER_MINUTE: ${AI_PLAN_RATE_LIMIT_PER_MINUTE:-20}
-      AI_PROVIDER: ${AI_PROVIDER:-deterministic}
+      # Hosted releases must choose the provider explicitly. Deterministic is
+      # still valid for a deliberately offline staging demo, but it must not be
+      # selected accidentally by an omitted host variable.
+      AI_PROVIDER: ${AI_PROVIDER:?set AI_PROVIDER}
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_MODEL: ${AI_MODEL:-}
       AI_API_KEY: ${AI_API_KEY:-}
@@ -153,7 +157,9 @@ services:
   # job runs) never starts it; a real deployment brings it up with `docker compose
   # up -d` (no target) to include everything.
   backup:
-    image: postgres:16-alpine
+    # backup.sh uses Bash features (pipefail and ${var/prefix/replacement}); use
+    # the Debian image so the interpreter it declares is present at runtime.
+    image: postgres:16
     restart: unless-stopped
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
@@ -164,8 +170,8 @@ services:
     volumes:
       - ./scripts/backup.sh:/backup.sh:ro
       - backup_data:/var/backups/enterai
-    entrypoint: >-
-      sh -c "while true; do sh /backup.sh || echo 'backup run failed, retrying next interval'; sleep \"$$BACKUP_INTERVAL_SECONDS\"; done"
+    entrypoint: ["/bin/bash", "-c"]
+    command: ["while true; do /bin/bash /backup.sh || echo 'backup run failed, retrying next interval'; sleep \"$$BACKUP_INTERVAL_SECONDS\"; done"]
     depends_on:
       db: {condition: service_healthy}
 

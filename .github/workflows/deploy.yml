@@ -154,8 +154,9 @@ jobs:
           cp docker-compose.prod.yml "$release/"
           mkdir "$release/deploy" "$release/scripts"
           cp deploy/nginx.conf "$release/deploy/"
-          cp scripts/backup.sh "$release/scripts/"
-          printf 'ENTERAI_BACKEND_IMAGE=%s\nENTERAI_FRONTEND_IMAGE=%s\nTERMS_URL=%s\nPRIVACY_URL=%s\n' "$BACKEND_IMAGE" "$FRONTEND_IMAGE" "$STAGING_TERMS_URL" "$STAGING_PRIVACY_URL" > "$release/images.env"
+          cp scripts/backup.sh scripts/verify_staging_config.sh scripts/staging_smoke.sh "$release/scripts/"
+          chmod 755 "$release/scripts/"*.sh
+          printf 'ENTERAI_BACKEND_IMAGE=%s\nENTERAI_FRONTEND_IMAGE=%s\nRELEASE_SHA=%s\nTERMS_URL=%s\nPRIVACY_URL=%s\n' "$BACKEND_IMAGE" "$FRONTEND_IMAGE" "$REF" "$STAGING_TERMS_URL" "$STAGING_PRIVACY_URL" > "$release/images.env"
           tar -C "$release" -czf "$release.tgz" .
           ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$DEPLOY_SSH_USER@$DEPLOY_HOST" "install -d -m 750 '$DEPLOY_PATH/releases/$REF'"
           scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$release.tgz" "$DEPLOY_SSH_USER@$DEPLOY_HOST:$DEPLOY_PATH/releases/$REF/release.tgz"
@@ -179,6 +180,9 @@ jobs:
           trap 'rm -f "$path/.env.release"' EXIT
           compose=(docker compose -p "$project" -f docker-compose.prod.yml --env-file "$path/.env" --env-file "$path/.env.release")
           "${compose[@]}" pull
+          # Pulling immutable artifacts is harmless; no service is created until
+          # the host/TLS/config contract and the image's canonical validator pass.
+          ./scripts/verify_staging_config.sh "$path/.env" "$path/.env.release"
           "${compose[@]}" up -d db redis objectstore objectstore-init
           "${compose[@]}" run --rm migrate
           "${compose[@]}" up -d --no-build --scale api=2 api web lb backup objectstore-backup
@@ -203,3 +207,14 @@ jobs:
           for attempt in $(seq 1 30); do curl --fail --silent --show-error "$STAGING_READINESS_URL" && exit 0; sleep 5; done
           echo "::error::Staging did not become ready. Database rollback is deliberately manual."
           exit 1
+      - name: Run public staging smoke checks
+        env:
+          STAGING_READINESS_URL: ${{ vars.STAGING_READINESS_URL }}
+          STAGING_TERMS_URL: ${{ vars.STAGING_TERMS_URL }}
+          STAGING_PRIVACY_URL: ${{ vars.STAGING_PRIVACY_URL }}
+          STAGING_SMOKE_REQUIRE_LEGAL: "true"
+          STAGING_SMOKE_REQUIRE_INVITE_ONLY: "true"
+        run: |
+          set -euo pipefail
+          base_url="${STAGING_READINESS_URL%/ready}"
+          scripts/staging_smoke.sh "$base_url"
