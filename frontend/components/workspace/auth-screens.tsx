@@ -358,18 +358,23 @@ export function VerifyEmail({ token, done }: { token: string; done: () => void }
   const [state, setState] = useState<"working" | "ok" | "failed">("working"),
     [error, setError] = useState("");
   useEffect(() => {
-    let live = true;
-    api("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) })
-      .then(() => live && setState("ok"))
+    // The confirmation token is single-use: `redeem_auth_token` marks it spent in the
+    // same breath it returns it. StrictMode's dev-only double-invoke of this effect
+    // would therefore redeem it twice, and the second POST would 400 and overwrite
+    // the success the first earned. Aborting the superseded request stops it
+    // reaching the API at all, the same way AdminConsole's loader abandons its own.
+    const controller = new AbortController();
+    api("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }), signal: controller.signal })
+      .then(() => {
+        if (!controller.signal.aborted) setState("ok");
+      })
       .catch((err: any) => {
-        if (live) {
+        if (!controller.signal.aborted) {
           setError(err.message);
           setState("failed");
         }
       });
-    return () => {
-      live = false;
-    };
+    return () => controller.abort();
   }, [token]);
   return (
     <AuthShell title="Confirming your email" subtitle="One moment">
