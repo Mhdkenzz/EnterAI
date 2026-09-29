@@ -446,3 +446,42 @@ def test_inconsistent_mapping_deactivates_the_affected_user():
         "the user behind a cross-org mapping stayed active")
     assert (row[1] or 0) >= 1, (
         "the user behind a cross-org mapping kept its live sessions")
+
+
+def test_0023_downgrade_drops_parent_unique_indexes_not_constraints(monkeypatch):
+    """The 0023 downgrade must emit DROP INDEX for its parent keys.
+
+    PostgreSQL stores ``op.create_index(..., unique=True)`` as a unique index,
+    not a table-level unique constraint. Calling ``drop_constraint`` therefore
+    aborts the transaction instead of removing the object.
+    """
+    module = _load('0023_mapping_org_alignment')
+    bind = object()
+    inspector = type(
+        'Inspector', (), {
+            'get_table_names': lambda self: [
+                'users', 'identity_providers', 'scim_user_mappings'],
+            'get_foreign_keys': lambda self, table: [],
+            'get_indexes': lambda self, table: [{
+                'name': name, 'unique': True,
+            } for name, index_table, _columns in module.PARENT_UNIQUES
+                if index_table == table],
+        })()
+    dropped = []
+
+    class _Ops:
+        def get_bind(self):
+            return bind
+
+        def drop_index(self, name, table_name):
+            dropped.append((name, table_name))
+
+    monkeypatch.setattr(module.sa, 'inspect', lambda current: inspector)
+    monkeypatch.setattr(module, 'op', _Ops())
+
+    module.downgrade()
+
+    assert dropped == [
+        ('uq_users_id_organization', 'users'),
+        ('uq_identity_providers_id_organization', 'identity_providers'),
+    ]

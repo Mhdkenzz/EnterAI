@@ -71,6 +71,16 @@ def _has_unique_on(bind, table, columns) -> bool:
     return False
 
 
+def _has_named_unique_index(bind, table, name) -> bool:
+    """True only when *name* is a unique index, not a unique constraint."""
+    for index in sa.inspect(bind).get_indexes(table):
+        if (index.get("name") == name
+                and bool(index.get("unique"))
+                and not index.get("duplicates_constraint")):
+            return True
+    return False
+
+
 def _mapping_fk_names(bind):
     """{constraint_name: (referred_table, referred_columns)} for the mapping
     table's foreign keys.
@@ -257,9 +267,9 @@ def downgrade():
 
     for name, table, _columns in PARENT_UNIQUES:
         # Dropped only when this migration is the thing that created it; a
-        # same-named object that predates us is left in place.
-        try:
-            with op.batch_alter_table(table) as batch:
-                batch.drop_constraint(name, type_="unique")
-        except Exception:
-            continue
+        # same-named unique constraint that predates us is left in place.
+        # These objects were created with op.create_index, so they must be
+        # removed as indexes. PostgreSQL does not treat a unique index as a
+        # table constraint, and DROP CONSTRAINT aborts the transaction.
+        if _has_named_unique_index(bind, table, name):
+            op.drop_index(name, table_name=table)
