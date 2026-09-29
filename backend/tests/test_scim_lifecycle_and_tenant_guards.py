@@ -29,6 +29,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.database import SessionLocal
 from app.main import app
@@ -251,6 +252,14 @@ def test_get_does_not_return_a_user_from_another_org(scim_client):
         db.refresh(victim)
         # Now move the user into the other org -- the corruption itself.
         victim.organization_id = outsider_org.id
+        if db.bind.dialect.name == 'postgresql':
+            # The composite FK makes this corruption impossible at the database
+            # boundary. Keep the transaction usable after the expected failure.
+            with pytest.raises(IntegrityError):
+                db.commit()
+            db.rollback()
+            assert db.get(User, victim.id).organization_id == scim_client['org_id']
+            return
         db.commit()
 
     response = client.get(f'/scim/v2/Users/{scim_id}', headers=scim)
@@ -279,6 +288,15 @@ def test_list_does_not_return_a_user_from_another_org(scim_client):
             organization_id=scim_client['org_id'], user_id=outsider.id,
             scim_external_id=f'corrupt-{uuid4().hex[:8]}',
             identity_provider_id=scim_client['provider_id'], scim_active=True))
+        if db.bind.dialect.name == 'postgresql':
+            # PostgreSQL rejects a mapping whose user and organization disagree;
+            # verify the failed insert is rolled back rather than weakening the FK.
+            with pytest.raises(IntegrityError):
+                db.commit()
+            db.rollback()
+            assert db.scalar(select(SCIMUserMapping).where(
+                SCIMUserMapping.user_id == outsider.id)) is None
+            return
         db.commit()
 
     listed = client.get('/scim/v2/Users', headers=scim)
