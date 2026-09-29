@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from uuid import uuid4
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import (Boolean, DateTime, ForeignKey, Index, Integer, JSON, String,
+                        Text)
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from .database import Base
@@ -72,6 +73,15 @@ class User(Base):
     anonymized_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     tos_accepted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     tos_version: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # (id, organization_id) unique, so scim_user_mappings' composite
+    # cross-organization foreign key can legally reference it. `id` is already
+    # the primary key so this is trivially true data-wise; declaring it is what
+    # makes the reference legal. An Index rather than a UniqueConstraint,
+    # because SQLite only honours a PRIMARY KEY or UNIQUE INDEX as a foreign
+    # key parent. See alembic/versions/0023_mapping_organization_alignment.py.
+    __table_args__ = (
+        Index("uq_users_id_organization", "id", "organization_id", unique=True),
+    )
 
 class Team(Base):
     __tablename__ = "teams"

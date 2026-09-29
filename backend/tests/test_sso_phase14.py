@@ -14,6 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
+from app import domain_verification
 from app.auth import create_token
 from app.database import SessionLocal
 from app.main import app
@@ -88,17 +89,36 @@ def test_scim_deactivate_removes_user_access(db_session, test_org):
 
 
 def test_scim_create_updates_role_mapping(db_session, test_org):
-    user = scim_create_or_update(db_session, test_org, f"ext-{uuid4().hex[:8]}",
-                                 f"ext2-{uuid4().hex[:8]}@test.local", "Name Two")
-    db_session.commit()
-    assert user.role == "member"
+    # The provider is created first: a mapping can only be written by a live
+    # provider that owns it, so there is no "unconfigured org" state to
+    # provision into (see 0021_scim_provider_ownership.py). The first call
+    # therefore carries no role claim and resolves to the safe "member"
+    # default; the second proves the mapping's own provider's role_mapping_json
+    # is what applies.
+    # The domain is per-test: domain ownership is globally exclusive, so a
+    # fixed name is claimed by whichever test runs first and every later
+    # provider binding it collides. That collision is the invariant working.
+    domain = f"role-{uuid4().hex[:10]}.test.local"
     idp = IdentityProvider(organization_id=test_org, name="Map IdP", protocol="oidc",
-                           role_mapping_json={"admin_group": "admin"})
+                           role_mapping_json={"admin_group": "admin"},
+                           # Provisioning requires a verified domain (see
+                           # app/domain_verification.py). Built directly rather
+                           # than through the admin API here, so the proof of
+                           # control is set explicitly: in production only a
+                           # successful DNS TXT check writes this field.
+                           domain_binding=domain,
+                           domain_verified_at=domain_verification.utcnow())
     db_session.add(idp)
     db_session.commit()
+    user = scim_create_or_update(db_session, test_org, f"ext-{uuid4().hex[:8]}",
+                                 f"ext2-{uuid4().hex[:8]}@{domain}", "Name Two",
+                                 source_provider_id=idp.id)
+    db_session.commit()
+    assert user.role == "member"
     user2 = scim_create_or_update(db_session, test_org, f"ext-{uuid4().hex[:8]}",
-                                  f"ext3-{uuid4().hex[:8]}@test.local", "Name Three",
-                                   role_claim="admin_group", actor_id=None)
+                                  f"ext3-{uuid4().hex[:8]}@{domain}", "Name Three",
+                                  role_claim="admin_group", actor_id=None,
+                                  source_provider_id=idp.id)
     db_session.commit()
     assert user2.role == "admin"
 
@@ -154,18 +174,27 @@ def test_scim_rejects_requests_with_no_token_and_with_a_garbage_token():
         assert c.get('/scim/v2/Users', headers={'Authorization': 'Bearer not-a-real-token'}).status_code == 403
 
 
+def _verified_provider(client, admin_headers, name, role_map=None):
+    """Create a provider with a VERIFIED domain and return (id, scim_headers, domain).
+
+    Domain ownership is enforced in production: a provider may only provision
+    identities inside an email domain it has proven it controls. Tests that
+    exercise SCIM provisioning must therefore use a genuinely verified
+    provider -- the alternative would be weakening the gate, which is the
+    whole point of the control. DNS is mocked, as the real flow requires an
+    administrator to publish a TXT record.
+    """
+    from conftest import make_verified_provider
+    return make_verified_provider(client, admin_headers, name, role_map=role_map)
+
+
 def test_scim_accepts_a_real_issued_service_token_and_stays_org_scoped():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                             json={'name': 'Azure AD', 'protocol': 'oidc'}).json()['id']
-        rotated = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers)
-        assert rotated.status_code == 200
-        scim_token = rotated.json()['scim_token']
-        scim_headers = {'Authorization': f'Bearer {scim_token}'}
+        provider_id, scim_headers, domain = _verified_provider(c, headers, 'Azure AD')
 
         created = c.post('/scim/v2/Users', headers=scim_headers,
-                         json={'userName': f'{uuid4().hex}@example.com', 'displayName': 'New Hire'})
+                         json={'userName': f'{uuid4().hex}@{domain}', 'displayName': 'New Hire'})
         assert created.status_code == 200, created.text
 
         listed = c.get('/scim/v2/Users', headers=scim_headers)
@@ -174,11 +203,8 @@ def test_scim_accepts_a_real_issued_service_token_and_stays_org_scoped():
 
         # A second org's SCIM token must never see the first org's users.
         other_headers, _ = _workspace(c)
-        other_provider_id = c.post('/api/admin/sso/providers', headers=other_headers,
-                                   json={'name': 'Other IdP', 'protocol': 'oidc'}).json()['id']
-        other_token = c.post(f'/api/admin/sso/providers/{other_provider_id}/scim-token',
-                             headers=other_headers).json()['scim_token']
-        other_scim_headers = {'Authorization': f'Bearer {other_token}'}
+        _other_pid, other_scim_headers, _other_domain = _verified_provider(
+            c, other_headers, 'Other IdP')
         other_listed = c.get('/scim/v2/Users', headers=other_scim_headers)
         assert other_listed.json()['totalResults'] == 0
 
@@ -186,15 +212,17 @@ def test_scim_accepts_a_real_issued_service_token_and_stays_org_scoped():
 def test_scim_patch_deactivation_through_the_real_route_kills_the_users_session():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                             json={'name': 'Okta', 'protocol': 'saml'}).json()['id']
-        scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
-        scim_headers = {'Authorization': f'Bearer {scim_token}'}
+        provider_id, scim_headers, domain = _verified_provider(c, headers, 'Okta')
         scim_id = f'ext-{uuid4().hex[:8]}'
         with SessionLocal() as db:
             from app.sso_auth import scim_create_or_update
+            # source_provider_id ties the mapping to this provider, so the
+            # PATCH below -- made with this provider's token -- resolves it.
+            # Without ownership the mapping is invisible to every provider by
+            # design (see 0021_scim_provider_ownership.py).
             user = scim_create_or_update(db, data['organization']['id'], scim_id,
-                                         f'{uuid4().hex}@example.com', 'To Deactivate')
+                                         f'{uuid4().hex}@{domain}', 'To Deactivate',
+                                         source_provider_id=provider_id)
             db.commit()
             user_token = create_token(user)
 
@@ -211,17 +239,17 @@ def test_scim_patch_deactivation_through_the_real_route_kills_the_users_session(
 
 
 def _provisioned_scim_user(c, headers, org_id):
-    provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                         json={'name': 'Okta', 'protocol': 'oidc'}).json()['id']
-    scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
-    scim_headers = {'Authorization': f'Bearer {scim_token}'}
+    provider_id, scim_headers, domain = _verified_provider(c, headers, 'Okta')
     created = c.post('/scim/v2/Users', headers=scim_headers,
-                     json={'userName': f'{uuid4().hex}@example.com', 'displayName': 'Original Name'})
+                     json={'userName': f'{uuid4().hex}@{domain}', 'displayName': 'Original Name'})
     assert created.status_code == 200, created.text
     # scim_create_user (POST) uses userName as the SCIM external id -- the
     # response's "id" field is the real external id to address this user by
     # in subsequent GET/PUT/PATCH calls, not a value the caller invents.
-    return scim_headers, created.json()['id']
+    # The provider's verified domain is returned too: a SCIM rename may only
+    # move an address WITHIN the verified domain, so tests that rewrite
+    # userName need to know what that domain is.
+    return scim_headers, created.json()['id'], domain
 
 
 def test_scim_patch_path_based_single_attribute_replace():
@@ -230,7 +258,7 @@ def test_scim_patch_path_based_single_attribute_replace():
     (value-object-based) -- both must work."""
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id, _domain = _provisioned_scim_user(c, headers, data['organization']['id'])
 
         patched = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
                           json={'Operations': [{'op': 'replace', 'path': 'displayName', 'value': 'Renamed'}]})
@@ -241,28 +269,27 @@ def test_scim_patch_path_based_single_attribute_replace():
 def test_scim_patch_applies_every_operation_in_one_request_not_just_the_first():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id, domain = _provisioned_scim_user(c, headers, data['organization']['id'])
 
         patched = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers, json={'Operations': [
             {'op': 'replace', 'path': 'displayName', 'value': 'Multi Op'},
-            {'op': 'replace', 'path': 'userName', 'value': f'{uuid4().hex}@renamed.example'},
+            {'op': 'replace', 'path': 'userName', 'value': f'{uuid4().hex}@{domain}'},
         ]})
         assert patched.status_code == 200, patched.text
         body = patched.json()
         assert body['displayName'] == 'Multi Op'
-        assert body['userName'].endswith('@renamed.example')
+        # The rename stays inside the provider's verified domain, which is the
+        # only place a SCIM userName may be written.
+        assert body['userName'].endswith(f'@{domain}')
 
 
 def test_scim_patch_updates_role_from_role_mapping():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                             json={'name': 'Okta', 'protocol': 'oidc',
-                                   'role_mapping_json': {'eng-admins': 'admin'}}).json()['id']
-        scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
-        scim_headers = {'Authorization': f'Bearer {scim_token}'}
+        provider_id, scim_headers, domain = _verified_provider(
+            c, headers, 'Okta', role_map={'eng-admins': 'admin'})
         created = c.post('/scim/v2/Users', headers=scim_headers,
-                         json={'userName': f'{uuid4().hex}@example.com', 'displayName': 'Role Test'})
+                         json={'userName': f'{uuid4().hex}@{domain}', 'displayName': 'Role Test'})
         assert created.status_code == 200, created.text
         scim_id = created.json()['id']
 
@@ -280,7 +307,7 @@ def test_scim_patch_updates_role_from_role_mapping():
 def test_scim_patch_reactivation_via_path_based_active_true():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id, _domain = _provisioned_scim_user(c, headers, data['organization']['id'])
         deactivated = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
                               json={'Operations': [{'op': 'replace', 'path': 'active', 'value': False}]})
         assert deactivated.json()['active'] is False
@@ -294,7 +321,7 @@ def test_scim_patch_reactivation_via_path_based_active_true():
 def test_scim_patch_rejects_completely_unrecognized_operations():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id, _domain = _provisioned_scim_user(c, headers, data['organization']['id'])
         response = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
                            json={'Operations': [{'op': 'remove', 'path': 'phoneNumbers'}]})
         assert response.status_code == 400
@@ -303,10 +330,8 @@ def test_scim_patch_rejects_completely_unrecognized_operations():
 def test_scim_patch_404s_for_an_unknown_scim_id():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                             json={'name': 'Okta', 'protocol': 'oidc'}).json()['id']
-        scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
-        response = c.patch('/scim/v2/Users/does-not-exist', headers={'Authorization': f'Bearer {scim_token}'},
+        _pid, scim_headers, _domain = _verified_provider(c, headers, 'Okta')
+        response = c.patch('/scim/v2/Users/does-not-exist', headers=scim_headers,
                            json={'Operations': [{'op': 'replace', 'path': 'active', 'value': False}]})
         assert response.status_code == 404
 
@@ -314,8 +339,22 @@ def test_scim_patch_404s_for_an_unknown_scim_id():
 def test_scim_patch_username_collision_returns_409_not_a_raw_500():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id_a = _provisioned_scim_user(c, headers, data['organization']['id'])
-        _, scim_id_b = _provisioned_scim_user(c, headers, data['organization']['id'])
+        # One provider owning BOTH users: the point of this test is the email
+        # collision, not provider isolation, and a mapping is only reachable by
+        # the provider that owns it (see 0021_scim_provider_ownership.py).
+        # _provisioned_scim_user would create a second, unrelated provider.
+        provider_id, scim_headers, domain = _verified_provider(c, headers, 'Okta')
+
+        created_a = c.post('/scim/v2/Users', headers=scim_headers,
+                           json={'userName': f'{uuid4().hex}@{domain}',
+                                 'displayName': 'A'})
+        assert created_a.status_code == 200, created_a.text
+        scim_id_a = created_a.json()['id']
+        created_b = c.post('/scim/v2/Users', headers=scim_headers,
+                           json={'userName': f'{uuid4().hex}@{domain}',
+                                 'displayName': 'B'})
+        assert created_b.status_code == 200, created_b.text
+        scim_id_b = created_b.json()['id']
 
         # Look up user A's real email so we can try to PATCH user B onto it.
         listed = c.get('/scim/v2/Users', headers=scim_headers).json()['Resources']
