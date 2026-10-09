@@ -9,7 +9,7 @@ pydantic==2.10.3
 email-validator==2.2.0
 redis==8.1.0
 boto3==1.43.97
-PyJWT==2.13.0
+PyJWT==2.14.0
 pwdlib[argon2]==0.2.1
 python-multipart==0.0.32
 # Project brief import: real PDF text extraction.
