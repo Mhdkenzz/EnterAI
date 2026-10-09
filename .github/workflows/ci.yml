@@ -324,7 +324,20 @@ jobs:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
-          exit-code: "1"
+          format: json
+          output: trivy-results.json
+          exit-code: "0"
+      # Fail on the same CRITICAL/HIGH findings, but surface each one as a check
+      # annotation so it is readable from the PR/checks page and the API, not only
+      # from the raw job log.
+      - name: Report Trivy findings
+        run: |
+          jq -r '.Results[]? | .Target as $t
+            | ((.Vulnerabilities[]? | "::error title=\(.Severity) \(.VulnerabilityID)::\($t): \(.PkgName) \(.InstalledVersion) (fixed in \(.FixedVersion // "no fix yet"))"),
+               (.Secrets[]? | "::error title=\(.Severity) secret \(.RuleID)::\($t):\(.StartLine) \(.Title)"))' trivy-results.json | head -50
+          count=$(jq '[.Results[]? | (.Vulnerabilities[]?, .Secrets[]?)] | length' trivy-results.json)
+          echo "Trivy CRITICAL/HIGH findings: $count"
+          test "$count" -eq 0
       - uses: dependency-check/Dependency-Check_Action@75ba02d6183445fe0761d26e836bde58b1560600 # 1.1.0
         with:
           project: EnterAI
