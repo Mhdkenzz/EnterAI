@@ -342,7 +342,15 @@ jobs:
         with:
           project: EnterAI
           path: .
-          format: HTML
+          format: JSON
           # 1.1.0's input is `others`; `args` was never a declared input, so the
           # CVSS gate was silently ignored.
           others: --failOnCVSS 7
+      - name: Report Dependency-Check findings
+        if: always()
+        run: |
+          report=$(ls reports/*.json 2>/dev/null | head -1)
+          [ -n "$report" ] || { echo "::warning::no Dependency-Check JSON report found"; exit 0; }
+          jq -r '.dependencies[]? | .fileName as $f | .vulnerabilities[]?
+            | (.cvssv3.baseScore // .cvssv2.score // 0) as $s | select($s >= 7)
+            | "::error title=CVSS \($s) \(.name)::\($f): \(.description[0:180] | gsub("\n"; " "))"' "$report" | head -50
