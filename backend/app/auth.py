@@ -7,6 +7,7 @@ import jwt
 from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pwdlib import PasswordHash
+from pwdlib.exceptions import UnknownHashError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .database import get_db
@@ -66,7 +67,12 @@ CONFIRMATION_SECRET = hashlib.sha256(f"enterai:copilot-confirmation:v1:{SECRET}"
 
 
 def hash_password(value: str): return password_hash.hash(value)
-def verify_password(value: str, hashed: str): return password_hash.verify(value, hashed)
+def verify_password(value: str, hashed: str):
+    # SSO and SCIM-provisioned accounts have no password and store an empty hash.
+    # pwdlib cannot parse that, so it raises instead of answering "no match".
+    if not hashed: return False
+    try: return password_hash.verify(value, hashed)
+    except UnknownHashError: return False
 def create_token(user: User):
     # `epoch` pins the token to the credentials it was minted under. A password
     # reset bumps the user's epoch, which retires every token issued before it --

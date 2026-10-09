@@ -36,7 +36,7 @@ from .auth import SECRET, create_token
 from .deployment_config import is_deployment_environment
 from .models import User
 from .services import log
-from .sso_auth import resolve_role_mapping
+from .sso_auth import email_in_domain, is_last_active_admin, resolve_role_mapping
 from .sso_models import IdentityProvider, SCIMUserMapping
 
 # Derived from the same JWT_SECRET as everything else in auth.py/copilot.py, so
@@ -285,12 +285,22 @@ def _role_claim(claims: dict) -> str | None:
 def provision_or_update_user(db: Session, idp: IdentityProvider, claims: dict) -> User:
     """Just-in-time provisioning, org-scoped exactly like SCIM: the subject
     claim is namespaced and looked up only within this IdP's organization, so
-    a subject id can never resolve into a different org's user."""
+    a subject id can never resolve into a different org's user.
+
+    A *new* account is only created from an `email` claim the IdP itself marks
+    verified (`email_verified is True`, strictly -- a string "true" or a missing
+    claim is refused) and only for an address at this provider's verified
+    domain_binding or one of its subdomains. users.email is globally unique and
+    login resolves by address alone, so without both checks any org admin could
+    run their own IdP, assert someone else's address, and squat the account. With
+    no email claim at all the long-standing synthesized address is used instead:
+    it embeds the namespaced subject, so it cannot impersonate a real mailbox."""
     subject = claims.get("sub")
     if not subject:
         raise OIDCError("This identity provider's login token had no subject")
     external_id = _OIDC_EXTERNAL_ID_PREFIX + str(subject)
-    email = claims.get("email") or f"{external_id}@{(idp.domain_binding or 'sso.enterai.local')}"
+    email_claim = claims.get("email")
+    email = email_claim or f"{external_id}@{(idp.domain_binding or 'sso.enterai.local')}"
     name = claims.get("name") or claims.get("preferred_username") or email
     role_claim = _role_claim(claims)
 
@@ -306,12 +316,26 @@ def provision_or_update_user(db: Session, idp: IdentityProvider, claims: dict) -
         if role_claim is not None:
             new_role = resolve_role_mapping(idp, role_claim)
             if user.role != new_role:
-                before = user.role
-                user.role = new_role
-                log(db, idp.organization_id, user.id, "user", user.id, "sso_role_updated",
-                    scim_identity_provider_id=idp.id, before=before, after=new_role)
+                if user.role == "admin" and is_last_active_admin(db, user):
+                    # The IdP's group mapping would demote the org's only active
+                    # admin (admin.py refuses the same change). Keep the role, record
+                    # it, and let the login itself proceed.
+                    log(db, idp.organization_id, user.id, "user", user.id, "sso_last_admin_protected",
+                        scim_identity_provider_id=idp.id, before=user.role)
+                else:
+                    before = user.role
+                    user.role = new_role
+                    log(db, idp.organization_id, user.id, "user", user.id, "sso_role_updated",
+                        scim_identity_provider_id=idp.id, before=before, after=new_role)
         mapping.last_synced_at = datetime.now(timezone.utc)
         return user
+
+    if email_claim:
+        email = str(email_claim).strip()
+        if claims.get("email_verified") is not True:
+            raise OIDCError("This identity provider did not confirm the email address on this login")
+        if idp.domain_verified_at is None or not email_in_domain(email, idp.domain_binding):
+            raise OIDCError("This email address is outside the domain verified for this identity provider")
 
     # users.email is a real, deliberate global-uniqueness constraint (login
     # resolves by email alone, with no org disambiguation) -- a claimed email

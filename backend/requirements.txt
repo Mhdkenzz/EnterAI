@@ -26,3 +26,5 @@ stripe==12.3.0
 # Phase 14.2 - OIDC login + at-rest secret encryption (was only a transitive
 # dependency of moto; now used directly by app/secrets_store.py)
 cryptography==50.0.1
+# SSO domain-ownership proof: TXT lookup in app/sso_auth.lookup_txt_records
+dnspython==2.7.0

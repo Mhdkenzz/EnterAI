@@ -8,6 +8,7 @@ previously hid the fact that `alembic upgrade head` never actually created these
 tables on any real database -- every test here passed while every real SSO/SCIM
 endpoint would have 500'd. See alembic/versions/0012_sso_enterprise.py.
 """
+from datetime import datetime, timezone
 from uuid import uuid4
 
 import pytest
@@ -58,6 +59,34 @@ def _member_headers(db_session, org_id):
     return {'Authorization': 'Bearer ' + create_token(user)}
 
 
+def _verified_idp(db, org_id, *, domain=None, role_mapping=None):
+    """An IdP whose domain the org has proven it owns (SCIM only provisions inside
+    a verified domain -- see test_sso_domain_verification.py for the proof flow)."""
+    idp = IdentityProvider(
+        organization_id=org_id, name="Verified IdP", protocol="oidc",
+        domain_binding=domain or f"{uuid4().hex[:12]}.example", domain_verification_token="t",
+        domain_verified_at=datetime.now(timezone.utc).replace(tzinfo=None),
+        role_mapping_json=role_mapping or {},
+    )
+    db.add(idp)
+    db.commit()
+    return idp
+
+
+def _verified_provider(c, headers, *, role_mapping=None, name='Okta'):
+    """Same, through the real admin route; returns (provider_id, domain)."""
+    domain = f'{uuid4().hex}.example'
+    created = c.post('/api/admin/sso/providers', headers=headers,
+                     json={'name': name, 'protocol': 'oidc', 'domain_binding': domain,
+                           'role_mapping_json': role_mapping or {}})
+    assert created.status_code == 200, created.text
+    provider_id = created.json()['id']
+    with SessionLocal() as db:
+        db.get(IdentityProvider, provider_id).domain_verified_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        db.commit()
+    return provider_id, domain
+
+
 def test_identity_provider_strict_org_isolation(db_session, test_org):
     idp = IdentityProvider(
         organization_id=test_org, name="Test IdP", protocol="oidc",
@@ -88,17 +117,14 @@ def test_scim_deactivate_removes_user_access(db_session, test_org):
 
 
 def test_scim_create_updates_role_mapping(db_session, test_org):
+    idp = _verified_idp(db_session, test_org, role_mapping={"admin_group": "admin"})
     user = scim_create_or_update(db_session, test_org, f"ext-{uuid4().hex[:8]}",
-                                 f"ext2-{uuid4().hex[:8]}@test.local", "Name Two")
+                                 f"ext2-{uuid4().hex[:8]}@{idp.domain_binding}", "Name Two", idp=idp)
     db_session.commit()
-    assert user.role == "member"
-    idp = IdentityProvider(organization_id=test_org, name="Map IdP", protocol="oidc",
-                           role_mapping_json={"admin_group": "admin"})
-    db_session.add(idp)
-    db_session.commit()
+    assert user.role == "member"  # no role claim: never escalates beyond member
     user2 = scim_create_or_update(db_session, test_org, f"ext-{uuid4().hex[:8]}",
-                                  f"ext3-{uuid4().hex[:8]}@test.local", "Name Three",
-                                   role_claim="admin_group", actor_id=None)
+                                  f"ext3-{uuid4().hex[:8]}@{idp.domain_binding}", "Name Three",
+                                  role_claim="admin_group", actor_id=None, idp=idp)
     db_session.commit()
     assert user2.role == "admin"
 
@@ -157,15 +183,14 @@ def test_scim_rejects_requests_with_no_token_and_with_a_garbage_token():
 def test_scim_accepts_a_real_issued_service_token_and_stays_org_scoped():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                             json={'name': 'Azure AD', 'protocol': 'oidc'}).json()['id']
+        provider_id, domain = _verified_provider(c, headers, name='Azure AD')
         rotated = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers)
         assert rotated.status_code == 200
         scim_token = rotated.json()['scim_token']
         scim_headers = {'Authorization': f'Bearer {scim_token}'}
 
         created = c.post('/scim/v2/Users', headers=scim_headers,
-                         json={'userName': f'{uuid4().hex}@example.com', 'displayName': 'New Hire'})
+                         json={'userName': f'{uuid4().hex}@{domain}', 'displayName': 'New Hire'})
         assert created.status_code == 200, created.text
 
         listed = c.get('/scim/v2/Users', headers=scim_headers)
@@ -186,15 +211,15 @@ def test_scim_accepts_a_real_issued_service_token_and_stays_org_scoped():
 def test_scim_patch_deactivation_through_the_real_route_kills_the_users_session():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                             json={'name': 'Okta', 'protocol': 'saml'}).json()['id']
+        provider_id, domain = _verified_provider(c, headers)
         scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
         scim_headers = {'Authorization': f'Bearer {scim_token}'}
         scim_id = f'ext-{uuid4().hex[:8]}'
         with SessionLocal() as db:
             from app.sso_auth import scim_create_or_update
             user = scim_create_or_update(db, data['organization']['id'], scim_id,
-                                         f'{uuid4().hex}@example.com', 'To Deactivate')
+                                         f'{uuid4().hex}@{domain}', 'To Deactivate',
+                                         idp=db.get(IdentityProvider, provider_id))
             db.commit()
             user_token = create_token(user)
 
@@ -211,17 +236,16 @@ def test_scim_patch_deactivation_through_the_real_route_kills_the_users_session(
 
 
 def _provisioned_scim_user(c, headers, org_id):
-    provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                         json={'name': 'Okta', 'protocol': 'oidc'}).json()['id']
+    provider_id, domain = _verified_provider(c, headers)
     scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
     scim_headers = {'Authorization': f'Bearer {scim_token}'}
     created = c.post('/scim/v2/Users', headers=scim_headers,
-                     json={'userName': f'{uuid4().hex}@example.com', 'displayName': 'Original Name'})
+                     json={'userName': f'{uuid4().hex}@{domain}', 'displayName': 'Original Name'})
     assert created.status_code == 200, created.text
     # scim_create_user (POST) uses userName as the SCIM external id -- the
     # response's "id" field is the real external id to address this user by
     # in subsequent GET/PUT/PATCH calls, not a value the caller invents.
-    return scim_headers, created.json()['id']
+    return scim_headers, created.json()['id'], domain
 
 
 def test_scim_patch_path_based_single_attribute_replace():
@@ -230,7 +254,7 @@ def test_scim_patch_path_based_single_attribute_replace():
     (value-object-based) -- both must work."""
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id, _domain = _provisioned_scim_user(c, headers, data['organization']['id'])
 
         patched = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
                           json={'Operations': [{'op': 'replace', 'path': 'displayName', 'value': 'Renamed'}]})
@@ -241,28 +265,26 @@ def test_scim_patch_path_based_single_attribute_replace():
 def test_scim_patch_applies_every_operation_in_one_request_not_just_the_first():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id, domain = _provisioned_scim_user(c, headers, data['organization']['id'])
 
         patched = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers, json={'Operations': [
             {'op': 'replace', 'path': 'displayName', 'value': 'Multi Op'},
-            {'op': 'replace', 'path': 'userName', 'value': f'{uuid4().hex}@renamed.example'},
+            {'op': 'replace', 'path': 'userName', 'value': f'{uuid4().hex}@renamed.{domain}'},
         ]})
         assert patched.status_code == 200, patched.text
         body = patched.json()
         assert body['displayName'] == 'Multi Op'
-        assert body['userName'].endswith('@renamed.example')
+        assert body['userName'].endswith(f'@renamed.{domain}')  # a subdomain of the verified domain
 
 
 def test_scim_patch_updates_role_from_role_mapping():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        provider_id = c.post('/api/admin/sso/providers', headers=headers,
-                             json={'name': 'Okta', 'protocol': 'oidc',
-                                   'role_mapping_json': {'eng-admins': 'admin'}}).json()['id']
+        provider_id, domain = _verified_provider(c, headers, role_mapping={'eng-admins': 'admin'})
         scim_token = c.post(f'/api/admin/sso/providers/{provider_id}/scim-token', headers=headers).json()['scim_token']
         scim_headers = {'Authorization': f'Bearer {scim_token}'}
         created = c.post('/scim/v2/Users', headers=scim_headers,
-                         json={'userName': f'{uuid4().hex}@example.com', 'displayName': 'Role Test'})
+                         json={'userName': f'{uuid4().hex}@{domain}', 'displayName': 'Role Test'})
         assert created.status_code == 200, created.text
         scim_id = created.json()['id']
 
@@ -280,7 +302,7 @@ def test_scim_patch_updates_role_from_role_mapping():
 def test_scim_patch_reactivation_via_path_based_active_true():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id, _domain = _provisioned_scim_user(c, headers, data['organization']['id'])
         deactivated = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
                               json={'Operations': [{'op': 'replace', 'path': 'active', 'value': False}]})
         assert deactivated.json()['active'] is False
@@ -294,7 +316,7 @@ def test_scim_patch_reactivation_via_path_based_active_true():
 def test_scim_patch_rejects_completely_unrecognized_operations():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id, _domain = _provisioned_scim_user(c, headers, data['organization']['id'])
         response = c.patch(f'/scim/v2/Users/{scim_id}', headers=scim_headers,
                            json={'Operations': [{'op': 'remove', 'path': 'phoneNumbers'}]})
         assert response.status_code == 400
@@ -314,8 +336,8 @@ def test_scim_patch_404s_for_an_unknown_scim_id():
 def test_scim_patch_username_collision_returns_409_not_a_raw_500():
     with TestClient(app) as c:
         headers, data = _workspace(c)
-        scim_headers, scim_id_a = _provisioned_scim_user(c, headers, data['organization']['id'])
-        _, scim_id_b = _provisioned_scim_user(c, headers, data['organization']['id'])
+        scim_headers, scim_id_a, _domain_a = _provisioned_scim_user(c, headers, data['organization']['id'])
+        _, scim_id_b, _domain_b = _provisioned_scim_user(c, headers, data['organization']['id'])
 
         # Look up user A's real email so we can try to PATCH user B onto it.
         listed = c.get('/scim/v2/Users', headers=scim_headers).json()['Resources']

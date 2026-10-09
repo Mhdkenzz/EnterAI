@@ -166,7 +166,20 @@ def forgot_password(data: EmailOnly, request: Request, db: Session = Depends(get
     enforce(_RECOVERY_LIMITER, request)
     address = normalize(data.email)
     user = db.scalar(select(User).where(func.lower(User.email) == address, User.kind == "human"))
-    if user and user.active:
+    # An empty password_hash marks an identity provisioned by SSO/SCIM: its
+    # credential lives at the organization's IdP. Redeeming a reset link would let
+    # whoever controls the mailbox set a local password and sign in with it,
+    # sidestepping the IdP's MFA, conditional access and offboarding (and
+    # sso_only_enforced, which gates only /login's password check). So no token is
+    # ever issued for them.
+    #
+    # They take the unknown-address branch below, not a silent return: the HTTP reply
+    # is identical either way, and mail still goes out for every request, so neither
+    # the response nor its timing separates "SSO account" from "no account". The
+    # recipient sees the generic "no account here" note -- slightly unhelpful to a
+    # genuine SSO user, but telling them more in an email would let anyone who can
+    # see the inbox (or probe it) learn which addresses are SSO-managed.
+    if user and user.active and user.password_hash:
         raw = issue_auth_token(db, user.id, PASSWORD_RESET, RESET_TTL)
         log(db, user.organization_id, user.id, "user", user.id, "password_reset_requested")
         db.commit()
@@ -185,7 +198,10 @@ def reset_password(data: ResetPassword, request: Request, db: Session = Depends(
     if not token:
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
     user = db.get(User, token.user_id)
-    if not user or not user.active or user.kind != "human":
+    # SSO/SCIM identities (empty password_hash) cannot gain a local password here, even
+    # with a token that predates their conversion or was forged into the table; same
+    # generic error as any other bad token so nothing is revealed. See forgot_password.
+    if not user or not user.active or user.kind != "human" or not user.password_hash:
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
     require_strong_password(data.password, user.email)
     user.password_hash = hash_password(data.password)

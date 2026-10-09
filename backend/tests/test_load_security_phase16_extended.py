@@ -7,7 +7,8 @@ import app.sso_models, app.enterprise_models, app.models
 from app.database import Base
 from app.models import User, Organization, AuditEvent, Activity
 from app.sso_auth import deactivate_scim_user, scim_create_or_update
-from app.sso_models import SCIMUserMapping
+from app.sso_models import IdentityProvider, SCIMUserMapping
+from datetime import datetime
 
 def db_session_fixture():
     pass  # placeholder; actual fixture below
@@ -24,6 +25,15 @@ def db_session():
         session.close()
         Base.metadata.drop_all(engine)
 
+def verified_idp(db, org, domain):
+    """SCIM creates only inside a verified domain (see sso_auth.require_scim_email_allowed)."""
+    idp = IdentityProvider(organization_id=org.id, name=f"IdP {org.id}", protocol="oidc",
+                           domain_binding=domain, domain_verification_token="t",
+                           domain_verified_at=datetime.utcnow())
+    db.add(idp)
+    db.commit()
+    return idp
+
 # --- Spike / sustained load ---
 
 def test_spike_load_scim_create(db_session):
@@ -31,8 +41,9 @@ def test_spike_load_scim_create(db_session):
     org = Organization(id="spike-org-1", name="Spike", slug="spike")
     db_session.add(org)
     db_session.commit()
+    idp = verified_idp(db_session, org, "spike")
     for i in range(100):
-        u = scim_create_or_update(db_session, org.id, f"ext-spike-{i}", f"user{i}@spike", f"Name{i}")
+        u = scim_create_or_update(db_session, org.id, f"ext-spike-{i}", f"user{i}@spike", f"Name{i}", idp=idp)
     # Verify count matches exactly 100 unique external IDs
     mappings = db_session.scalars(select(SCIMUserMapping).where(SCIMUserMapping.organization_id == org.id)).all()
     assert len(mappings) == 100
@@ -54,7 +65,8 @@ def test_scheduler_worker_failure_recovery_simulation(db_session):
     db_session.commit()
     assert user.active is False
     # Reactivate via update
-    scim_create_or_update(db_session, org.id, "fail-ext", "fail@test", "FailUser")
+    idp = verified_idp(db_session, org, "test")
+    scim_create_or_update(db_session, org.id, "fail-ext", "fail@test", "FailUser", idp=idp)
     refreshed = db_session.get(User, user.id)
     assert refreshed.active is True
 
@@ -64,7 +76,11 @@ def test_replay_adversarial_scim_mapping(db_session):
     org2 = Organization(id="adv-org-2", name="Adv2", slug="adv2")
     db_session.add_all([org1, org2])
     db_session.commit()
-    u1 = scim_create_or_update(db_session, org1.id, "adv-ext", "adv@test", "Adv")
+    idp1 = verified_idp(db_session, org1, "test")
+    idp2 = IdentityProvider(organization_id=org2.id, name="IdP org2", protocol="oidc")
+    db_session.add(idp2)
+    db_session.commit()
+    u1 = scim_create_or_update(db_session, org1.id, "adv-ext", "adv@test", "Adv", idp=idp1)
     # Create a fake mapping with cross-org reference by manual insertion to trigger guard
     # Instead, verify the function raises when org doesn't match mapping
     mapping_cross = SCIMUserMapping(organization_id=org2.id, user_id=u1.id, scim_external_id="adv-ext", scim_active=True)
@@ -72,7 +88,7 @@ def test_replay_adversarial_scim_mapping(db_session):
     db_session.commit()
     # Direct function call with wrong org should trigger cross-org guard
     with pytest.raises(Exception):
-        scim_create_or_update(db_session, org2.id, "adv-ext", "adv@test", "Adv")
+        scim_create_or_update(db_session, org2.id, "adv-ext", "adv@test", "Adv", idp=idp2)
 
 # --- Performance targets ---
 

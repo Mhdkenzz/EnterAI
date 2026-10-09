@@ -59,7 +59,12 @@ def test_scim_reactivation(db_session, test_org):
                                scim_external_id=scim_id, scim_active=False)
     db_session.add(mapping)
     db_session.commit()
-    user2 = scim_create_or_update(db_session, test_org, scim_id, user.email, "React User")
+    # An existing mapping is updated, not created, so the domain rule does not apply;
+    # the provider still has to be named (it supplies the role mapping).
+    idp = IdentityProvider(organization_id=test_org, name="React IdP", protocol="oidc")
+    db_session.add(idp)
+    db_session.commit()
+    user2 = scim_create_or_update(db_session, test_org, scim_id, user.email, "React User", idp=idp)
     db_session.commit()
     mapping_refreshed = db_session.scalar(select(SCIMUserMapping).where(
         SCIMUserMapping.scim_external_id == scim_id))

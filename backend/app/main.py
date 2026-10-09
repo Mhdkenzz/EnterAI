@@ -3,7 +3,7 @@ import hashlib
 import re
 import secrets
 from datetime import datetime, timezone, timedelta
-from typing import Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 import jwt
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
@@ -168,12 +168,20 @@ def shutdown():
 # Argon2 in full on every attempt, and names past the column width fail as a 500.
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str = Field(max_length=200)
 class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200); accept_terms: bool = False
-class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
-class ProjectUpdate(BaseModel): name: str | None = None; code: str | None = None; description: str | None = None; status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: str | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
-class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; status: str = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []
-class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
-class CommentIn(BaseModel): body: str = Field(min_length=1)
-class TeamIn(BaseModel): name: str; description: str | None = None
+# Length bounds follow the column widths in models.py (Project.code is 16 wide, Team.name
+# is 120): a value that passes here but overflows its column is a 500 on PostgreSQL.
+COLOR_PATTERN = r"^#[0-9a-fA-F]{6}$"
+# The statuses and priorities the workspace UI, the seed data and the Copilot tool
+# schemas actually use. "blocked" and "urgent" are accepted but nothing sets them yet.
+TaskStatus = Literal["backlog", "todo", "in_progress", "review", "blocked", "done"]
+TaskPriority = Literal["low", "medium", "high", "urgent"]
+Labels = Annotated[list[Annotated[str, Field(max_length=40)]], Field(max_length=20)]
+class ProjectIn(BaseModel): name: str = Field(max_length=160); code: str = Field(max_length=16); description: str | None = Field(default=None, max_length=20000); team_id: str | None = None; health: str = "on_track"; color: str = Field(default="#22c55e", pattern=COLOR_PATTERN); due_date: datetime | None = None; source_document_ids: list[str] = []
+class ProjectUpdate(BaseModel): name: str | None = Field(default=None, max_length=160); code: str | None = Field(default=None, max_length=16); description: str | None = Field(default=None, max_length=20000); status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: str | None = None; color: str | None = Field(default=None, pattern=COLOR_PATTERN); team_id: str | None = None; due_date: datetime | None = None
+class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = Field(default=None, max_length=20000); parent_id: str | None = None; status: TaskStatus = "todo"; priority: TaskPriority = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: Labels = []
+class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = Field(default=None, max_length=20000); status: TaskStatus | None = None; priority: TaskPriority | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: Labels | None = None
+class CommentIn(BaseModel): body: str = Field(min_length=1, max_length=10000)
+class TeamIn(BaseModel): name: str = Field(max_length=120); description: str | None = Field(default=None, max_length=20000)
 class AIRequest(BaseModel): message: str = Field(min_length=1, max_length=4000); project_id: str | None = None
 class ConfirmAction(BaseModel): confirmation_token: str = Field(min_length=20, max_length=10000)
 class AssignAgent(BaseModel): agent_id: str
@@ -352,10 +360,12 @@ def register(data: Register, request: Request, response: Response, db: Session =
 def login(data: SignIn, request: Request, response: Response, db: Session = Depends(get_db)):
     enforce(_LOGIN_LIMITER, request)
     user = db.scalar(select(User).where(func.lower(User.email) == accounts.normalize(data.email)))
-    if not user:
+    if not user or not user.password_hash:
         # Hash anyway. Returning early for an unknown address answers in a fraction
         # of the time a real one takes, which turns the login form into an account
-        # enumeration oracle no matter how generic the message is.
+        # enumeration oracle no matter how generic the message is. SSO and SCIM
+        # accounts have no password hash and take this same path, so they cannot be
+        # told apart from an absent address either.
         verify_password(data.password, _ABSENT_USER_HASH)
         accounts.enforce_account_login_budget(accounts.normalize(data.email))
         raise HTTPException(401,"Incorrect email or password")
@@ -399,7 +409,8 @@ def create_project(data: ProjectIn, user: User = Depends(current_user), db: Sess
     ensure_org_team(db, user, data.team_id)
     name, code = data.name.strip(), data.code.strip().upper()
     if not name or not code: raise HTTPException(422, "Project name and code are required")
-    duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, or_(Project.name.ilike(name), Project.code.ilike(code))))
+    # Exact, case-insensitive match: ilike would read "%" or "_" as wildcards.
+    duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, or_(func.lower(Project.name)==func.lower(name), func.lower(Project.code)==func.lower(code))))
     if duplicate: raise HTTPException(409, "A project with this name or code already exists")
     values=data.model_dump(exclude={"source_document_ids"}); values.update(name=name, code=code)
     p=Project(**values,organization_id=user.organization_id,owner_id=user.id); db.add(p); db.flush()
@@ -413,13 +424,15 @@ def project(project_id: str,user: User=Depends(current_user),db:Session=Depends(
 def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     p = ensure_project(db, user, project_id)
     values = data.model_dump(exclude_unset=True)
-    if "name" in values: values["name"] = values["name"].strip()
-    if "code" in values: values["code"] = values["code"].strip().upper()
+    # An explicit null is "unset this", which a required column cannot be -- the same
+    # 422 as an empty string, not an AttributeError 500 from .strip() on None.
+    if "name" in values: values["name"] = (values["name"] or "").strip()
+    if "code" in values: values["code"] = (values["code"] or "").strip().upper()
     if values.get("name") == "" or values.get("code") == "": raise HTTPException(422, "Project name and code cannot be empty")
     if "team_id" in values: ensure_org_team(db, user, values["team_id"])
     if "status" in values and "archived" in (values["status"], p.status) and values["status"] != p.status:
         require_manager(user)  # archiving hides the project from everyone's portfolio
-    duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, Project.id != p.id, or_(Project.name.ilike(values.get("name", p.name)), Project.code.ilike(values.get("code", p.code)))))
+    duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, Project.id != p.id, or_(func.lower(Project.name)==func.lower(values.get("name", p.name)), func.lower(Project.code)==func.lower(values.get("code", p.code)))))
     if duplicate: raise HTTPException(409, "A project with this name or code already exists")
     for key, value in values.items(): setattr(p, key, value)
     log(db, user.organization_id, user.id, "project", p.id, "updated", fields=list(values)); db.commit(); return project_out(p, db)
