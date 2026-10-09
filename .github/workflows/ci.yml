@@ -338,14 +338,13 @@ jobs:
           count=$(jq '[.Results[]? | (.Vulnerabilities[]?, .Secrets[]?)] | length' trivy-results.json)
           echo "Trivy CRITICAL/HIGH findings: $count"
           test "$count" -eq 0
-      - uses: dependency-check/Dependency-Check_Action@75ba02d6183445fe0761d26e836bde58b1560600 # 1.1.0
+      - uses: dependency-check/Dependency-Check_Action@1e54355a8b4c8abaa8cc7d0b70aa655a3bb15a6c # main as of 2025-12-10 (newer than tag 1.1.0)
         with:
           project: EnterAI
           path: .
           format: JSON
-          # 1.1.0's input is `others`; `args` was never a declared input, so the
-          # CVSS gate was silently ignored.
-          others: --failOnCVSS 7
+          # The base image (owasp/dependency-check-action:latest) is still a moving tag.
+          args: --failOnCVSS 7
       - name: Report Dependency-Check findings
         if: always()
         run: |
