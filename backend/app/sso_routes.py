@@ -135,7 +135,14 @@ def _domain_out(idp: IdentityProvider) -> dict:
 def list_providers(user: User = Depends(human_admin), db: Session = Depends(get_db)):
     validate_org_isolation(db, user, user.organization_id)
     rows = db.scalars(select(IdentityProvider).where(IdentityProvider.organization_id == user.organization_id)).all()
+    # PATCH replaces the whole configuration, so an edit form needs every current
+    # non-secret value to send back. Secrets are never returned: only whether one is
+    # stored (an omitted client_secret on PATCH keeps the stored one).
+    redirect_uri = f'{_api_base_url()}/api/auth/sso/callback'
     return [{'id': r.id, 'name': r.name, 'protocol': r.protocol, **_domain_out(r),
+             'oidc_issuer': r.oidc_issuer, 'client_id': r.client_id,
+             'has_client_secret': bool(r.client_secret_encrypted), 'has_scim_token': bool(r.scim_token_hash),
+             'role_mapping_json': r.role_mapping_json or {}, 'redirect_uri': redirect_uri,
              'sso_only': r.sso_only, 'active': r.active, 'created_at': r.created_at.isoformat() if r.created_at else None} for r in rows]
 
 

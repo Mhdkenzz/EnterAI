@@ -1,0 +1,67 @@
+name: Uptime check
+
+# Minimal alerting until a real monitor is in place: every 10 minutes, check
+# /ready on each configured environment. Two consecutive failures open an issue
+# labelled `outage` (GitHub notifies the repo owner -- turn on push notifications
+# in the GitHub mobile app); recovery comments and closes it. Scheduled runs are
+# best-effort on GitHub's side and can be delayed, so treat this as a backstop.
+# Configure repository variables PRODUCTION_READINESS_URL and/or STAGING_READINESS_URL.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: uptime-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: production
+            url_var: PRODUCTION_READINESS_URL
+          - name: staging
+            url_var: STAGING_READINESS_URL
+    steps:
+      - name: Check readiness and open or close the outage issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENV_NAME: ${{ matrix.name }}
+          URL: ${{ vars[matrix.url_var] }}
+        run: |
+          set -uo pipefail
+          if [ -z "$URL" ]; then echo "::notice::$ENV_NAME readiness URL not configured; skipping"; exit 0; fi
+          ok=false; detail=""
+          for attempt in 1 2; do
+            if detail=$(curl --fail --silent --show-error --max-time 15 "$URL" 2>&1); then ok=true; break; fi
+            sleep 20
+          done
+          title="Outage: $ENV_NAME /ready failing"
+          existing=$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&labels=outage&per_page=50" \
+            --jq ".[] | select(.title == \"$title\") | .number" | head -1)
+          now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          if [ "$ok" = true ]; then
+            if [ -n "$existing" ]; then
+              gh api "repos/$GITHUB_REPOSITORY/issues/$existing/comments" -f body="Recovered at $now: \`$URL\` is ready again." >/dev/null
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$existing" -f state=closed >/dev/null
+              echo "::notice::$ENV_NAME recovered; closed #$existing"
+            fi
+            exit 0
+          fi
+          body=$(printf 'Readiness check failed twice at %s.\n\nURL: `%s`\n\n```\n%s\n```\n\nRunbook: docs/INCIDENT_RESPONSE.md' "$now" "$URL" "${detail:0:1500}")
+          if [ -n "$existing" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/issues/$existing/comments" -f body="$body" >/dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/labels" -f name=outage -f color=d73a4a >/dev/null 2>&1 || true
+            gh api "repos/$GITHUB_REPOSITORY/issues" -f title="$title" -f body="$body" -f "labels[]=outage" >/dev/null
+          fi
+          echo "::error::$ENV_NAME is not ready: $URL"
+          exit 1

@@ -227,3 +227,25 @@ test("admin console is accessible without horizontal overflow", async ({ page, i
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   if (isMobile) await expect(page.getByRole("complementary")).toBeHidden();
 });
+
+test("admin connects an identity provider and is told how to prove the domain", async ({ page, isMobile, workspace }) => {
+  await enter(page, workspace.token);
+  await openAdmin(page, isMobile);
+  const sso = page.getByRole("region", { name: "Single sign-on" });
+  await sso.getByRole("button", { name: "Add identity provider" }).click();
+  const domain = `sso-${Date.now().toString(36)}.example`;
+  await sso.getByLabel("Name", { exact: true }).fill("Okta");
+  await sso.getByLabel("Email domain").fill(domain.toUpperCase());
+  await sso.getByLabel("Issuer URL").fill("https://idp.example/oauth2/default");
+  await sso.getByLabel("Client ID").fill("client-e2e");
+  await sso.getByLabel("Client secret").fill("secret-e2e");
+  await sso.getByRole("button", { name: "Add provider" }).click();
+  await expect(sso.getByRole("status")).toContainText("Publish the DNS record");
+  await expect(sso.getByText(`${domain} · unverified`)).toBeVisible();
+  await expect(sso.getByText(`_enterai-verification.${domain}`)).toBeVisible();
+  await expect(sso.getByText(/^enterai-domain-verification=/)).toBeVisible();
+  // Unverified: SSO cannot be made mandatory yet.
+  await sso.getByRole("button", { name: "Edit" }).click();
+  await expect(sso.getByLabel(/Require SSO for this domain/)).toBeDisabled();
+  await expect(sso.getByLabel("Client secret")).toHaveAttribute("placeholder", /Stored/);
+});

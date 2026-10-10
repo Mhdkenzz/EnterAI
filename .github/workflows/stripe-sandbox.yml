@@ -1,0 +1,64 @@
+name: Stripe sandbox billing check
+
+# Manual: proves the paid lifecycle against Stripe TEST mode end to end (Checkout ->
+# webhooks -> plan + period -> portal -> cancel -> usage refused). Needs the repo
+# secret STRIPE_TEST_SECRET_KEY (sk_test_...); the script refuses live keys.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stripe-sandbox
+  cancel-in-progress: false
+
+jobs:
+  billing-lifecycle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      STRIPE_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}
+      STRIPE_CLI_IMAGE: stripe/stripe-cli:v1.53.1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Require a test-mode key
+        run: |
+          case "$STRIPE_SECRET_KEY" in sk_test_*|rk_test_*) ;; *) echo "::error::Set repo secret STRIPE_TEST_SECRET_KEY to a Stripe TEST key (sk_test_...)"; exit 1;; esac
+      - name: Install
+        run: |
+          pip install -r backend/requirements.txt playwright==1.55.0
+          python -m playwright install --with-deps chromium
+          docker pull "$STRIPE_CLI_IMAGE"
+      - name: Prepare test-mode price and portal
+        run: echo "BILLING_PLANS=$(python scripts/stripe_sandbox_e2e.py setup)" >> "$GITHUB_ENV"
+      - name: Start webhook forwarding and the API
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          secret=$(docker run --rm "$STRIPE_CLI_IMAGE" listen --api-key "$STRIPE_SECRET_KEY" --print-secret)
+          echo "::add-mask::$secret"
+          docker run -d --name stripe-listen --network host "$STRIPE_CLI_IMAGE" listen --api-key "$STRIPE_SECRET_KEY" \
+            --events checkout.session.completed,customer.subscription.created,customer.subscription.updated,customer.subscription.deleted \
+            --forward-to http://127.0.0.1:8000/webhooks/stripe
+          export STRIPE_WEBHOOK_SECRET="$secret" DATABASE_URL=sqlite:////tmp/stripe-sandbox.db ENVIRONMENT=ci \
+            JWT_SECRET=ci-only-secret AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=1000 PYTHONPATH=.
+          alembic upgrade head
+          uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/stripe-sandbox-api.log 2>&1 &
+          for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/live && break || sleep 1; done
+      - name: Run the billing lifecycle
+        run: python scripts/stripe_sandbox_e2e.py run
+      - name: Diagnostics
+        if: failure()
+        run: |
+          echo "--- API log (tail)"; tail -80 /tmp/stripe-sandbox-api.log || true
+          echo "--- Stripe CLI log (tail)"; docker logs stripe-listen 2>&1 | tail -40 || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: failure()
+        with:
+          name: stripe-checkout-failure
+          path: stripe-checkout-failure.png
+          if-no-files-found: ignore
