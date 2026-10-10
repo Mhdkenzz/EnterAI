@@ -354,12 +354,25 @@ export function ResetPassword({ token, done }: { token: string; done: () => void
     </AuthShell>
   );
 }
+// Verification tokens are single-use. React runs effects twice in development
+// (StrictMode), and a remount would do the same: without this, the second request
+// finds the token already redeemed and the screen reports a valid link as expired.
+// One request per token, shared by every effect run that asks for it.
+const verifyRequests = new Map<string, Promise<unknown>>();
+function verifyEmailOnce(token: string) {
+  let request = verifyRequests.get(token);
+  if (!request) {
+    request = api("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) });
+    verifyRequests.set(token, request);
+  }
+  return request;
+}
 export function VerifyEmail({ token, done }: { token: string; done: () => void }) {
   const [state, setState] = useState<"working" | "ok" | "failed">("working"),
     [error, setError] = useState("");
   useEffect(() => {
     let live = true;
-    api("/auth/verify-email", { method: "POST", body: JSON.stringify({ token }) })
+    verifyEmailOnce(token)
       .then(() => live && setState("ok"))
       .catch((err: any) => {
         if (live) {

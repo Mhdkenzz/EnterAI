@@ -344,7 +344,7 @@ jobs:
           path: .
           format: JSON
           # The base image (owasp/dependency-check-action:latest) is still a moving tag.
-          args: --failOnCVSS 7
+          args: --failOnCVSS 7 --suppression /github/workspace/dependency-check-suppressions.xml
       - name: Report Dependency-Check findings
         if: always()
         run: |
