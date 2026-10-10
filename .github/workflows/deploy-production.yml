@@ -1,0 +1,200 @@
+name: Guarded Production Deploy
+
+# Manual-only, like staging, with extra gates a customer-facing release needs:
+#   - the SHA must already be on main and have a fully green "Enter AI CI" run;
+#   - every job runs in the `production` GitHub environment, so the environment's
+#     required reviewers (configure them in Settings -> Environments) must approve;
+#   - the database is backed up, and the backup verified, before migrations run;
+#   - the scheduled backup services are started with the release, not left to a
+#     manual `docker compose up -d`.
+# Deploy the same SHA to staging first and check it there. The frontend is rebuilt
+# for production because its public URLs are compiled into the browser bundle.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Exact commit SHA on main to release (already verified on staging)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: enterai-production-release
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      ref: ${{ steps.ref.outputs.ref }}
+    steps:
+      - id: ref
+        env:
+          REQUESTED_REF: ${{ inputs.ref }}
+          IMAGE_REGISTRY: ${{ secrets.IMAGE_REGISTRY }}
+          IMAGE_REPOSITORY: ${{ secrets.IMAGE_REPOSITORY }}
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          PRODUCTION_PUBLIC_API_URL: ${{ vars.PRODUCTION_PUBLIC_API_URL }}
+          PRODUCTION_READINESS_URL: ${{ vars.PRODUCTION_READINESS_URL }}
+          PRODUCTION_TERMS_URL: ${{ vars.PRODUCTION_TERMS_URL }}
+          PRODUCTION_PRIVACY_URL: ${{ vars.PRODUCTION_PRIVACY_URL }}
+        run: |
+          set -euo pipefail
+          for name in IMAGE_REGISTRY IMAGE_REPOSITORY REGISTRY_USERNAME REGISTRY_PASSWORD DEPLOY_HOST DEPLOY_SSH_USER DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS DEPLOY_PATH PRODUCTION_PUBLIC_API_URL PRODUCTION_READINESS_URL PRODUCTION_TERMS_URL PRODUCTION_PRIVACY_URL; do
+            test -n "${!name}" || { echo "::error::Required production setting $name is unset"; exit 1; }
+          done
+          for name in PRODUCTION_PUBLIC_API_URL PRODUCTION_READINESS_URL PRODUCTION_TERMS_URL PRODUCTION_PRIVACY_URL; do
+            case "${!name}" in https://*) ;; *) echo "::error::$name must use HTTPS"; exit 1;; esac
+          done
+          case "$DEPLOY_PATH" in /*[!A-Za-z0-9._/-]*|/|"") echo "::error::DEPLOY_PATH must be a safe absolute path"; exit 1;; esac
+          ref="$REQUESTED_REF"
+          case "$ref" in *[!0-9a-f]*) echo "::error::ref must be a full lowercase SHA"; exit 1;; esac
+          test "${#ref}" = 40 || { echo "::error::ref must be a full 40-character SHA"; exit 1; }
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: Require the SHA to be on main
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          git cat-file -e "$REF^{commit}" 2>/dev/null || { echo "::error::$REF is not a commit in this repository"; exit 1; }
+          git merge-base --is-ancestor "$REF" origin/main || { echo "::error::$REF is not on main; merge it first"; exit 1; }
+      - name: Require a green CI run for the SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          set -euo pipefail
+          conclusion=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=$REF&status=completed&per_page=20" \
+            --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
+          test "$conclusion" -gt 0 || { echo "::error::No successful Enter AI CI run for $REF"; exit 1; }
+
+  build-and-push:
+    needs: preflight
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      backend_image: ${{ steps.images.outputs.backend_image }}
+      frontend_image: ${{ steps.images.outputs.frontend_image }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ${{ secrets.IMAGE_REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+      - name: Build and publish exact-SHA production images
+        id: images
+        env:
+          REGISTRY: ${{ secrets.IMAGE_REGISTRY }}
+          REPOSITORY: ${{ secrets.IMAGE_REPOSITORY }}
+          REF: ${{ needs.preflight.outputs.ref }}
+          NEXT_PUBLIC_API_URL: ${{ vars.PRODUCTION_PUBLIC_API_URL }}
+          NEXT_PUBLIC_TERMS_URL: ${{ vars.PRODUCTION_TERMS_URL }}
+          NEXT_PUBLIC_PRIVACY_URL: ${{ vars.PRODUCTION_PRIVACY_URL }}
+        run: |
+          set -euo pipefail
+          backend="$REGISTRY/$REPOSITORY/backend:prod-sha-$REF"
+          frontend="$REGISTRY/$REPOSITORY/frontend:prod-sha-$REF"
+          docker buildx build --push --metadata-file backend.json --tag "$backend" ./backend
+          docker buildx build --push --metadata-file frontend.json --tag "$frontend" \
+            --build-arg BUILD_ENVIRONMENT=production \
+            --build-arg NEXT_PUBLIC_API_URL="$NEXT_PUBLIC_API_URL" \
+            --build-arg NEXT_PUBLIC_TERMS_URL="$NEXT_PUBLIC_TERMS_URL" \
+            --build-arg NEXT_PUBLIC_PRIVACY_URL="$NEXT_PUBLIC_PRIVACY_URL" \
+            ./frontend
+          backend_digest=$(jq -r '."containerimage.digest"' backend.json)
+          frontend_digest=$(jq -r '."containerimage.digest"' frontend.json)
+          test "$backend_digest" != null && test "$frontend_digest" != null
+          echo "backend_image=$REGISTRY/$REPOSITORY/backend@$backend_digest" >> "$GITHUB_OUTPUT"
+          echo "frontend_image=$REGISTRY/$REPOSITORY/frontend@$frontend_digest" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [preflight, build-and-push]
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+      - name: Pin SSH host key
+        env:
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key ~/.ssh/known_hosts
+      - name: Upload reviewed deployment bundle and immutable image references
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          REF: ${{ needs.preflight.outputs.ref }}
+          BACKEND_IMAGE: ${{ needs.build-and-push.outputs.backend_image }}
+          FRONTEND_IMAGE: ${{ needs.build-and-push.outputs.frontend_image }}
+        run: |
+          set -euo pipefail
+          release="release-$REF"
+          mkdir "$release"
+          cp docker-compose.prod.yml "$release/"
+          mkdir "$release/deploy" "$release/scripts"
+          cp deploy/nginx.conf "$release/deploy/"
+          cp scripts/backup.sh "$release/scripts/"
+          printf 'ENTERAI_BACKEND_IMAGE=%s\nENTERAI_FRONTEND_IMAGE=%s\n' "$BACKEND_IMAGE" "$FRONTEND_IMAGE" > "$release/images.env"
+          tar -C "$release" -czf "$release.tgz" .
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$DEPLOY_SSH_USER@$DEPLOY_HOST" "install -d -m 750 '$DEPLOY_PATH/releases/$REF'"
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$release.tgz" "$DEPLOY_SSH_USER@$DEPLOY_HOST:$DEPLOY_PATH/releases/$REF/release.tgz"
+      - name: Back up, migrate once, then start replicas and backup services
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_SSH_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          REF: ${{ needs.preflight.outputs.ref }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes "$DEPLOY_SSH_USER@$DEPLOY_HOST" "sh -s -- '$DEPLOY_PATH' '$REF'" <<'REMOTE'
+          set -euo pipefail
+          path=$1; ref=$2; release="$path/releases/$ref"
+          tar -xzf "$release/release.tgz" -C "$release"
+          cd "$release"
+          test -r "$path/.env" || { echo 'missing host .env' >&2; exit 1; }
+          grep -q '^ENVIRONMENT=production$' "$path/.env" || { echo 'host .env must set ENVIRONMENT=production' >&2; exit 1; }
+          cp images.env "$path/.env.release"
+          trap 'rm -f "$path/.env.release"' EXIT
+          dc() { docker compose --env-file "$path/.env" --env-file "$path/.env.release" "$@"; }
+          dc pull
+          dc up -d db redis objectstore objectstore-init
+          # A verified dump before any schema change: the rollback point if this
+          # release's migration has to be undone by hand.
+          dc run --rm --entrypoint sh backup /backup.sh
+          dc run --rm migrate
+          dc up -d --no-build --scale api=2 api web lb backup objectstore-backup
+          test "$(dc ps -q api | wc -l)" = 2
+          REMOTE
+      - name: Verify externally reachable readiness
+        env:
+          PRODUCTION_READINESS_URL: ${{ vars.PRODUCTION_READINESS_URL }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 30); do curl --fail --silent --show-error "$PRODUCTION_READINESS_URL" && exit 0; sleep 5; done
+          echo "::error::Production did not become ready. Restore from the pre-migration backup per docs/RESTORE_RUNBOOK.md if the migration must be undone."
+          exit 1

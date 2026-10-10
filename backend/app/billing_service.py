@@ -264,6 +264,25 @@ class BillingService:
         log.info("Processed webhook %s: %s", event.id, event.type)
         return {"status": "processed", "event_id": event.id, "type": event.type}
 
+    def _sync_subscription_after_checkout(self, subscription_id: str | None) -> None:
+        """Stripe does not order webhook deliveries: customer.subscription.created
+        often lands before checkout.session.completed, finds no organization linked
+        to that customer yet, and is skipped. Nothing else is guaranteed to follow,
+        so the workspace would be active with no plan (unmetered) and no period.
+        Once checkout has linked the customer, read the subscription itself and
+        apply it as if its own event had just arrived. Best effort: the workspace is
+        already active, and any later subscription event corrects it again."""
+        if not subscription_id or not self.stripe_key:
+            return
+        try:
+            subscription = self._stripe().Subscription.retrieve(subscription_id)
+            data = subscription.to_dict() if hasattr(subscription, "to_dict") else dict(subscription)
+        except Exception as error:  # network or Stripe-side failure; never fail the webhook
+            log.warning("Could not fetch subscription %s after checkout: %s", subscription_id, error)
+            return
+        self.db.flush()  # the customer/subscription link above must be visible to the lookup
+        self._apply_subscription_event("customer.subscription.updated", data)
+
     def _apply_subscription_event(self, event_type: str, obj: dict) -> None:
         """Update local subscription state from the Stripe event that just arrived.
         This is the only place OrganizationSubscription rows change status outside
@@ -293,6 +312,7 @@ class BillingService:
             if obj.get("subscription"):
                 sub.stripe_subscription_id = obj["subscription"]
             sub.status = "active"
+            self._sync_subscription_after_checkout(obj.get("subscription"))
             return
 
         if not event_type.startswith("customer.subscription."):
@@ -320,9 +340,13 @@ class BillingService:
         stripe_status = obj.get("status")
         if stripe_status:
             sub.status = "canceled" if event_type == "customer.subscription.deleted" else stripe_status
-        period_start = _from_unix(obj.get("current_period_start"))
-        period_end = _from_unix(obj.get("current_period_end"))
-        price_id = ((((obj.get("items") or {}).get("data") or [{}])[0].get("price") or {}).get("id"))
+        first_item = (((obj.get("items") or {}).get("data") or [{}])[0]) or {}
+        # Stripe API 2025-03-31 ("basil", what the pinned stripe-python 12 speaks)
+        # moved the billing period from the subscription onto its items. Read the
+        # item's when the subscription has none, so both API versions work.
+        period_start = _from_unix(obj.get("current_period_start") or first_item.get("current_period_start"))
+        period_end = _from_unix(obj.get("current_period_end") or first_item.get("current_period_end"))
+        price_id = (first_item.get("price") or {}).get("id")
         if price_id:
             from .billing_models import BillingPlan
             plan = self.db.scalar(select(BillingPlan).where(BillingPlan.stripe_plan_id == price_id))

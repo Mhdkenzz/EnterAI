@@ -301,3 +301,19 @@ def test_the_database_allows_only_one_verified_provider_per_domain():
         with pytest.raises(IntegrityError):
             db.commit()
         db.rollback()
+
+
+def test_list_returns_every_editable_field_but_never_a_secret():
+    """PATCH is a full replace, so the admin UI round-trips what list returns."""
+    with TestClient(app) as client:
+        headers, _ = _workspace(client)
+        _create(client, headers, f'list-{uuid4().hex[:8]}.example',
+                oidc_issuer='https://idp.example/oauth2/default', client_id='client-abc',
+                client_secret='very-secret-value', role_mapping_json={'Admins': 'admin'})
+        listed = client.get('/api/admin/sso/providers', headers=headers).json()[0]
+        assert listed['oidc_issuer'] == 'https://idp.example/oauth2/default'
+        assert listed['client_id'] == 'client-abc'
+        assert listed['role_mapping_json'] == {'Admins': 'admin'}
+        assert listed['has_client_secret'] is True and listed['has_scim_token'] is False
+        assert listed['redirect_uri'].endswith('/api/auth/sso/callback')
+        assert 'very-secret-value' not in str(listed) and 'client_secret' not in listed

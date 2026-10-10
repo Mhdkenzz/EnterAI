@@ -53,3 +53,50 @@ serves both from one host), or signed-in requests will not carry the session.
 Docker Compose can start two replicas but is not Kubernetes: it cannot guarantee
 zero-downtime rolling replacement. The workflow proves migration then both running
 replicas and readiness; schedule maintenance capacity and test failure recovery.
+
+## Production (`Guarded Production Deploy`)
+
+Manual-only, same bundle and digest model as staging, plus:
+
+- **Gates.** The SHA must be on `main`, with a successful `Enter AI CI` run. Every
+  job runs in the `production` GitHub environment, so add yourself as a
+  *required reviewer* under Settings → Environments → production. Every release
+  then waits for your approval.
+- **Backup first.** The deploy takes a verified `pg_dump` (`scripts/backup.sh`)
+  immediately before `alembic upgrade`. That dump is the rollback point for a bad
+  migration (see [INCIDENT_RESPONSE.md](INCIDENT_RESPONSE.md)).
+- **Backups keep running.** The deploy starts `backup` and `objectstore-backup`
+  with the release.
+- **Frontend rebuilt for production.** The public API URL and legal-page URLs are
+  compiled into the browser bundle.
+
+Production environment secrets have the same names as staging:
+`IMAGE_REGISTRY`, `IMAGE_REPOSITORY`, `REGISTRY_USERNAME`, `REGISTRY_PASSWORD`,
+`DEPLOY_HOST`, `DEPLOY_SSH_USER`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`,
+`DEPLOY_PATH`. Use a separate host and credentials.
+
+Production environment variables, all HTTPS:
+
+- `PRODUCTION_PUBLIC_API_URL`, e.g. `https://api.yourdomain.com/api`
+- `PRODUCTION_READINESS_URL`, e.g. `https://api.yourdomain.com/ready`
+- `PRODUCTION_TERMS_URL`
+- `PRODUCTION_PRIVACY_URL`
+
+The host's `$DEPLOY_PATH/.env` must set `ENVIRONMENT=production` and everything
+`deployment_config.py` requires: `DATABASE_URL`, `JWT_SECRET`, `REDIS_URL`,
+`APP_BASE_URL`, `API_BASE_URL`, `CORS_ALLOWED_ORIGINS`, `TRUSTED_HOSTS`,
+`SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, SMTP settings, storage keys,
+`STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `BILLING_PLANS` and
+`SECRETS_ENCRYPTION_KEY`. Startup refuses unsafe values.
+
+Release order: merge to `main` → CI green → `Guarded Staging Deploy` with the SHA
+→ check staging → `Guarded Production Deploy` with the same SHA → approve.
+
+## Monitoring and billing checks
+
+- **`Uptime check`** runs every 10 minutes once merged to `main`. It reads
+  `PRODUCTION_READINESS_URL` / `STAGING_READINESS_URL` from repository variables,
+  and two consecutive failures open an `outage` issue.
+- **`Stripe sandbox billing check`** runs manually. It needs the repository secret
+  `STRIPE_TEST_SECRET_KEY` (a test-mode key only). It runs the paid lifecycle
+  against Stripe test mode end to end.

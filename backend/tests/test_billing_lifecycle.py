@@ -164,3 +164,64 @@ def test_members_cannot_see_billing():
         _headers, account = workspace(c)
         _member_id, member_headers = identity(account["organization"]["id"], "member")
         assert c.get("/api/billing", headers=member_headers).status_code == 403
+
+
+def test_basil_api_billing_period_is_read_from_the_subscription_item(db_session, org):
+    """stripe-python 12 speaks API 2025-03-31+, where current_period_* live on items."""
+    plan = BillingPlan(name="Team", stripe_plan_id="price_basil", ai_usage_limit=10)
+    db_session.add(plan)
+    sub = OrganizationSubscription(organization_id=org.id, status="active", stripe_customer_id="cus_basil")
+    db_session.add(sub); db_session.flush()
+    BillingService(db_session)._apply_subscription_event("customer.subscription.updated", {
+        "id": "sub_basil", "customer": "cus_basil", "status": "active",
+        "items": {"data": [{"price": {"id": "price_basil"},
+                            "current_period_start": 1_790_000_000, "current_period_end": 1_792_592_000}]}})
+    assert sub.plan_id == plan.id
+    assert sub.current_period_start is not None and sub.current_period_end is not None
+    assert sub.current_period_end > sub.current_period_start
+
+
+def test_checkout_completion_applies_the_subscription_even_if_its_own_event_came_first(db_session, org, monkeypatch):
+    plan = BillingPlan(name="Team", stripe_plan_id="price_race", ai_usage_limit=10)
+    db_session.add(plan)
+    sub = ensure_trial_subscription(db_session, org.id)
+    db_session.flush()
+    service = BillingService(db_session)
+    stripe_subscription = {"id": "sub_race", "customer": "cus_race", "status": "active",
+                           "items": {"data": [{"price": {"id": "price_race"},
+                                               "current_period_start": 1_790_000_000,
+                                               "current_period_end": 1_792_592_000}]}}
+    # customer.subscription.created arrives first: no org is linked to cus_race yet.
+    service._apply_subscription_event("customer.subscription.created", stripe_subscription)
+    assert sub.plan_id is None
+
+    class FakeStripe:
+        class Subscription:
+            @staticmethod
+            def retrieve(subscription_id):
+                assert subscription_id == "sub_race"
+                return SimpleNamespace(to_dict=lambda: stripe_subscription)
+
+    service.stripe_key = "sk_test_fake"
+    monkeypatch.setattr(BillingService, "_stripe", lambda self: FakeStripe)
+    service._apply_subscription_event("checkout.session.completed", {
+        "client_reference_id": org.id, "customer": "cus_race", "subscription": "sub_race"})
+    assert sub.status == "active" and sub.plan_id == plan.id
+    assert sub.stripe_subscription_id == "sub_race" and sub.current_period_end is not None
+
+
+def test_checkout_completion_survives_a_stripe_outage(db_session, org, monkeypatch):
+    ensure_trial_subscription(db_session, org.id); db_session.flush()
+    service = BillingService(db_session)
+    service.stripe_key = "sk_test_fake"
+
+    class DownStripe:
+        class Subscription:
+            @staticmethod
+            def retrieve(subscription_id):
+                raise RuntimeError("stripe unreachable")
+
+    monkeypatch.setattr(BillingService, "_stripe", lambda self: DownStripe)
+    service._apply_subscription_event("checkout.session.completed", {
+        "client_reference_id": org.id, "customer": "cus_down", "subscription": "sub_down"})
+    assert service.subscription(org.id).status == "active"

@@ -307,8 +307,14 @@ jobs:
         run: |
           bash -n scripts/backup.sh scripts/verify_restore.sh
           docker run --rm -v "$PWD:/work:ro" --entrypoint shellcheck koalaman/shellcheck-alpine:stable /work/scripts/backup.sh /work/scripts/verify_restore.sh
-          ! grep -En '^[^#]*(up -d --build|StrictHostKeyChecking=accept-new|:latest)' .github/workflows/deploy.yml docker-compose.prod.yml
-          grep -En 'sha-\$REF|containerimage.digest|ENTERAI_BACKEND_IMAGE|ENTERAI_FRONTEND_IMAGE' .github/workflows/deploy.yml
+          ! grep -En '^[^#]*(up -d --build|StrictHostKeyChecking=accept-new|:latest)' .github/workflows/deploy.yml .github/workflows/deploy-production.yml docker-compose.prod.yml
+          for workflow in .github/workflows/deploy.yml .github/workflows/deploy-production.yml; do
+            grep -En 'sha-\$REF|containerimage.digest|ENTERAI_BACKEND_IMAGE|ENTERAI_FRONTEND_IMAGE' "$workflow"
+          done
+          # Production must back up before migrating and must gate on main + green CI.
+          grep -q 'run --rm --entrypoint sh backup /backup.sh' .github/workflows/deploy-production.yml
+          grep -q 'merge-base --is-ancestor' .github/workflows/deploy-production.yml
+          grep -q 'environment: production' .github/workflows/deploy-production.yml
 
   security-scans:
     runs-on: ubuntu-latest
