@@ -221,7 +221,10 @@ with SessionLocal() as db:
 test("auth screens have no serious accessibility violations", async ({ page }) => {
   for (const path of ["/", `/?reset=${rawToken()}`, `/?invite=${rawToken()}`]) {
     await page.goto(path);
-    await page.waitForLoadState("networkidle");
+    // Not "networkidle": the Next dev server CI runs against keeps connections open,
+    // so the network never goes quiet. Wait for the screen itself instead.
+    await page.waitForLoadState("load");
+    await expect(page.getByRole("heading").first()).toBeVisible();
     const results = await new AxeBuilder({ page }).analyze();
     const serious = results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
     expect(serious, `${path}: ${serious.map((v) => v.id).join(", ")}`).toEqual([]);
@@ -232,7 +235,10 @@ test("auth screens fit a phone without horizontal overflow", async ({ page }) =>
   await page.setViewportSize({ width: 360, height: 780 });
   for (const path of ["/", `/?invite=${rawToken()}`]) {
     await page.goto(path);
-    await page.waitForLoadState("networkidle");
+    // Not "networkidle": the Next dev server CI runs against keeps connections open,
+    // so the network never goes quiet. Wait for the screen itself instead.
+    await page.waitForLoadState("load");
+    await expect(page.getByRole("heading").first()).toBeVisible();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow, `${path} overflows by ${overflow}px`).toBeLessThanOrEqual(1);
   }
