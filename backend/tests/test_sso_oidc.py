@@ -58,6 +58,8 @@ class FakeIdP:
         # every other test in the suite, so a fixed literal email would
         # collide across test functions exactly like it would in production
         # if two people really did share an address.
+        # (_org_and_idp re-points this at the organization's verified domain: a new
+        # account is only provisioned for an address inside that domain.)
         self.default_email = f"employee-{secrets.token_hex(6)}@fakeidp.example"
         self.next_claims_override: dict | None = None
         # /jwks always serves self.private_key's public component; a test that
@@ -114,7 +116,7 @@ class FakeIdP:
             now = datetime.now(timezone.utc)
             claims = {
                 "iss": self.base_url, "aud": client_id, "sub": "fake-idp-subject-42",
-                "email": self.default_email, "name": "Fake IdP Employee",
+                "email": self.default_email, "email_verified": True, "name": "Fake IdP Employee",
                 "nonce": session["nonce"], "iat": int(now.timestamp()),
                 "exp": int((now + timedelta(minutes=5)).timestamp()),
             }
@@ -176,9 +178,16 @@ def db_session():
         session.close()
 
 
-def _org_and_idp(db_session, fake_idp, *, domain=None, role_mapping=None):
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+def _org_and_idp(db_session, fake_idp, *, domain=None, role_mapping=None, verified=True):
     key = uuid4().hex[:12]
     domain = domain or f"{key}.example"
+    # Provisioning only accepts addresses inside the provider's verified domain, so
+    # the fake IdP's default employee lives there.
+    fake_idp.default_email = f"employee-{key}@{domain}"
     org = Organization(name=f"OIDC Org {key}", slug=f"oidc-org-{key}")
     db_session.add(org)
     db_session.flush()
@@ -186,6 +195,9 @@ def _org_and_idp(db_session, fake_idp, *, domain=None, role_mapping=None):
         organization_id=org.id, name="Fake IdP", protocol="oidc",
         client_id="test-client-id", client_secret_encrypted=secrets_store.encrypt(fake_idp.client_secret),
         oidc_issuer=fake_idp.base_url, domain_binding=domain, active=True,
+        # Domain ownership is proven out of band (DNS TXT, see test_sso_domain_verification.py);
+        # login only routes to verified domains.
+        domain_verification_token="test-token", domain_verified_at=_utcnow() if verified else None,
         role_mapping_json=role_mapping or {},
     )
     db_session.add(idp)
@@ -331,13 +343,13 @@ def test_two_orgs_logins_stay_isolated_even_via_the_same_fake_idp(db_session, fa
     # users.email is a genuine, deliberate global-uniqueness constraint (login
     # resolves by email alone), so this is not an artificial test
     # restriction, it is the realistic shape of "two orgs, same fake IdP".
-    fake_idp.next_claims_override = {"email": f"person-a-{uuid4().hex[:8]}@fakeidp.example"}
+    fake_idp.next_claims_override = {"email": f"person-a-{uuid4().hex[:8]}@{idp_a.domain_binding}"}
     url_a = sso_oidc.build_authorization_url(db_session, idp_a, redirect_uri)
     db_session.commit()
     code_a, state_a = _drive_full_login(fake_idp, redirect_uri, url_a)
     user_a, _ = sso_oidc.handle_callback(db_session, code=code_a, state=state_a, idp_error=None)
 
-    fake_idp.next_claims_override = {"email": f"person-b-{uuid4().hex[:8]}@fakeidp.example"}
+    fake_idp.next_claims_override = {"email": f"person-b-{uuid4().hex[:8]}@{idp_b.domain_binding}"}
     url_b = sso_oidc.build_authorization_url(db_session, idp_b, redirect_uri)
     db_session.commit()
     code_b, state_b = _drive_full_login(fake_idp, redirect_uri, url_b)
@@ -435,3 +447,132 @@ def test_deployments_accept_public_https_idp_urls_and_can_opt_into_private_ones(
 def test_the_oidc_client_never_follows_redirects():
     with sso_oidc._http_client() as client:
         assert client.follow_redirects is False
+
+
+# --------------------------------------------------------------------------- #
+# Provisioning guards: verified email + verified domain, last-admin protection.
+# These drive provision_or_update_user directly -- no network is involved.
+# --------------------------------------------------------------------------- #
+
+def _bare_org_idp(db, *, domain=None, verified=True, role_mapping=None):
+    key = uuid4().hex[:12]
+    domain = domain or f"{key}.example"
+    org = Organization(name=f"Bare OIDC Org {key}", slug=f"bare-oidc-{key}")
+    db.add(org)
+    db.flush()
+    idp = IdentityProvider(
+        organization_id=org.id, name="Bare IdP", protocol="oidc", oidc_issuer="https://idp.invalid",
+        domain_binding=domain, domain_verification_token="t",
+        domain_verified_at=_utcnow() if verified else None,
+        active=True, role_mapping_json=role_mapping or {},
+    )
+    db.add(idp)
+    db.commit()
+    return org, idp
+
+
+def _claims(idp, **overrides):
+    claims = {"sub": f"sub-{uuid4().hex[:10]}", "email": f"person-{uuid4().hex[:8]}@{idp.domain_binding}",
+              "email_verified": True, "name": "Person"}
+    claims.update(overrides)
+    return claims
+
+
+def test_new_user_requires_the_idp_to_vouch_for_the_email(db_session):
+    org, idp = _bare_org_idp(db_session)
+    for overrides in ({"email_verified": False}, {"email_verified": "true"}, {"email_verified": None}):
+        claims = _claims(idp, **overrides)
+        with pytest.raises(sso_oidc.OIDCError):
+            sso_oidc.provision_or_update_user(db_session, idp, claims)
+        assert db_session.scalar(select(User).where(User.email == claims["email"])) is None
+    # The claim missing entirely is the same as unverified.
+    claims = _claims(idp)
+    del claims["email_verified"]
+    with pytest.raises(sso_oidc.OIDCError):
+        sso_oidc.provision_or_update_user(db_session, idp, claims)
+
+
+def test_new_user_email_must_be_inside_the_verified_domain(db_session):
+    org, idp = _bare_org_idp(db_session, domain=f"corp-{uuid4().hex[:8]}.example")
+    outside = _claims(idp, email=f"victim-{uuid4().hex[:8]}@gmail.com")
+    with pytest.raises(sso_oidc.OIDCError):
+        sso_oidc.provision_or_update_user(db_session, idp, outside)
+    lookalike = _claims(idp, email=f"victim@evil{idp.domain_binding}")  # evilcorp-x.example is not a subdomain
+    with pytest.raises(sso_oidc.OIDCError):
+        sso_oidc.provision_or_update_user(db_session, idp, lookalike)
+    assert db_session.scalar(select(User).where(User.email.in_([outside["email"], lookalike["email"]]))) is None
+
+    exact = sso_oidc.provision_or_update_user(db_session, idp, _claims(idp))
+    sub = sso_oidc.provision_or_update_user(
+        db_session, idp, _claims(idp, email=f"eng-{uuid4().hex[:8]}@emea.{idp.domain_binding}".upper()))
+    db_session.commit()
+    assert exact.organization_id == sub.organization_id == org.id
+
+
+def test_new_user_is_refused_when_the_providers_domain_is_unverified(db_session):
+    org, idp = _bare_org_idp(db_session, verified=False)
+    with pytest.raises(sso_oidc.OIDCError):
+        sso_oidc.provision_or_update_user(db_session, idp, _claims(idp))
+
+
+def test_without_an_email_claim_the_synthesized_address_is_still_used(db_session):
+    org, idp = _bare_org_idp(db_session, verified=False)
+    claims = {"sub": f"sub-{uuid4().hex[:10]}", "name": "No Email"}
+    user = sso_oidc.provision_or_update_user(db_session, idp, claims)
+    db_session.commit()
+    assert user.email == f"oidc:{claims['sub']}@{idp.domain_binding}"
+    assert user.password_hash == ""
+
+
+def _audit_actions(db, org_id):
+    from app.models import AuditEvent
+    return [row.action for row in db.scalars(select(AuditEvent).where(AuditEvent.organization_id == org_id))]
+
+
+def test_oidc_role_sync_never_demotes_the_last_active_admin(db_session):
+    org, idp = _bare_org_idp(db_session, role_mapping={"admins": "admin", "eng": "member"})
+    claims = _claims(idp, roles=["admins"])
+    admin = sso_oidc.provision_or_update_user(db_session, idp, claims)
+    db_session.commit()
+    assert admin.role == "admin"
+
+    # The IdP now says "eng": admin.py would refuse this demotion, so must the sync.
+    demote = {**claims, "roles": ["eng"]}
+    still_admin = sso_oidc.provision_or_update_user(db_session, idp, demote)
+    db_session.commit()
+    assert still_admin.id == admin.id and still_admin.role == "admin"
+    assert "sso_last_admin_protected" in _audit_actions(db_session, org.id)
+
+    # With a second active human admin the same claim goes through.
+    db_session.add(User(organization_id=org.id, name="Other Admin", email=f"other-{uuid4().hex[:8]}@example.com",
+                        password_hash="x", role="admin", active=True, kind="human"))
+    db_session.commit()
+    demoted = sso_oidc.provision_or_update_user(db_session, idp, demote)
+    db_session.commit()
+    assert demoted.role == "member"
+
+
+def test_sso_start_ignores_a_provider_whose_domain_is_not_verified(monkeypatch):
+    """The hijack this closes: an attacker's IdP claiming a real company's domain
+    must not capture that company's logins. Proven by what the route does with the
+    provider, not by an unrelated failure: build_authorization_url is stubbed, so a
+    selected provider would redirect to the stub URL."""
+    selected = []
+
+    def fake_build(db, idp, redirect_uri):
+        selected.append(idp.id)
+        return "https://idp.example/authorize?stub=1"
+
+    monkeypatch.setattr(sso_oidc, "build_authorization_url", fake_build)
+    domain = f"hijack-{uuid4().hex}.example"
+    with TestClient(backend_app) as c, SessionLocal() as db:
+        _org_a, attacker = _bare_org_idp(db, domain=domain, verified=False)
+        refused = c.get("/api/auth/sso/start", params={"email": f"staff@{domain}"}, follow_redirects=False)
+        assert parse_qs(urlparse(refused.headers["location"]).fragment) == {"sso_error": ["1"]}
+        assert selected == []
+
+        _org_b, owner = _bare_org_idp(db, domain=domain, verified=True)
+        routed = c.get("/api/auth/sso/start", params={"email": f"staff@{domain}"}, follow_redirects=False)
+        assert routed.status_code == 302
+        assert routed.headers["location"] == "https://idp.example/authorize?stub=1"
+        assert selected == [owner.id]  # the verified owner, never the unverified claimant

@@ -5,6 +5,7 @@ the same: the link works once, stops working when it expires, and a database
 containing the tokens cannot be turned back into a working link.
 """
 from datetime import datetime, timedelta
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app
 from app.models import AuthToken, User
-from app.tokens import PASSWORD_RESET, hash_token
+from app.tokens import PASSWORD_RESET, RESET_TTL, hash_token, issue_auth_token
 
 from conftest import link_token
 from test_observability import workspace
@@ -140,3 +141,59 @@ def test_a_reset_link_also_settles_verification(outbox):
         c.post("/api/auth/reset-password", json={"token": token, "password": "proved-by-inbox-1"})
         with SessionLocal() as db:
             assert db.get(User, account["user"]["id"]).email_verified_at is not None
+
+
+# --- SSO / SCIM identities (empty password_hash) must not be able to bypass their IdP ---
+
+def _sso_identity(organization_id):
+    with SessionLocal() as db:
+        user = User(organization_id=organization_id, name="SSO Person", email=f"sso-{uuid4().hex[:10]}@example.com",
+                    password_hash="", role="member", kind="human", active=True)
+        db.add(user)
+        db.commit()
+        return user.id, user.email
+
+
+def test_forgot_password_issues_no_token_to_an_sso_identity_and_reveals_nothing(outbox):
+    with TestClient(app) as c:
+        _headers, account = workspace(c)
+        user_id, email = _sso_identity(account["organization"]["id"])
+
+        outbox.clear()
+        sso = c.post("/api/auth/forgot-password", json={"email": email})
+        sent_to_sso = list(outbox)
+        outbox.clear()
+        unknown = c.post("/api/auth/forgot-password", json={"email": f"nobody-{uuid4().hex[:10]}@example.com"})
+        sent_to_unknown = list(outbox)
+
+        # Same reply, and the same single "no account here" mail an unknown address gets:
+        # nothing in the response or the message separates an SSO account from no account.
+        assert sso.status_code == unknown.status_code == 202
+        assert sso.json() == unknown.json()
+        assert len(sent_to_sso) == len(sent_to_unknown) == 1
+        assert sent_to_sso[0].to == email
+        assert (sent_to_sso[0].subject, sent_to_sso[0].body) == (sent_to_unknown[0].subject, sent_to_unknown[0].body)
+        assert "reset=" not in sent_to_sso[0].body
+
+        with SessionLocal() as db:
+            assert db.scalar(select(AuthToken).where(AuthToken.user_id == user_id)) is None
+
+
+def test_a_reset_token_cannot_be_redeemed_for_an_sso_identity():
+    """Even a token that exists (issued before the account became SSO-managed, or
+    planted) must not give the mailbox owner a local password that skips the IdP."""
+    with TestClient(app) as c:
+        _headers, account = workspace(c)
+        user_id, email = _sso_identity(account["organization"]["id"])
+        with SessionLocal() as db:
+            raw = issue_auth_token(db, user_id, PASSWORD_RESET, RESET_TTL)
+            db.commit()
+
+        refused = c.post("/api/auth/reset-password", json={"token": raw, "password": "attacker-chosen-password"})
+        garbage = c.post("/api/auth/reset-password", json={"token": "n" * 43, "password": "attacker-chosen-password"})
+        assert refused.status_code == garbage.status_code == 400
+        assert refused.json() == garbage.json()  # the generic token error, nothing SSO-specific
+
+        with SessionLocal() as db:
+            assert db.get(User, user_id).password_hash == ""
+        assert c.post("/api/auth/login", json={"email": email, "password": "attacker-chosen-password"}).status_code == 401

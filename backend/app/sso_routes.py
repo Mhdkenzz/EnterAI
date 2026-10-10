@@ -6,8 +6,8 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from pydantic import BaseModel, EmailStr
-from sqlalchemy import func, select
+from pydantic import BaseModel, EmailStr, field_validator
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from . import secrets_store, sso_oidc
@@ -18,8 +18,10 @@ from .models import User, AuditEvent
 from .services import log
 from .sso_models import IdentityProvider, SCIMUserMapping
 from .sso_auth import (
-    deactivate_scim_user, issue_scim_token, scim_create_or_update,
-    resolve_role_mapping, resolve_scim_identity_provider, validate_org_isolation,
+    apply_scim_role_change, deactivate_scim_user, is_valid_domain, issue_scim_token,
+    new_domain_verification_token, normalize_domain, require_scim_email_allowed,
+    resolve_role_mapping, resolve_scim_identity_provider, scim_create_or_update,
+    validate_org_isolation, verification_record, verify_provider_domain,
 )
 
 router_admin = APIRouter(prefix='/api/admin/sso', tags=['admin-sso'])
@@ -92,9 +94,19 @@ class IdPConfig(BaseModel):
     # OIDC only. Endpoints are resolved from this at login time via discovery
     # (sso_oidc.discover), not entered by hand -- see sso_oidc.py's docstring.
     oidc_issuer: str | None = None
+    # Email domain this provider claims (e.g. "corp.example"). Normalized here, and
+    # inert until the org proves it owns the domain: see verify-domain below.
     domain_binding: str | None = None
     sso_only: bool = False
     role_mapping_json: dict = {}
+
+    @field_validator('domain_binding')
+    @classmethod
+    def _normalize_domain_binding(cls, value: str | None) -> str | None:
+        domain = normalize_domain(value)
+        if domain is not None and not is_valid_domain(domain):
+            raise ValueError('domain_binding must be a hostname such as corp.example')
+        return domain
 
 
 class RoleMapping(BaseModel):
@@ -103,11 +115,27 @@ class RoleMapping(BaseModel):
 
 # --- Admin SSO settings ---
 
+def _domain_out(idp: IdentityProvider) -> dict:
+    """The domain-binding state an admin needs to act on. The token and the exact TXT
+    record to publish are only included while verification is pending -- once the
+    domain is verified there is nothing left to publish."""
+    verified = idp.domain_verified_at is not None
+    pending = bool(idp.domain_binding) and not verified and bool(idp.domain_verification_token)
+    return {
+        'domain_binding': idp.domain_binding,
+        'domain_verified': verified,
+        'domain_verified_at': idp.domain_verified_at.isoformat() if idp.domain_verified_at else None,
+        'domain_verification_token': idp.domain_verification_token if pending else None,
+        'domain_verification_record': (verification_record(idp.domain_binding, idp.domain_verification_token)
+                                       if pending else None),
+    }
+
+
 @router_admin.get('/providers')
 def list_providers(user: User = Depends(human_admin), db: Session = Depends(get_db)):
     validate_org_isolation(db, user, user.organization_id)
     rows = db.scalars(select(IdentityProvider).where(IdentityProvider.organization_id == user.organization_id)).all()
-    return [{'id': r.id, 'name': r.name, 'protocol': r.protocol, 'domain_binding': r.domain_binding,
+    return [{'id': r.id, 'name': r.name, 'protocol': r.protocol, **_domain_out(r),
              'sso_only': r.sso_only, 'active': r.active, 'created_at': r.created_at.isoformat() if r.created_at else None} for r in rows]
 
 
@@ -126,6 +154,9 @@ def create_provider(data: IdPConfig, user: User = Depends(human_admin), db: Sess
         client_secret_encrypted=secrets_store.encrypt(data.client_secret) if data.client_secret else None,
         oidc_issuer=data.oidc_issuer,
         domain_binding=data.domain_binding,
+        # A claimed domain starts unverified with a fresh token to publish; it routes
+        # no logins and vouches for no email addresses until verify-domain succeeds.
+        domain_verification_token=new_domain_verification_token() if data.domain_binding else None,
         sso_only=data.sso_only,
         role_mapping_json=data.role_mapping_json,
         active=True,
@@ -138,7 +169,7 @@ def create_provider(data: IdPConfig, user: User = Depends(human_admin), db: Sess
     log(db, user.organization_id, user.id, 'identity_provider', idp.id, 'created',
         protocol=idp.protocol, domain_binding=idp.domain_binding, oidc_issuer=idp.oidc_issuer)
     db.commit()
-    return {'id': idp.id, 'name': idp.name, 'protocol': idp.protocol}
+    return {'id': idp.id, 'name': idp.name, 'protocol': idp.protocol, **_domain_out(idp)}
 
 
 @router_admin.patch('/providers/{provider_id}')
@@ -167,13 +198,39 @@ def patch_provider(provider_id: str, data: IdPConfig, user: User = Depends(human
         idp.oidc_issuer = data.oidc_issuer
         idp.oidc_discovery_json = None
         idp.oidc_discovery_fetched_at = None
-    idp.domain_binding = data.domain_binding
+    if data.domain_binding != idp.domain_binding:
+        # A different domain is a different claim: the old proof (and the old token,
+        # which was published for the old name) must not carry over. Setting the
+        # domain to None drops both.
+        idp.domain_binding = data.domain_binding
+        idp.domain_verified_at = None
+        idp.domain_verification_token = new_domain_verification_token() if data.domain_binding else None
+    elif idp.domain_binding and not idp.domain_verification_token:
+        idp.domain_verification_token = new_domain_verification_token()  # bound before verification existed
     idp.sso_only = data.sso_only
     idp.role_mapping_json = data.role_mapping_json
     log(db, user.organization_id, user.id, 'identity_provider', idp.id, 'updated',
         domain_binding=idp.domain_binding, sso_only=idp.sso_only, oidc_issuer=idp.oidc_issuer)
     db.commit()
-    return {'id': idp.id, 'name': idp.name, 'protocol': idp.protocol, 'sso_only': idp.sso_only}
+    return {'id': idp.id, 'name': idp.name, 'protocol': idp.protocol, 'sso_only': idp.sso_only, **_domain_out(idp)}
+
+
+@router_admin.post('/providers/{provider_id}/verify-domain')
+def verify_domain(provider_id: str, user: User = Depends(human_admin), db: Session = Depends(get_db)):
+    """Check DNS for the TXT record from create/patch/list and, if it is there, mark
+    this provider's domain_binding verified -- the point at which it starts routing
+    logins and vouching for emails. 400: record not found (or no domain set); 409:
+    another provider already holds the domain."""
+    validate_org_isolation(db, user, user.organization_id)
+    idp = db.get(IdentityProvider, provider_id)
+    if not idp or idp.organization_id != user.organization_id:
+        raise HTTPException(404, 'Provider not found')
+    method = verify_provider_domain(db, idp)
+    log(db, user.organization_id, user.id, 'identity_provider', idp.id,
+        'domain_verified' if method == 'dns' else 'domain_verified_without_dns',
+        domain_binding=idp.domain_binding)
+    db.commit()
+    return {'id': idp.id, **_domain_out(idp)}
 
 
 @router_admin.post('/providers/{provider_id}/scim-token')
@@ -195,10 +252,18 @@ def rotate_scim_token(provider_id: str, user: User = Depends(human_admin), db: S
 def sso_audit(q: str | None = None, action: str | None = None,
               entity_type: str | None = None, user: User = Depends(human_admin), db: Session = Depends(get_db)):
     stmt = select(AuditEvent).where(AuditEvent.organization_id == user.organization_id)
-    # Filter to identity/admin actions
-    allowed = {"scim_provisioned", "scim_deprovisioned", "scim_role_updated", "created", "updated", "scim_user"}
-    # No filter restriction here — include all for audit; the key is strict org isolation.
-    stmt = stmt.order_by(AuditEvent.created_at.desc())
+    # Same semantics as admin.audit_search: action/entity_type are exact matches, and
+    # q is a substring match over both with LIKE wildcards escaped (autoescape), so a
+    # "%" or "_" in q matches itself rather than everything. lower() on both sides
+    # because LIKE is case-insensitive on SQLite but case-sensitive on PostgreSQL.
+    if action is not None:
+        stmt = stmt.where(AuditEvent.action == action)
+    if entity_type is not None:
+        stmt = stmt.where(AuditEvent.entity_type == entity_type)
+    if q:
+        stmt = stmt.where(or_(*[func.lower(column).contains(q.lower(), autoescape=True)
+                                for column in (AuditEvent.action, AuditEvent.entity_type)]))
+    stmt = stmt.order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc())
     rows = db.scalars(stmt.limit(100)).all()
     keys = ['id', 'actor_id', 'initiator_id', 'source', 'action', 'entity_type', 'entity_id', 'detail', 'created_at']
     return {'items': [{key: getattr(row, key) for key in keys} for row in rows], 'total': len(rows)}
@@ -224,7 +289,7 @@ def rotate_provider_secrets(user: User = Depends(human_admin), db: Session = Dep
 
 @router_login.get('/start')
 def sso_login_start(email: EmailStr, db: Session = Depends(get_db)):
-    """Resolve the active OIDC provider bound to this email's domain and
+    """Resolve the active OIDC provider with a *verified* binding to this email's domain and
     redirect the browser to its authorization endpoint. A real 302, not a JSON
     body with a URL for the frontend to navigate to -- the IdP's login page
     needs to be reached by an actual browser navigation, not a fetch().
@@ -237,7 +302,10 @@ def sso_login_start(email: EmailStr, db: Session = Depends(get_db)):
     domain = email.lower().rsplit('@', 1)[-1]
     idp = db.scalar(select(IdentityProvider).where(
         IdentityProvider.domain_binding == domain, IdentityProvider.protocol == 'oidc',
-        IdentityProvider.active == True))
+        IdentityProvider.active == True,
+        # Only a domain its org has proven it owns may capture logins; the partial
+        # unique index guarantees at most one provider matches.
+        IdentityProvider.domain_verified_at.is_not(None)))
     if not idp:
         return _sso_failure_redirect()
     redirect_uri = f'{_api_base_url()}/api/auth/sso/callback'
@@ -308,7 +376,7 @@ def scim_create_user(data: SCIMUserPayload, idp: IdentityProvider = Depends(scim
     # Create/update via the safe handler
     created = scim_create_or_update(
         db, idp.organization_id, data.userName, data.userName, data.displayName,
-        role_claim=role_claim, actor_id=None, source_provider_id=idp.id
+        role_claim=role_claim, actor_id=None, source_provider_id=idp.id, idp=idp
     )
     mapping = db.scalar(select(SCIMUserMapping).where(SCIMUserMapping.user_id == created.id))
     db.commit()
@@ -354,7 +422,7 @@ def scim_update_user(scim_id: str, data: SCIMUserPayload, idp: IdentityProvider 
         role_claim = data.roles[0].get("value") if isinstance(data.roles, list) and data.roles else None
     created = scim_create_or_update(
         db, idp.organization_id, scim_id, data.userName, data.displayName,
-        role_claim=role_claim, actor_id=None, source_provider_id=idp.id
+        role_claim=role_claim, actor_id=None, source_provider_id=idp.id, idp=idp
     )
     db.commit()
     return {
@@ -423,7 +491,10 @@ def scim_patch_user(scim_id: str, payload: dict, idp: IdentityProvider = Depends
             applied = True
 
         if attrs.get("username") and attrs["username"] != user.email:
-            new_email = attrs["username"]
+            new_email = str(attrs["username"]).strip()
+            # Same domain rule as SCIM create: a rename must not move an account onto
+            # an address outside the domain this provider has proven it owns.
+            require_scim_email_allowed(idp, new_email)
             # users.email is a real, global-uniqueness constraint (see
             # sso_oidc.provision_or_update_user's identical check) -- an
             # unhandled collision here would surface as a raw 500 from the
@@ -442,13 +513,8 @@ def scim_patch_user(scim_id: str, payload: dict, idp: IdentityProvider = Depends
                 first = roles_value[0]
                 role_claim = first.get("value") if isinstance(first, dict) else str(first)
             if role_claim is not None:
-                new_role = resolve_role_mapping(idp, role_claim)
-                if user.role != new_role:
-                    before = user.role
-                    user.role = new_role
-                    log(db, idp.organization_id, None, "user", user.id, "scim_role_updated",
-                        scim_mapping_id=mapping.id, scim_identity_provider_id=idp.id,
-                        before=before, after=new_role)
+                apply_scim_role_change(db, user, resolve_role_mapping(idp, role_claim), mapping=mapping,
+                                       actor_id=None, source_provider_id=idp.id)
                 applied = True
 
     if not applied:

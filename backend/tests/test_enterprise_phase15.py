@@ -71,24 +71,125 @@ def test_ip_allowlist_strict_isolation(db_session):
 # admin-panel scaffolding, against the real app and real (migrated) database.
 # --------------------------------------------------------------------------- #
 
-def test_ip_allowlist_routes_work_against_the_real_migrated_schema_and_then_enforce():
+ALLOWLIST = '/api/admin/enterprise/ip-allowlist'
+EXPORT = '/api/admin/enterprise/audit/export'
+
+
+def _from_ip(headers, ip):
+    """TestClient reports its host as "testclient", which is not an IP. Enforcement
+    reads TRUST_PROXY_HEADERS at call time and then takes the last X-Forwarded-For
+    hop, so tests choose the caller's address with that header (and monkeypatch)."""
+    return {**headers, 'X-Forwarded-For': ip}
+
+
+@pytest.fixture
+def proxy_ip(monkeypatch):
+    monkeypatch.setenv('TRUST_PROXY_HEADERS', '1')
+
+
+def _stored(org_id):
+    with SessionLocal() as db:
+        return db.scalars(select(IPAllowlist).where(IPAllowlist.organization_id == org_id)).all()
+
+
+def test_ip_allowlist_routes_work_against_the_real_migrated_schema_and_then_enforce(proxy_ip):
     with TestClient(app) as c:
         headers, _ = _workspace(c)
+        office = _from_ip(headers, '10.1.2.3')
         # No entries yet: the feature is off, every request goes through.
         assert c.get('/api/me', headers=headers).status_code == 200
-        added = c.post('/api/admin/enterprise/ip-allowlist', headers=headers,
-                       json={'cidr': '10.0.0.0/8', 'description': 'office network'})
-        assert added.status_code == 200, added.text
-        # Once an active entry exists, every caller outside it is refused --
-        # including the admin who just configured it (TestClient's host is not
-        # even a parseable IP). This is the real, sharp edge of IP allowlisting:
-        # an admin must include their own network or lock themselves out, the
-        # same trade-off as any cloud security-group allowlist. Before this fix
-        # nothing enforced the setting at all, so this used to do nothing.
-        blocked = c.get('/api/me', headers=headers)
-        assert blocked.status_code == 403
-        blocked_list = c.get('/api/admin/enterprise/ip-allowlist', headers=headers)
-        assert blocked_list.status_code == 403
+        added = c.post(ALLOWLIST, headers=office, json={'cidr': '10.0.0.0/8', 'description': 'office network'})
+        assert added.status_code == 201, added.text
+        # Once an active entry exists, callers outside it are refused. The create
+        # route now guarantees the admin's own network is inside it, so enforcement
+        # is proven from a different address and from one that cannot be determined.
+        assert c.get('/api/me', headers=office).status_code == 200
+        assert c.get(ALLOWLIST, headers=office).status_code == 200
+        assert c.get('/api/me', headers=_from_ip(headers, '192.0.2.9')).status_code == 403
+        assert c.get(ALLOWLIST, headers=_from_ip(headers, '192.0.2.9')).status_code == 403
+        assert c.get('/api/me', headers=headers).status_code == 403  # "testclient" is not an IP
+
+
+def test_ip_allowlist_rejects_invalid_cidr_with_422(proxy_ip):
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        office = _from_ip(headers, '10.1.2.3')
+        for bad in ['not-an-ip', '10.0.0.0/33', '999.1.1.1/8', '', '10.0.0.0/8/9']:
+            response = c.post(ALLOWLIST, headers=office, json={'cidr': bad})
+            assert response.status_code == 422, (bad, response.text)
+        assert _stored(data['organization']['id']) == []
+
+
+def test_ip_allowlist_stores_the_normalized_cidr(proxy_ip):
+    with TestClient(app) as c:
+        headers, _ = _workspace(c)
+        office = _from_ip(headers, '10.1.2.3')
+        added = c.post(ALLOWLIST, headers=office, json={'cidr': ' 10.1.2.77/24 '})
+        assert added.status_code == 201, added.text
+        assert added.json()['cidr'] == '10.1.2.0/24'  # host bits cleared, as enforcement's strict=False reads it
+        single = c.post(ALLOWLIST, headers=office, json={'cidr': '10.1.2.3'})
+        assert single.status_code == 201
+        assert single.json()['cidr'] == '10.1.2.3/32'
+        assert sorted(r['cidr'] for r in c.get(ALLOWLIST, headers=office).json()) == ['10.1.2.0/24', '10.1.2.3/32']
+
+
+def test_ip_allowlist_refuses_an_entry_that_excludes_the_callers_ip(proxy_ip):
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        office = _from_ip(headers, '10.1.2.3')
+        refused = c.post(ALLOWLIST, headers=office, json={'cidr': '192.168.0.0/16'})
+        assert refused.status_code == 409
+        assert '10.1.2.3' in refused.json()['detail']  # tells the admin which IP to include
+        assert _stored(data['organization']['id']) == []
+        # ...and the org is not locked: the very next request still works.
+        assert c.get('/api/me', headers=office).status_code == 200
+        # An entry that includes the caller is accepted.
+        ok = c.post(ALLOWLIST, headers=office, json={'cidr': '10.1.2.0/24'})
+        assert ok.status_code == 201, ok.text
+        assert len(_stored(data['organization']['id'])) == 1
+
+
+def test_ip_allowlist_adding_a_second_entry_is_fine_when_an_existing_one_covers_the_caller(proxy_ip):
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        office = _from_ip(headers, '10.1.2.3')
+        assert c.post(ALLOWLIST, headers=office, json={'cidr': '10.0.0.0/8'}).status_code == 201
+        # The caller stays covered by the first entry, so a partner range is safe to add.
+        assert c.post(ALLOWLIST, headers=office, json={'cidr': '198.51.100.0/24'}).status_code == 201
+        assert len(_stored(data['organization']['id'])) == 2
+
+
+def test_ip_allowlist_refuses_any_entry_when_the_callers_ip_cannot_be_determined():
+    """No proxy header and TestClient's non-IP host: enforcement would 403 this
+    caller the moment the entry became active, so creating one must be refused."""
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        refused = c.post(ALLOWLIST, headers=headers, json={'cidr': '0.0.0.0/0'})
+        assert refused.status_code == 409
+        assert 'could not be determined' in refused.json()['detail']
+        assert _stored(data['organization']['id']) == []
+
+
+def test_ip_allowlist_lockout_guard_covers_updates_that_would_drop_the_caller():
+    """There is no delete/deactivate route yet; the shared guard any such route
+    must call decides on the post-change active set, so test it directly."""
+    from fastapi import HTTPException
+    from starlette.requests import Request
+    from app.enterprise_routes import ensure_caller_not_locked_out
+
+    def request_from(ip):
+        return Request({'type': 'http', 'headers': [], 'client': (ip, 1234)})
+
+    ensure_caller_not_locked_out(request_from('10.1.2.3'), [])  # feature off: always safe
+    ensure_caller_not_locked_out(request_from('10.1.2.3'), ['192.0.2.0/24', '10.0.0.0/8'])
+    ensure_caller_not_locked_out(request_from('2001:db8::5'), ['2001:db8::/32'])
+    for ip, remaining in [('10.1.2.3', ['192.0.2.0/24']),        # removed the only covering entry
+                          ('10.1.2.3', ['not-a-cidr']),          # malformed entries never match
+                          ('10.1.2.3', ['2001:db8::/32']),       # family mismatch
+                          ('testclient', ['10.0.0.0/8'])]:       # undeterminable IP
+        with pytest.raises(HTTPException) as exc_info:
+            ensure_caller_not_locked_out(request_from(ip), remaining)
+        assert exc_info.value.status_code == 409
 
 
 def test_sso_only_enforced_blocks_password_login_once_set():
@@ -297,3 +398,53 @@ def test_max_session_days_rejects_an_aged_token_but_grandfathers_tokens_without_
         _enforce_session_policy(db, user, {"iat": datetime.now(timezone.utc).timestamp()})
         # A token minted before this policy existed (no iat claim) is grandfathered.
         _enforce_session_policy(db, user, {})
+
+
+def _seed_audit(org_id, rows):
+    from app.models import AuditEvent
+    with SessionLocal() as db:
+        for action, created_at in rows:
+            db.add(AuditEvent(organization_id=org_id, source='system', action=action, entity_type='export_test',
+                              entity_id='e1', detail={}, created_at=created_at))
+        db.commit()
+
+
+def test_audit_export_honours_start_and_end_inclusively():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        _seed_audit(data['organization']['id'], [
+            ('export_old', datetime(2020, 1, 1, 12, 0, 0)),
+            ('export_mid_a', datetime(2020, 6, 1, 0, 0, 0)),
+            ('export_mid_b', datetime(2020, 6, 30, 23, 59, 59)),
+            ('export_new', datetime(2021, 1, 1, 12, 0, 0)),
+        ])
+
+        def actions(**params):
+            response = c.get(EXPORT, headers=headers, params={'limit': 10000, **params})
+            assert response.status_code == 200, response.text
+            return {r['action'] for r in response.json() if r['entity_type'] == 'export_test'}
+
+        assert actions() == {'export_old', 'export_mid_a', 'export_mid_b', 'export_new'}
+        # Both bounds are inclusive, so rows exactly on them are returned.
+        assert actions(start='2020-06-01T00:00:00', end='2020-06-30T23:59:59') == {'export_mid_a', 'export_mid_b'}
+        assert actions(start='2020-06-01T00:00:01') == {'export_mid_b', 'export_new'}
+        assert actions(end='2020-06-01T00:00:00') == {'export_old', 'export_mid_a'}
+        assert actions(start='2030-01-01T00:00:00') == set()
+        assert c.get(EXPORT, headers=headers, params={'start': 'garbage'}).status_code == 422
+        assert c.get(EXPORT, headers=headers, params={'start': '2021-01-01T00:00:00',
+                                                      'end': '2020-01-01T00:00:00'}).status_code == 422
+
+
+def test_audit_export_bounds_limit():
+    with TestClient(app) as c:
+        headers, data = _workspace(c)
+        _seed_audit(data['organization']['id'],
+                    [(f'export_limit_{i}', datetime(2020, 1, 1, 0, 0, i)) for i in range(5)])
+        two = c.get(EXPORT, headers=headers, params={'limit': 2})
+        assert two.status_code == 200
+        assert len(two.json()) == 2
+        assert c.get(EXPORT, headers=headers, params={'limit': 1}).status_code == 200
+        assert c.get(EXPORT, headers=headers, params={'limit': 10000}).status_code == 200
+        assert c.get(EXPORT, headers=headers, params={'limit': 0}).status_code == 422
+        assert c.get(EXPORT, headers=headers, params={'limit': -1}).status_code == 422
+        assert c.get(EXPORT, headers=headers, params={'limit': 100000}).status_code == 422

@@ -14,8 +14,8 @@ jobs:
       run:
         working-directory: backend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
@@ -70,8 +70,8 @@ jobs:
       JWT_SECRET: ci-only-secret
       REDIS_URL: redis://127.0.0.1:6379/0
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - run: pip install -r requirements-dev.txt
@@ -88,8 +88,8 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -103,8 +103,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [backend, frontend]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Start API
@@ -115,7 +115,7 @@ jobs:
           DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db PYTHONPATH=. alembic upgrade head
           ENVIRONMENT=ci ENABLE_API_DOCS=false DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db JWT_SECRET=ci-only-secret AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 20
           cache: npm
@@ -146,7 +146,7 @@ jobs:
           echo "::group::web"; tail -80 /tmp/enter-ai-web.log || true; echo "::endgroup::"
       - name: Playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: playwright-report
           path: |
@@ -167,8 +167,8 @@ jobs:
           --health-cmd "redis-cli ping"
           --health-interval 5s --health-timeout 3s --health-retries 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: Start API
@@ -185,7 +185,7 @@ jobs:
         # correctly discovers their redirects but cannot exercise the external
         # provider; dedicated OIDC and Playwright tests cover them instead.
         run: schemathesis run http://127.0.0.1:8000/openapi.json --checks all --exclude-checks allow_header_conformance,positive_data_acceptance --phases examples,coverage,fuzzing --exclude-path-regex '^/api/auth/sso/(start|callback)$'
-      - uses: grafana/setup-k6-action@v1
+      - uses: grafana/setup-k6-action@43b9fc21641a76002687994433dd586f56e791b1 # v1.2.2
       - name: K6 smoke
         run: k6 run qa/k6/smoke.js
       - name: Restart API with production docs policy for ZAP
@@ -196,7 +196,7 @@ jobs:
           ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SEED_ADMIN_EMAIL=admin@staging.example.test SEED_ADMIN_PASSWORD=ci-only-seed-admin-password EMAIL_PROVIDER=smtp SMTP_HOST=127.0.0.1 EMAIL_FROM=ci@enterai.test APP_BASE_URL=https://staging.example.test API_BASE_URL=https://api.staging.example.test CORS_ALLOWED_ORIGINS=https://staging.example.test TRUSTED_HOSTS=staging.example.test,api.staging.example.test TRUST_PROXY_HEADERS=true AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS -H 'Host: api.staging.example.test' http://127.0.0.1:8000/health && break || sleep 1; done
           curl -fsS -H 'Host: api.staging.example.test' http://127.0.0.1:8000/health || { echo "::error::API failed to come back up in production mode"; cat /tmp/enter-ai-api-zap.log; exit 1; }
-      - uses: zaproxy/action-baseline@v0.14.0
+      - uses: zaproxy/action-baseline@7c4deb10e6261301961c86d65d54a516394f9aed # v0.14.0
         with:
           target: http://127.0.0.1:8000/
           cmd_options: -c /zap/wrk/qa/zap-rules.conf
@@ -236,7 +236,7 @@ jobs:
       TLS_KEY_PATH: /tmp/enterai-ci.key
       AI_PLAN_RATE_LIMIT_PER_MINUTE: "3"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Build immutable-artifact stand-ins and test TLS certificate
         run: |
           docker build -t "$ENTERAI_BACKEND_IMAGE" ./backend
@@ -292,7 +292,7 @@ jobs:
       ENTERAI_BACKEND_IMAGE: enterai-backend:ci
       ENTERAI_FRONTEND_IMAGE: enterai-frontend:ci
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Validate Compose and nginx with temporary TLS material
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TLS_KEY_PATH" -out "$TLS_CERT_PATH" -days 1 -subj '/CN=staging.example.test'
@@ -313,21 +313,43 @@ jobs:
   security-scans:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: aquasecurity/trivy-action@master
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: fs
           scan-ref: .
           severity: CRITICAL,HIGH
-          exit-code: "1"
-      - uses: dependency-check/Dependency-Check_Action@main
+          format: json
+          output: trivy-results.json
+          exit-code: "0"
+      # Fail on the same CRITICAL/HIGH findings, but surface each one as a check
+      # annotation so it is readable from the PR/checks page and the API, not only
+      # from the raw job log.
+      - name: Report Trivy findings
+        run: |
+          jq -r '.Results[]? | .Target as $t
+            | ((.Vulnerabilities[]? | "::error title=\(.Severity) \(.VulnerabilityID)::\($t): \(.PkgName) \(.InstalledVersion) (fixed in \(.FixedVersion // "no fix yet"))"),
+               (.Secrets[]? | "::error title=\(.Severity) secret \(.RuleID)::\($t):\(.StartLine) \(.Title)"))' trivy-results.json | head -50
+          count=$(jq '[.Results[]? | (.Vulnerabilities[]?, .Secrets[]?)] | length' trivy-results.json)
+          echo "Trivy CRITICAL/HIGH findings: $count"
+          test "$count" -eq 0
+      - uses: dependency-check/Dependency-Check_Action@1e54355a8b4c8abaa8cc7d0b70aa655a3bb15a6c # main as of 2025-12-10 (newer than tag 1.1.0)
         with:
           project: EnterAI
           path: .
-          format: HTML
-          args: --failOnCVSS 7
+          format: JSON
+          # The base image (owasp/dependency-check-action:latest) is still a moving tag.
+          args: --failOnCVSS 7 --suppression /github/workspace/dependency-check-suppressions.xml
+      - name: Report Dependency-Check findings
+        if: always()
+        run: |
+          report=$(ls reports/*.json 2>/dev/null | head -1)
+          [ -n "$report" ] || { echo "::warning::no Dependency-Check JSON report found"; exit 0; }
+          jq -r '.dependencies[]? | .fileName as $f | .vulnerabilities[]?
+            | (.cvssv3.baseScore // .cvssv2.score // 0) as $s | select($s >= 7)
+            | "::error title=CVSS \($s) \(.name)::\($f): \(.description[0:180] | gsub("\n"; " "))"' "$report" | head -50
