@@ -26,3 +26,5 @@ stripe==12.3.0
 # Phase 14.2 - OIDC login + at-rest secret encryption (was only a transitive
 # dependency of moto; now used directly by app/secrets_store.py)
 cryptography==50.0.1
+# CEO-only isolated UI session (headless Chromium).
+playwright==1.64.1

@@ -58,6 +58,8 @@ services:
       SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
       EMAIL_FROM: ${EMAIL_FROM:-no-reply@enterai.local}
       APP_BASE_URL: ${APP_BASE_URL:-http://localhost:3000}
+      ENTER_AI_BROWSER_APP_URL: ${ENTER_AI_BROWSER_APP_URL:-http://host.docker.internal:3000}
+      ENTER_AI_BROWSER_API_URL: ${ENTER_AI_BROWSER_API_URL:-http://host.docker.internal:8000/api}
       STORAGE_BACKEND: ${STORAGE_BACKEND:-s3}
       STORAGE_BUCKET: ${STORAGE_BUCKET:-enterai-uploads}
       STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://objectstore:9000}
@@ -68,7 +70,8 @@ services:
       ENABLE_API_DOCS: ${ENABLE_API_DOCS:-false}
       SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-}
       SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-}
-      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000,http://host.docker.internal:3000}
+      TRUSTED_HOSTS: ${TRUSTED_HOSTS:-localhost,127.0.0.1,web,api,host.docker.internal}
       SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-}
       AI_PROVIDER: ${AI_PROVIDER:-deterministic}
       AI_BASE_URL: ${AI_BASE_URL:-http://host.docker.internal:1234/v1}

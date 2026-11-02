@@ -94,6 +94,8 @@ services:
       # Only required for OIDC login (Phase 14.2): the redirect_uri registered
       # with an IdP must resolve to this backend, not the frontend/APP_BASE_URL.
       API_BASE_URL: ${API_BASE_URL:?set API_BASE_URL}
+      ENTER_AI_BROWSER_APP_URL: ${ENTER_AI_BROWSER_APP_URL:-${APP_BASE_URL}}
+      ENTER_AI_BROWSER_API_URL: ${ENTER_AI_BROWSER_API_URL:-${API_BASE_URL}/api}
       # Only required once an OIDC identity provider's client_secret is stored
       # (app/secrets_store.py fails closed in production if unset and one is).
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}

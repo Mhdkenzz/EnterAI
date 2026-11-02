@@ -40,3 +40,22 @@ python3 cli/enter_ai.py ai ask "Create a task to test the release" --confirm
 ```
 
 Use `--yes` to explicitly approve a write in a script, and `--json` for machine-readable output. Run `python3 cli/enter_ai.py --help` for the complete command reference.
+
+## CEO UI CLI
+
+In the CEO agent chat, the CEO can call the restricted `enter_ai_cli` tool to
+inspect the rendered Enter AI screen and navigate, click or hover accessible
+controls, fill labeled fields, select options, press keys, drag controls, scroll,
+or zoom. It runs in an isolated browser
+session authenticated as that CEO agent and cannot navigate outside Enter AI.
+Changes submitted through the UI are intercepted; the CEO must use the normal
+workspace action tools to prepare a human-confirmed proposal instead.
+This tool is available when `AI_PROVIDER` is configured for structured tool
+calling (`anthropic`, `lmstudio`, or `openai_compatible`); the offline deterministic
+provider does not execute tools.
+
+For Docker deployments, the API container uses `ENTER_AI_BROWSER_APP_URL` and
+`ENTER_AI_BROWSER_API_URL` to reach the web and API services. The development
+Compose defaults use `host.docker.internal` so the browser's app and API origins
+remain aligned with the local frontend; hosted deployments can override them.
+The API image includes headless Chromium for this tool.

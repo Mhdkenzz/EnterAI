@@ -1,6 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # curl is the healthcheck's only runtime need; installed before the app layers so
 # it stays cached across code changes.
@@ -10,6 +11,9 @@ RUN apt-get update \
 
 COPY requirements.txt requirements-local-embeddings.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+# CEO UI CLI uses a private headless browser. Install only Chromium's headless
+# shell and its system libraries to keep the runtime smaller than a full browser set.
+RUN python -m playwright install --with-deps --only-shell chromium
 # EMBEDDING_PROVIDER=local needs PyTorch; everything else (openai, deterministic)
 # does not, so it stays out of the default image.
 ARG LOCAL_EMBEDDINGS=false
@@ -22,7 +26,7 @@ COPY . .
 # local storage backend writes there when object storage is not configured.
 RUN useradd --create-home --uid 10001 enterai \
     && mkdir -p /app/uploads \
-    && chown -R enterai:enterai /app/uploads
+    && chown -R enterai:enterai /app/uploads /ms-playwright
 USER enterai
 
 EXPOSE 8000
