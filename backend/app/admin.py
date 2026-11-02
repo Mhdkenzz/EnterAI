@@ -3,7 +3,7 @@ from typing import Literal
 from datetime import datetime, timezone
 from sqlalchemy import select, func, or_
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, StrictBool
+from pydantic import BaseModel, StrictBool, model_validator
 from sqlalchemy.orm import Session
 from .auth import current_user
 from .database import get_db
@@ -188,6 +188,17 @@ class ExecutionSetting(BaseModel):
     execution_enabled: StrictBool
 
 
+class OrganizationSettingsUpdate(BaseModel):
+    execution_enabled: StrictBool | None = None
+    ceo_full_access_enabled: StrictBool | None = None
+
+    @model_validator(mode="after")
+    def require_setting(self):
+        if self.execution_enabled is None and self.ceo_full_access_enabled is None:
+            raise ValueError("Provide at least one organization setting.")
+        return self
+
+
 @router.patch('/agents/{agent_id}/execution')
 def update_agent_execution(agent_id: str, data: ExecutionSetting, user: User = Depends(human_admin), db: Session = Depends(get_db)):
     target = db.get(User, agent_id)
@@ -219,13 +230,18 @@ def retire_agent_route(agent_id: str, user: User = Depends(human_admin), db: Ses
 
 @router.get('/settings')
 def settings(user: User = Depends(human_admin), db: Session = Depends(get_db)):
-    return {'execution_enabled': db.get(Organization, user.organization_id).execution_enabled}
+    org = db.get(Organization, user.organization_id)
+    return {'execution_enabled': org.execution_enabled, 'ceo_full_access_enabled': org.ceo_full_access_enabled}
 
 
 @router.patch('/settings')
-def update_settings(data: ExecutionSetting, user: User = Depends(human_admin), db: Session = Depends(get_db)):
+def update_settings(data: OrganizationSettingsUpdate, user: User = Depends(human_admin), db: Session = Depends(get_db)):
     org = db.get(Organization, user.organization_id)
-    org.execution_enabled = data.execution_enabled
-    log(db, org.id, user.id, 'organization', org.id, 'execution_updated', execution_enabled=data.execution_enabled)
+    if data.execution_enabled is not None:
+        org.execution_enabled = data.execution_enabled
+        log(db, org.id, user.id, 'organization', org.id, 'execution_updated', execution_enabled=data.execution_enabled)
+    if data.ceo_full_access_enabled is not None:
+        org.ceo_full_access_enabled = data.ceo_full_access_enabled
+        log(db, org.id, user.id, 'organization', org.id, 'ceo_full_access_updated', ceo_full_access_enabled=data.ceo_full_access_enabled)
     db.commit()
-    return {'execution_enabled': org.execution_enabled}
+    return {'execution_enabled': org.execution_enabled, 'ceo_full_access_enabled': org.ceo_full_access_enabled}

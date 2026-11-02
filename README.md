@@ -9,7 +9,7 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 - Projects (archive or delete), list and drag-and-drop Kanban views, tasks with subtasks, labels, assignees and due dates, comments and downloadable attachments
 - Real URLs for every view (`/projects/<id>`, `/inbox`, `?task=<id>` for an open task): Back, refresh and shared links work
 - Activity history, notifications, My Work, Inbox, portfolio dashboard and global search
-- Copilot chat with organization-scoped read tools and signed, explicit confirmation required before any write; each proposal shows the project and fields it will change and can be rejected
+- Copilot chat with organization-scoped read tools and signed, explicit confirmation before writes; an admin can optionally enable direct ordinary workspace changes for the isolated CEO agent
 - New-project brief ingestion for PDF, DOC, DOCX, TXT, XLSX, CSV, and JSON with editable AI-drafted metadata and suggested tasks
 - S3-compatible upload storage (local disk for a single node), mirrored to a backup bucket
 - Trials, Stripe Checkout and customer portal, per-period usage tracking and seat limits
@@ -59,6 +59,6 @@ Writes ask for confirmation. Append `--yes` for a deliberate non-interactive wri
 
 `backend/app/copilot.py` defines the Copilot boundary. The API creates an organization-scoped workspace snapshot through backend read functions; the provider receives only that minimised data, never a database session or application credentials. `AI_PROVIDER=deterministic` is the offline default. Set `AI_PROVIDER=lmstudio` or `openai_compatible`, plus `AI_BASE_URL`, `AI_MODEL`, and (when needed) `AI_API_KEY`, to use LM Studio or a hosted OpenAI-compatible endpoint.
 
-The UI calls `/api/ai/plan`, which only reads workspace data and returns proposed writes with a short-lived signed confirmation token. `/api/ai/confirm` validates the token against the signed-in user and organization, validates the action through the existing API schemas, then performs the mutation. The client never supplies raw tool arguments for a Copilot write.
+The UI calls `/api/ai/plan`, which reads workspace data and returns proposed writes with a short-lived signed confirmation token. `/api/ai/confirm` validates the token against the signed-in user and organization, validates the action through the existing API schemas, then performs the mutation. For the CEO agent, an organization administrator can enable direct ordinary workspace changes in Admin → Execution controls. This is off by default; human-admin, authentication, billing, privacy, and security controls remain protected.
 
 For production, add provider credentials through environment variables, make the role policy more granular, persist AI tool audit records, add object storage for attachments, and use a managed Postgres service.

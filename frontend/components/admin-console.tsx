@@ -7,7 +7,7 @@ import { Card } from "@/components/ui/card";
 import { BillingSection } from "@/components/billing-settings";
 import { TeamInvitesSection } from "@/components/team-invites";
 
-type Settings = { execution_enabled: boolean };
+type Settings = { execution_enabled: boolean; ceo_full_access_enabled: boolean };
 type AdminUser = { id: string; name: string; email?: string; role: "admin" | "manager" | "member"; active: boolean };
 type AgentUsage = Settings & {
   id: string; name: string; status: string; last_execution_at: string | null;
@@ -145,6 +145,28 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
               await api<Settings>("/admin/settings", { method: "PATCH", body: JSON.stringify({ execution_enabled: !settings.execution_enabled }) });
               await reloadExecutionState();
             }, "Organization execution setting saved.")} />
+        </Card>
+        <Card className="flex flex-wrap items-center justify-between gap-3 border-amber-300/40 p-5">
+          <div className="min-w-0 flex-1">
+            <h3 className="font-medium">CEO full access</h3>
+            <p className="mt-1 text-sm text-zinc-300">
+              {settings.ceo_full_access_enabled
+                ? "The CEO can make ordinary workspace changes directly through its UI session."
+                : "The CEO must get human confirmation before workspace changes run."}
+            </p>
+            <p className="mt-1 text-sm text-zinc-300">
+              Direct mode skips proposals for workspace data changes. Authentication, billing, privacy, organization security and human-admin controls remain protected.
+            </p>
+          </div>
+          <ExecutionSwitch label="CEO full access" enabled={settings.ceo_full_access_enabled} disabled={pending}
+            onChange={() => {
+              const enabled = !settings.ceo_full_access_enabled;
+              if (enabled && !window.confirm("Enable CEO full access? The CEO will be able to create, edit, or delete ordinary workspace data without asking a human to confirm each change.")) return;
+              void mutate(async () => {
+                await api<Settings>("/admin/settings", { method: "PATCH", body: JSON.stringify({ ceo_full_access_enabled: enabled }) });
+                await reloadExecutionState();
+              }, `CEO full access ${enabled ? "enabled" : "disabled"}.`);
+            }} />
         </Card>
         <h3 className="font-medium">Agent usage and execution</h3>
         {!usage.agents.length && <p className="text-sm text-zinc-300">No agents configured.</p>}

@@ -1,8 +1,8 @@
 """Restricted, isolated browser sessions for the CEO agent's UI CLI.
 
 The browser is useful for reading the rendered UI and operating its navigation,
-filters, dialogs, and viewport. Mutating API requests are intercepted so workspace
-changes still go through the normal proposal and confirmation flow.
+filters, dialogs, and viewport. Mutating API requests are blocked by default;
+a human administrator can enable direct ordinary workspace changes for the CEO.
 """
 from __future__ import annotations
 
@@ -58,6 +58,7 @@ class _AgentSession:
     page: Any
     app_url: str
     api_url: str
+    allow_writes: bool = False
     last_used: float = field(default_factory=time.monotonic)
     blocked_writes: list[str] = field(default_factory=list)
 
@@ -105,7 +106,7 @@ def _close_session(session: _AgentSession) -> None:
         pass
 
 
-def _new_session(agent) -> _AgentSession:
+def _new_session(agent, allow_writes: bool) -> _AgentSession:
     browser = _ensure_browser()
     app_url, api_url = _configured_urls()
     api_origin = urlsplit(api_url)
@@ -126,7 +127,8 @@ def _new_session(agent) -> _AgentSession:
         "sameSite": "None" if app_origin.netloc != api_origin.netloc and app_origin.scheme == "https" else "Lax",
     }])
     page = context.new_page()
-    session = _AgentSession(context=context, page=page, app_url=app_url, api_url=api_url)
+    session = _AgentSession(context=context, page=page, app_url=app_url, api_url=api_url, allow_writes=allow_writes)
+    page.on("dialog", lambda dialog: dialog.accept() if session.allow_writes else dialog.dismiss())
     app_origin_url = f"{app_origin.scheme}://{app_origin.netloc}"
     api_origin_url = f"{api_origin.scheme}://{api_origin.netloc}"
     api_port = api_origin.port or (443 if api_origin.scheme == "https" else 80)
@@ -144,6 +146,18 @@ def _new_session(agent) -> _AgentSession:
         if origin not in {app_origin_url, api_origin_url} and not loopback_alias:
             route.abort()
             return
+        api_path = api_origin.path.rstrip("/")
+        api_request = origin == api_origin_url and (not api_path or request_url.path == api_path or request_url.path.startswith(api_path + "/"))
+        if (api_request or loopback_alias) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            protected_prefixes = (
+                "/api/admin", "/api/auth", "/api/billing", "/api/privacy",
+                "/api/me/password", "/api/ai/confirm",
+            )
+            protected = any(request_url.path == prefix or request_url.path.startswith(prefix + "/") for prefix in protected_prefixes)
+            if not session.allow_writes or protected:
+                session.blocked_writes.append(f"{request.method.upper()} {request_url.path}")
+                route.abort("blockedbyclient")
+                return
         if loopback_alias:
             # The frontend's dev bundle uses localhost:8000, which inside the API
             # container points back to itself. Rewrite that loopback request to the
@@ -155,24 +169,21 @@ def _new_session(agent) -> _AgentSession:
             headers["cookie"] = f"{SESSION_COOKIE}={token}"
             route.continue_(url=target, headers=headers)
             return
-        if request.url.startswith(api_url) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
-            session.blocked_writes.append(f"{request.method.upper()} {request_url.path}")
-            route.abort("blockedbyclient")
-            return
         route.continue_()
 
     context.route("**/*", guard)
     return session
 
 
-def _session_for(agent) -> _AgentSession:
+def _session_for(agent, allow_writes: bool) -> _AgentSession:
     session = _sessions.get(agent.id)
     if session is not None and session.app_url == _configured_urls()[0] and session.api_url == _configured_urls()[1]:
+        session.allow_writes = allow_writes
         session.last_used = time.monotonic()
         return session
     if session is not None:
         _close_session(session)
-    session = _new_session(agent)
+    session = _new_session(agent, allow_writes)
     _sessions[agent.id] = session
     return session
 
@@ -260,7 +271,7 @@ def _apply_step(session: _AgentSession, step: BrowserStep) -> dict[str, Any]:
     return {"command": command, "path": page.url.removeprefix(session.app_url), "screen": _snapshot(page)}
 
 
-def run_ceo_browser_cli(agent, raw_args: Any) -> dict[str, Any]:
+def run_ceo_browser_cli(agent, raw_args: Any, *, allow_writes: bool = False) -> dict[str, Any]:
     """Execute the CEO-only, app-scoped UI CLI with an isolated agent session."""
     if getattr(agent, "kind", None) != "agent" or getattr(agent, "hierarchy_level", None) != "ceo":
         raise ValueError("The UI CLI is available only to the CEO agent.")
@@ -275,7 +286,7 @@ def run_ceo_browser_cli(agent, raw_args: Any) -> dict[str, Any]:
             if now - session.last_used > _SESSION_IDLE_SECONDS:
                 _close_session(session)
                 _sessions.pop(agent_id, None)
-        session = _session_for(agent)
+        session = _session_for(agent, allow_writes)
         session.blocked_writes.clear()
         if not session.page.url or not session.page.url.startswith(session.app_url):
             session.page.goto(session.app_url + initial_path, wait_until="domcontentloaded", timeout=15000)
@@ -285,7 +296,12 @@ def run_ceo_browser_cli(agent, raw_args: Any) -> dict[str, Any]:
         return {
             "steps": results,
             "blocked_writes": list(dict.fromkeys(session.blocked_writes)),
-            "note": "UI operations run in an isolated CEO session. API changes are blocked here; use the normal proposal tool for a human-confirmed change." if session.blocked_writes else "UI operations run in an isolated CEO session. Workspace changes must use the normal proposal tool.",
+            "full_access": session.allow_writes,
+            "note": (
+                "Full access is enabled for ordinary workspace UI changes. Human-admin, authentication, billing, privacy, security, and confirmation endpoints remain protected."
+                if session.allow_writes else
+                "UI changes are blocked. Use the normal proposal tool for a human-confirmed change."
+            ),
         }
 
 

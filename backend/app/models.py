@@ -19,6 +19,7 @@ class Organization(Base):
     name: Mapped[str] = mapped_column(String(160))
     slug: Mapped[str] = mapped_column(String(80), unique=True)
     execution_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
+    ceo_full_access_enabled: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     onboarded_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 

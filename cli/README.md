@@ -48,8 +48,12 @@ inspect the rendered Enter AI screen and navigate, click or hover accessible
 controls, fill labeled fields, select options, press keys, drag controls, scroll,
 or zoom. It runs in an isolated browser
 session authenticated as that CEO agent and cannot navigate outside Enter AI.
-Changes submitted through the UI are intercepted; the CEO must use the normal
-workspace action tools to prepare a human-confirmed proposal instead.
+UI changes are blocked by default. A human administrator can enable **CEO full
+access** in Admin → Execution controls. When enabled, the CEO can directly make
+ordinary workspace changes through its isolated session. Authentication, billing,
+privacy, security, human-admin operations, and agent delegation remain protected
+by their normal authorization rules. The setting is off by default, and enabling
+it requires an explicit confirmation in the admin UI.
 This tool is available when `AI_PROVIDER` is configured for structured tool
 calling (`anthropic`, `lmstudio`, or `openai_compatible`); the offline deterministic
 provider does not execute tools.

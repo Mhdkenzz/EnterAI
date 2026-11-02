@@ -143,7 +143,7 @@ def safe_detail(detail):
     # Keys and values are both allowlisted; arbitrary strings cannot sneak into logs.
     result = {}
     for key, value in detail.items():
-        if key in {'execution_enabled', 'calls', 'failures', 'duration_ms', 'executions', 'execution_failures'} and isinstance(value, (bool, int)):
+        if key in {'execution_enabled', 'ceo_full_access_enabled', 'calls', 'failures', 'duration_ms', 'executions', 'execution_failures'} and isinstance(value, (bool, int)):
             result[key] = value
         elif key == 'outcome' and value in ('succeeded', 'failed', 'narrated', 'proposed', 'completed', 'inconclusive', 'started'):
             result[key] = value
