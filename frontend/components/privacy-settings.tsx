@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import { Check, Moon, Sun } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -21,6 +22,7 @@ function downloadJson(data: unknown, filename: string) {
 }
 
 export function PrivacySettings({ userId }: { userId: string }) {
+  const [theme, setTheme] = useState<"light" | "dark">("light");
   const [status, setStatus] = useState<DeletionRequest | null>(null);
   const [statusError, setStatusError] = useState("");
   const [exportPassword, setExportPassword] = useState("");
@@ -34,6 +36,19 @@ export function PrivacySettings({ userId }: { userId: string }) {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [cancelBusy, setCancelBusy] = useState(false);
   const [cancelError, setCancelError] = useState("");
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem("enterai-theme");
+    const nextTheme = saved === "dark" ? "dark" : "light";
+    setTheme(nextTheme);
+    document.documentElement.dataset.theme = nextTheme;
+  }, []);
+
+  function changeTheme(nextTheme: "light" | "dark") {
+    setTheme(nextTheme);
+    document.documentElement.dataset.theme = nextTheme;
+    window.localStorage.setItem("enterai-theme", nextTheme);
+  }
 
   function loadStatus() {
     api<DeletionRequest | null>("/privacy/deletion-status").then(setStatus).catch(err => setStatusError(errorText(err)));
@@ -72,9 +87,51 @@ export function PrivacySettings({ userId }: { userId: string }) {
 
   return <div className="min-w-0 space-y-6 [overflow-wrap:anywhere]">
     <div>
-      <h1 className="text-2xl font-semibold">Privacy</h1>
-      <p className="mt-2 text-sm text-zinc-300">Change your password, export your data or delete your account. Each asks for your current password, even though you are signed in.</p>
+      <p className="page-kicker mb-2">Workspace preferences</p>
+      <h1 className="page-title">Settings</h1>
+      <p className="page-description mt-2">Personalize your workspace and manage your account.</p>
     </div>
+
+    <section aria-labelledby="appearance-heading" className="space-y-3">
+      <div>
+        <h2 id="appearance-heading" className="text-lg font-semibold text-ink">Appearance</h2>
+        <p className="mt-1 text-sm text-slate-500">Choose a theme for this browser. Your choice is saved on this device.</p>
+      </div>
+      <Card className="p-4 sm:p-5">
+        <div role="radiogroup" aria-label="Color theme" className="grid gap-3 sm:grid-cols-2">
+          {([
+            ["light", "Light", "A bright canvas with clear surfaces."],
+            ["dark", "Dark", "A darker workspace for low-light settings."],
+          ] as const).map(([value, label, description]) => {
+            const selected = theme === value;
+            const Icon = value === "dark" ? Moon : Sun;
+            return (
+              <button
+                key={value}
+                type="button"
+                role="radio"
+                aria-checked={selected}
+                onClick={() => changeTheme(value)}
+                className={`theme-option${selected ? " is-selected" : ""}`}
+              >
+                <span className={`theme-option-preview ${value}`}><Icon size={18} /></span>
+                <span className="min-w-0 flex-1 text-left">
+                  <span className="block text-sm font-semibold text-ink">{label}</span>
+                  <span className="mt-1 block text-xs leading-5 text-slate-500">{description}</span>
+                </span>
+                <span className="theme-option-check" aria-hidden="true">{selected && <Check size={15} />}</span>
+              </button>
+            );
+          })}
+        </div>
+      </Card>
+    </section>
+
+    <section aria-labelledby="account-privacy-heading" className="space-y-5">
+      <div>
+        <h2 id="account-privacy-heading" className="text-lg font-semibold text-ink">Privacy & account</h2>
+        <p className="mt-1 text-sm text-slate-500">Change your password, export your data or delete your account. Sensitive actions ask you to confirm your password.</p>
+      </div>
 
     <ChangePasswordSection />
 
@@ -124,6 +181,8 @@ export function PrivacySettings({ userId }: { userId: string }) {
             </div>
           </form>}
       </Card>}
+    </section>
+
     </section>
   </div>;
 }

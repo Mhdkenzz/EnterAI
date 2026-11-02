@@ -5,14 +5,14 @@ export default {
   theme: {
     extend: {
       colors: {
-        canvas: "#f5f7fb",
-        panel: "#ffffff",
-        muted: "#f0f3f8",
-        line: "#e1e7f0",
-        ink: "#17243a",
-        accent: "#315fce",
-        "accent-hover": "#244fae",
-        nav: "#12213a",
+        canvas: "var(--canvas)",
+        panel: "var(--surface)",
+        muted: "var(--surface-subtle)",
+        line: "var(--line)",
+        ink: "var(--ink)",
+        accent: "var(--accent)",
+        "accent-hover": "var(--accent-hover)",
+        nav: "var(--nav)",
       },
       boxShadow: {
         card: "0 8px 24px rgba(21, 38, 67, 0.045), 0 1px 2px rgba(21, 38, 67, 0.035)",

@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Bot, Check, ChevronDown, Loader2, MessageCircle, Send, Settings2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -22,32 +22,62 @@ export function Agents({
 }) {
   const roots = agents.filter((a) => !a.parent_agent_id);
   const childrenOf = (id: string) => agents.filter((a) => a.parent_agent_id === id);
+  const mapViewport = useRef<HTMLDivElement>(null);
+  const working = agents.filter((a) => a.is_working).length;
+  const blocked = agents.filter((a) => a.is_blocked).length;
+  useLayoutEffect(() => {
+    const viewport = mapViewport.current;
+    if (viewport) viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
+  }, [agents.length, roots.length]);
   return (
-    <>
-      <div className="mb-6">
-        <p className="page-kicker mb-2">Org chart</p>
-        <h1 className="page-title">Agent hierarchy</h1>
-        <p className="page-description mt-2">
-          {agents.length} agent{agents.length === 1 ? "" : "s"} reporting up to the CEO.
-        </p>
-      </div>
+    <div className="space-y-6">
+      <header className="flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="page-kicker mb-2">Organization</p>
+          <h1 className="page-title">Agent map</h1>
+          <p className="page-description mt-2">See who reports to whom, what each agent is doing, and where work is blocked.</p>
+        </div>
+        <div className="flex flex-wrap gap-2" aria-label="Agent status summary">
+          <span className="agent-summary"><Bot size={14} /> {agents.length} agents</span>
+          <span className="agent-summary"><i className="agent-status-dot is-working" /> {working} working</span>
+          <span className="agent-summary"><i className={cn("agent-status-dot", blocked ? "is-blocked" : "is-idle")} /> {blocked} blocked</span>
+        </div>
+      </header>
       {isAdmin && <HierarchyConfigForm config={config} save={save} />}
-      {roots.length ? (
-        <Card className="overflow-x-auto p-6">
-          <div className="flex min-w-max justify-center gap-10">
-            {roots.map((r) => (
-              <AgentNode key={r.id} agent={r} childrenOf={childrenOf} inspect={inspect} />
-            ))}
+      <section aria-labelledby="reporting-structure-title" className="space-y-3">
+        <div className="flex flex-wrap items-end justify-between gap-2 px-1">
+          <div>
+            <h2 id="reporting-structure-title" className="text-sm font-semibold text-ink">Reporting structure</h2>
+            <p className="mt-1 text-xs text-slate-500">Select an agent to view its activity and open a persistent chat.</p>
           </div>
-        </Card>
-      ) : (
-        <Card className="p-8 text-center text-sm text-zinc-500">
-          {isAdmin
-            ? "No agents yet -- configure the hierarchy above to create your first agent."
-            : "No agents yet. Ask an admin to configure the agent hierarchy."}
-        </Card>
-      )}
-    </>
+          {agents.length > 0 && <span className="text-xs font-medium text-slate-500">{roots.length} {roots.length === 1 ? "top-level agent" : "top-level agents"}</span>}
+        </div>
+        {roots.length ? (
+          <Card className="agent-map-panel overflow-hidden">
+            <div className="agent-map-legend">
+              <span><i className="agent-status-dot is-working" /> Working</span>
+              <span><i className="agent-status-dot is-idle" /> Available</span>
+              <span><i className="agent-status-dot is-blocked" /> Blocked</span>
+            </div>
+            <div ref={mapViewport} className="agent-map-scroll" role="region" aria-label="Scrollable agent reporting map" tabIndex={0}>
+              <div className="agent-map">
+                <ul className="agent-tree agent-tree-root">
+                  {roots.map((r) => (
+                    <AgentNode key={r.id} agent={r} childrenOf={childrenOf} inspect={inspect} root />
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </Card>
+        ) : (
+          <Card className="p-8 text-center text-sm text-zinc-500">
+            {isAdmin
+              ? "No agents yet — configure the hierarchy above to create your first agent."
+              : "No agents yet. Ask an admin to configure the agent hierarchy."}
+          </Card>
+        )}
+      </section>
+    </div>
   );
 }
 export function HierarchyConfigForm({
@@ -124,56 +154,61 @@ export function AgentNode({
   agent,
   childrenOf,
   inspect,
+  root,
 }: {
   agent: Agent;
   childrenOf: (id: string) => Agent[];
   inspect: (a: Agent) => void;
+  root?: boolean;
 }) {
-  const [open, setOpen] = useState(true);
+  // Keep the first view focused on the CEO and direct reports. Larger branches
+  // can be expanded as needed instead of rendering every worker at once.
+  const [open, setOpen] = useState(() => agent.hierarchy_level === "ceo");
   const kids = childrenOf(agent.id);
   const status = agent.is_blocked ? "blocked" : agent.is_working ? "working" : "idle";
   return (
-    <div className="flex flex-col items-center">
-      <button
-        onClick={() => inspect(agent)}
-        className="relative w-40 shrink-0 rounded-xl border border-line bg-white p-3 text-center shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-card focus-visible:outline-none"
-      >
-        <i
-          aria-label={"Status: " + status}
-          title={"Status: " + status}
-          className={cn(
-            "absolute right-2 top-2 h-2 w-2 rounded-full",
-            status === "blocked" && "bg-red-400",
-            status === "working" && "animate-pulse bg-blue-500",
-            status === "idle" && "bg-slate-300",
-          )}
-        />
-        <Avatar user={agent} />
-        <p className="mt-2 truncate text-sm font-medium">{agent.name}</p>
-        <p className="truncate text-xs text-slate-500">{agent.title}</p>
-        <p className={cn("mt-2 truncate text-[10px]", agent.current_task ? "font-medium text-blue-700" : "text-slate-400")}>
-          {agent.current_task ? agent.current_task.title : "Idle"}
-        </p>
-      </button>
-      {kids.length > 0 && (
-        <>
+    <li className={cn("agent-tree-item", root && "is-root")}>
+      <div className="agent-tree-branch">
+        <button
+          onClick={() => inspect(agent)}
+          className={cn("agent-node-card", agent.hierarchy_level === "ceo" && "agent-node-ceo")}
+          aria-label={`Open ${agent.name}, ${agent.title}, ${status}`}
+        >
+          <span className={cn("agent-node-status", `is-${status}`)} aria-label={`Status: ${status}`} title={`Status: ${status}`} />
+          <span className="agent-node-identity">
+            <Avatar user={agent} />
+            <span className="min-w-0 text-left">
+              <span className="block truncate text-sm font-semibold text-ink">{agent.name}</span>
+              <span className="mt-0.5 block truncate text-xs text-slate-500">{agent.title}</span>
+            </span>
+          </span>
+          <span className="agent-node-task">
+            <span className="agent-node-task-label">Current focus</span>
+            <span className={cn("block truncate text-xs", agent.current_task ? "font-medium text-blue-700" : "text-slate-500")}>
+              {agent.current_task ? agent.current_task.title : "Available for work"}
+            </span>
+          </span>
+        </button>
+        {kids.length > 0 && (
           <button
-            aria-label={(open ? "Collapse " : "Expand ") + agent.name + "'s reports"}
+            aria-expanded={open}
+            aria-label={`${open ? "Collapse" : "Expand"} ${kids.length} reports for ${agent.name}`}
             onClick={() => setOpen(!open)}
-            className="my-2 text-slate-400 hover:text-accent"
+            className="agent-report-toggle"
           >
-            <ChevronDown size={14} className={cn("transition-transform", !open && "-rotate-90")} />
+            <ChevronDown size={13} className={cn("transition-transform", !open && "-rotate-90")} />
+            {kids.length} {kids.length === 1 ? "report" : "reports"}
           </button>
-          {open && (
-            <div className="flex gap-6 border-t border-line pt-4">
-              {kids.map((k) => (
-                <AgentNode key={k.id} agent={k} childrenOf={childrenOf} inspect={inspect} />
-              ))}
-            </div>
-          )}
-        </>
+        )}
+      </div>
+      {open && kids.length > 0 && (
+        <ul className="agent-tree agent-tree-children">
+          {kids.map((k) => (
+            <AgentNode key={k.id} agent={k} childrenOf={childrenOf} inspect={inspect} />
+          ))}
+        </ul>
       )}
-    </div>
+    </li>
   );
 }
 export function AgentInspector({
