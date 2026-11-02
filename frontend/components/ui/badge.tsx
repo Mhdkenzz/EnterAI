@@ -1,1 +1,22 @@
-import { cn } from "@/lib/utils"; export function Badge({children,tone="default"}:{children:React.ReactNode;tone?:"default"|"green"|"amber"|"red"|"blue"}){const map={default:"bg-white/5 text-zinc-300",green:"bg-emerald-500/10 text-emerald-300",amber:"bg-amber-500/10 text-amber-300",red:"bg-red-500/10 text-red-300",blue:"bg-sky-400/10 text-sky-300"};return <span className={cn("inline-flex rounded-md px-2 py-0.5 text-[11px] font-medium",map[tone])}>{children}</span>}
+import { cn } from "@/lib/utils";
+
+export function Badge({
+  children,
+  tone = "default",
+}: {
+  children: React.ReactNode;
+  tone?: "default" | "green" | "amber" | "red" | "blue";
+}) {
+  const map = {
+    default: "border-slate-200 bg-slate-100 text-slate-700",
+    green: "border-emerald-200 bg-emerald-50 text-emerald-800",
+    amber: "border-amber-200 bg-amber-50 text-amber-800",
+    red: "border-rose-200 bg-rose-50 text-rose-800",
+    blue: "border-blue-200 bg-blue-50 text-blue-800",
+  };
+  return (
+    <span className={cn("inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-semibold leading-none capitalize", map[tone])}>
+      {children}
+    </span>
+  );
+}

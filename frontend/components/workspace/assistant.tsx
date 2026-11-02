@@ -38,29 +38,34 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
     }
   }
   return (
-    <div className="mx-auto max-w-4xl">
-      <div className="mb-7 text-center">
-        <div className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-xl bg-sky-400/10 text-sky-300">
+    <div className="mx-auto max-w-5xl">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-blue-600 text-white shadow-[0_8px_18px_rgba(49,95,206,.22)]">
           <Sparkles size={22} />
         </div>
-        <h1 className="text-2xl font-semibold">Enter AI Copilot</h1>
-        <p className="mt-2 text-sm text-zinc-500">
-          Grounded in your workspace. No change happens without your confirmation.
-        </p>
+        <div>
+          <p className="page-kicker mb-1">Workspace intelligence</p>
+          <h1 className="page-title">Enter AI Copilot</h1>
+          <p className="page-description mt-1">Get answers from your workspace and review actions before they run.</p>
+        </div>
+        </div>
+        <span className="hidden items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-xs font-semibold text-emerald-800 sm:inline-flex"><span className="h-2 w-2 rounded-full bg-emerald-500" /> Ready to help</span>
       </div>
-      <Card className="min-h-[480px] overflow-hidden">
+      <Card className="min-h-[560px] overflow-hidden">
         {project ? (
-          <div className="flex items-center justify-between border-b border-line bg-sky-400/[.04] px-5 py-2 text-xs text-sky-200">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-blue-100 bg-blue-50/80 px-5 py-3 text-xs text-blue-900">
             <span>
               Scoped to <b>{project.name}</b> -- only this project's data is used.
             </span>
-            <button className="text-sky-300 underline-offset-2 hover:underline" onClick={clear}>
+            <button className="font-semibold text-blue-800 underline-offset-2 hover:underline" onClick={clear}>
               Ask about everything instead
             </button>
           </div>
         ) : (
-          <div className="border-b border-line px-5 py-3 text-xs text-zinc-400">
-            Read tools: projects, tasks, and priority summaries. Write tools are proposed first.
+          <div className="flex items-center gap-2 border-b border-line bg-slate-50/80 px-5 py-3 text-xs text-zinc-400">
+            <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-blue-50 text-blue-700"><Circle size={13} /></span>
+            Answers are grounded in projects, tasks, and priority summaries. Proposed changes always need your approval.
           </div>
         )}
         <div className="flex flex-wrap gap-2 border-b border-line/60 px-5 py-3">
@@ -71,7 +76,7 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
           ].map((prompt) => (
             <button
               key={prompt}
-              className="rounded-full border border-line px-3 py-1 text-xs text-sky-200 hover:border-sky-400/50"
+              className="rounded-full border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-800 disabled:opacity-50"
               onClick={() => ask(prompt)}
               disabled={busy}
             >
@@ -79,18 +84,18 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
             </button>
           ))}
         </div>
-        <div className="space-y-5 p-5">
+        <div className="min-h-[300px] space-y-5 bg-slate-50/50 p-5 sm:p-6">
           {messages.map((m: any, i: number) => (
             <div className={cn("flex gap-3", m.role === "user" && "justify-end")} key={i}>
               {m.role === "assistant" && (
-                <div className="grid h-7 w-7 place-items-center rounded-lg bg-sky-400/10 text-sky-300">
+                <div className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-blue-100 text-blue-800">
                   <Bot size={15} />
                 </div>
               )}
               <div
                 className={cn(
-                  "max-w-[82%] rounded-lg px-4 py-3 text-sm",
-                  m.role === "assistant" ? "bg-white/[.045]" : "bg-sky-400 text-slate-950",
+                  "max-w-[88%] rounded-2xl px-4 py-3 text-sm leading-6 shadow-sm sm:max-w-[82%]",
+                  m.role === "assistant" ? "border border-line bg-white text-ink" : "bg-blue-600 text-white",
                 )}
               >
                 <p>{m.body}</p>
@@ -99,7 +104,7 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
                   return (
                     <div
                       key={a.confirmation_token}
-                      className="mt-3 rounded-lg border border-sky-400/30 bg-black/20 p-3"
+                      className="mt-3 rounded-xl border border-blue-100 bg-blue-50/80 p-3 text-ink"
                     >
                       <p className="font-medium">{a.label}</p>
                       {!!a.details?.length && (
@@ -112,7 +117,7 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
                           ))}
                         </dl>
                       )}
-                      {outcome === "done" && <p className="mt-3 text-xs text-emerald-300">Done.</p>}
+                      {outcome === "done" && <p className="mt-3 text-xs font-semibold text-emerald-700">Done.</p>}
                       {outcome === "rejected" && (
                         <p className="mt-3 text-xs text-zinc-400">Rejected. Nothing was changed.</p>
                       )}
@@ -158,16 +163,16 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
               </div>
             </div>
           ))}
-          {busy && <Loader2 className="animate-spin text-sky-300" size={18} />}{" "}
+          {busy && <div role="status" className="flex items-center gap-2 text-xs text-slate-500"><Loader2 className="animate-spin text-accent" size={16} /> Thinking…</div>}
           {error && (
-            <p role="alert" className="text-sm text-red-300">
+            <p role="alert" className="text-sm text-red-700">
               {error}
             </p>
           )}
         </div>
         <div className="border-t border-line p-4">
           <div className="flex gap-2 rounded-lg border border-line bg-canvas p-2 focus-within:border-accent">
-            <Sparkles className="m-1 text-sky-300" size={16} />
+            <Sparkles className="m-1 text-accent" size={16} />
             <input
               className="min-w-0 flex-1 bg-transparent text-sm outline-none"
               value={text}
@@ -197,7 +202,7 @@ export function Command({ projects, close, open, ai }: any) {
     return () => clearTimeout(id);
   }, [q]);
   return (
-    <div className="fixed inset-0 z-50 grid place-items-start bg-black/65 p-4 pt-[12vh]" onMouseDown={close}>
+    <div className="fixed inset-0 z-50 grid place-items-start bg-slate-950/35 p-4 pt-[12vh] backdrop-blur-sm" onMouseDown={close}>
       <Card className="w-full max-w-2xl overflow-hidden" onMouseDown={(e) => e.stopPropagation()}>
         <div className="flex gap-3 border-b border-line px-4">
           <Search size={18} className="my-auto text-zinc-500" />
@@ -213,15 +218,15 @@ export function Command({ projects, close, open, ai }: any) {
           </button>
         </div>
         <div className="max-h-80 overflow-auto p-2">
-          <button onClick={ai} className="flex w-full gap-3 rounded-lg p-3 text-left hover:bg-sky-400/10">
-            <Sparkles className="text-sky-300" size={17} />
+          <button onClick={ai} className="flex w-full gap-3 rounded-lg p-3 text-left transition hover:bg-blue-50">
+            <Sparkles className="text-accent" size={17} />
             <span className="text-sm">Ask Enter AI</span>
           </button>
           {(!q ? projects : result?.projects || []).map((p: Project) => (
             <button
               key={p.id}
               onClick={() => open(p)}
-              className="flex w-full gap-3 rounded-lg p-3 text-left hover:bg-white/5"
+              className="flex w-full gap-3 rounded-lg p-3 text-left transition hover:bg-blue-50"
             >
               <FolderKanban size={16} className="text-zinc-500" />
               <span className="text-sm">{p.name}</span>

@@ -26,7 +26,7 @@ function useSubmit() {
     }
   }
   const failure = saveError ? (
-    <p role="alert" className="text-sm text-red-300">
+    <p role="alert" className="text-sm text-red-700">
       {saveError}
     </p>
   ) : null;
@@ -97,11 +97,11 @@ export function ProjectForm({ teams, close, create }: any) {
             onChange={(e) => read(e.target.files?.[0])}
           />
         </label>
-        {error && <p className="text-sm text-red-300">{error}</p>}
+        {error && <p className="text-sm text-red-700">{error}</p>}
         {failure}
         {draft && (
           <div className="rounded-lg border border-sky-400/20 bg-sky-400/[.04] p-3 text-xs text-zinc-300">
-            <p className="font-medium text-sky-200">AI suggestions</p>
+            <p className="font-medium text-blue-800">AI suggestions</p>
             <p className="mt-1">
               Priority: <b>{draft.priority}</b> · Suggested team: <b>{draft.suggested_team}</b>
             </p>
@@ -416,14 +416,14 @@ export function Drawer({
         role="dialog"
         aria-modal="true"
         aria-label={`Task: ${task.title}`}
-        className="absolute inset-y-0 right-0 w-full max-w-xl overflow-y-auto border-l border-line bg-[#0e0e12] p-5 sm:p-6"
+        className="absolute inset-y-0 right-0 w-full max-w-xl overflow-y-auto border-l border-line bg-white p-5 text-ink shadow-float sm:p-6"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="mb-6 flex justify-between">
           <Badge tone={task.status === "done" ? "green" : "blue"}>
             {task.status === "done" ? "Completed" : "Task"}
           </Badge>
-          <button aria-label="Close task" onClick={close}>
+          <button aria-label="Close task" className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-ink" onClick={close}>
             <X className="text-zinc-500" />
           </button>
         </div>
@@ -522,7 +522,7 @@ export function Drawer({
         {parent && (
           <p className="mt-4 text-xs text-zinc-400">
             Subtask of{" "}
-            <button className="text-sky-300 hover:underline" onClick={() => openTask(parent)}>
+            <button className="text-accent hover:underline" onClick={() => openTask(parent)}>
               {parent.title}
             </button>
           </p>
@@ -603,7 +603,7 @@ export function Drawer({
                 <li key={a.id}>
                   <a
                     href={`${API_BASE}/attachments/${a.id}/download`}
-                    className="inline-flex items-center gap-2 text-sm text-sky-300 hover:underline"
+                    className="inline-flex items-center gap-2 text-sm text-accent hover:underline"
                   >
                     <Download size={14} />
                     {a.file_name}
@@ -657,7 +657,7 @@ export function Drawer({
             <input type="file" className="hidden" onChange={(e) => attach(e.target.files?.[0])} />
           </label>
           {attachError && (
-            <span role="alert" className="self-center text-xs text-red-300">
+            <span role="alert" className="self-center text-xs text-red-700">
               {attachError}
             </span>
           )}

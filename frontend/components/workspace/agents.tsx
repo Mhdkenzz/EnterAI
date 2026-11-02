@@ -25,9 +25,9 @@ export function Agents({
   return (
     <>
       <div className="mb-6">
-        <p className="text-sm text-sky-300">Org chart</p>
-        <h1 className="mt-1 text-2xl font-semibold">Agent hierarchy</h1>
-        <p className="mt-1 text-sm text-zinc-400">
+        <p className="page-kicker mb-2">Org chart</p>
+        <h1 className="page-title">Agent hierarchy</h1>
+        <p className="page-description mt-2">
           {agents.length} agent{agents.length === 1 ? "" : "s"} reporting up to the CEO.
         </p>
       </div>
@@ -76,8 +76,8 @@ export function HierarchyConfigForm({
   return (
     <Card className="mb-6 p-5">
       <div className="mb-4 flex items-center gap-2">
-        <Settings2 size={16} className="text-sky-300" />
-        <h2 className="text-sm font-semibold">Configure hierarchy</h2>
+        <Settings2 size={16} className="text-accent" />
+        <h2 className="text-sm font-semibold text-ink">Configure hierarchy</h2>
       </div>
       <form
         className="grid gap-3 sm:grid-cols-4"
@@ -95,7 +95,7 @@ export function HierarchyConfigForm({
         }}
       >
         {fields.map(([key, label]) => (
-          <label key={key} className="text-xs text-zinc-400">
+          <label key={key} className="text-xs font-medium text-slate-600">
             {label}
             <input
               type="number"
@@ -136,7 +136,7 @@ export function AgentNode({
     <div className="flex flex-col items-center">
       <button
         onClick={() => inspect(agent)}
-        className="relative w-40 shrink-0 rounded-lg border border-line bg-panel p-3 text-center hover:border-sky-400/50"
+        className="relative w-40 shrink-0 rounded-xl border border-line bg-white p-3 text-center shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-card focus-visible:outline-none"
       >
         <i
           aria-label={"Status: " + status}
@@ -144,14 +144,14 @@ export function AgentNode({
           className={cn(
             "absolute right-2 top-2 h-2 w-2 rounded-full",
             status === "blocked" && "bg-red-400",
-            status === "working" && "bg-sky-400 animate-pulse",
-            status === "idle" && "bg-zinc-700",
+            status === "working" && "animate-pulse bg-blue-500",
+            status === "idle" && "bg-slate-300",
           )}
         />
         <Avatar user={agent} />
         <p className="mt-2 truncate text-sm font-medium">{agent.name}</p>
-        <p className="truncate text-xs text-zinc-500">{agent.title}</p>
-        <p className={cn("mt-2 truncate text-[10px]", agent.current_task ? "text-sky-300" : "text-zinc-600")}>
+        <p className="truncate text-xs text-slate-500">{agent.title}</p>
+        <p className={cn("mt-2 truncate text-[10px]", agent.current_task ? "font-medium text-blue-700" : "text-slate-400")}>
           {agent.current_task ? agent.current_task.title : "Idle"}
         </p>
       </button>
@@ -160,12 +160,12 @@ export function AgentNode({
           <button
             aria-label={(open ? "Collapse " : "Expand ") + agent.name + "'s reports"}
             onClick={() => setOpen(!open)}
-            className="my-2 text-zinc-500 hover:text-sky-300"
+            className="my-2 text-slate-400 hover:text-accent"
           >
             <ChevronDown size={14} className={cn("transition-transform", !open && "-rotate-90")} />
           </button>
           {open && (
-            <div className="flex gap-6 border-t border-line/40 pt-4">
+            <div className="flex gap-6 border-t border-line pt-4">
               {kids.map((k) => (
                 <AgentNode key={k.id} agent={k} childrenOf={childrenOf} inspect={inspect} />
               ))}
@@ -199,7 +199,7 @@ export function AgentInspector({
   return (
     <div className="fixed inset-0 z-30 bg-black/45" onMouseDown={close}>
       <aside
-        className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-line bg-[#0e0e12]"
+        className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-line bg-white text-ink shadow-float"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-line p-5">
@@ -210,51 +210,51 @@ export function AgentInspector({
               <p className="text-xs text-zinc-500">{agent.title}</p>
             </div>
           </div>
-          <button aria-label="Close agent inspector" onClick={close}>
+          <button aria-label="Close agent inspector" className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-ink" onClick={close}>
             <X className="text-zinc-500" />
           </button>
         </div>
         <div className="max-h-72 space-y-4 overflow-y-auto border-b border-line p-5">
           <div>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">Current task</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Current task</h3>
             <p className="mt-1 text-sm">
               {agent.current_task ? agent.current_task.title : "Idle -- no active task."}
             </p>
             {agent.is_blocked && (
-              <p className="mt-1 text-xs text-red-300">
+              <p className="mt-1 text-xs text-red-700">
                 Blocked -- repeated attempts failed. Send a message or reassign the task to reset it.
               </p>
             )}
             {agent.is_working && (
-              <p className="mt-1 text-xs text-sky-300">Working autonomously on this task.</p>
+              <p className="mt-1 text-xs text-blue-700">Working autonomously on this task.</p>
             )}
           </div>
           <div>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">Last completed task</h3>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Last completed task</h3>
             <p className="mt-1 text-sm">
               {agent.last_completed_task ? agent.last_completed_task.title : "None yet."}
             </p>
           </div>
           <div>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
               Direct reports ({reports.length})
             </h3>
             {reports.length ? (
               <ul className="mt-2 space-y-1.5">
                 {reports.map((r) => (
-                  <li key={r.id} className="flex items-center gap-2 text-sm text-zinc-300">
+                  <li key={r.id} className="flex items-center gap-2 text-sm text-slate-700">
                     <Avatar user={r} />
                     {r.name} -- {r.title}
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="mt-1 text-sm text-zinc-500">No direct reports.</p>
+            <p className="mt-1 text-sm text-slate-500">No direct reports.</p>
             )}
           </div>
         </div>
         <div className="flex flex-1 flex-col overflow-hidden">
-          <div className="flex items-center gap-2 px-5 py-3 text-xs text-zinc-400">
+          <div className="flex items-center gap-2 border-b border-line px-5 py-3 text-xs text-slate-600">
             <MessageCircle size={14} />
             Persistent chat with {agent.name}
           </div>
@@ -267,21 +267,21 @@ export function AgentInspector({
             {messages.map((m) => (
               <div key={m.id} className={cn("flex gap-3", m.role === "user" && "justify-end")}>
                 {m.role === "agent" && (
-                  <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-sky-400/10 text-sky-300">
+                  <div className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-blue-50 text-blue-700">
                     <Bot size={14} />
                   </div>
                 )}
                 <div
                   className={cn(
                     "max-w-[82%] rounded-lg px-3 py-2 text-sm",
-                    m.role === "agent" ? "bg-white/[.045]" : "bg-sky-400 text-slate-950",
+                    m.role === "agent" ? "border border-line bg-slate-50 text-ink" : "bg-blue-600 text-white",
                   )}
                 >
                   <p>{m.body}</p>
                   {m.actions?.map((a) => (
                     <div
                       key={a.label}
-                      className="mt-3 rounded-lg border border-sky-400/30 bg-black/20 p-3 text-zinc-100"
+                      className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-ink"
                     >
                       <p>{a.label}</p>
                       <Button size="sm" className="mt-3" onClick={() => confirm(a)}>
@@ -293,15 +293,15 @@ export function AgentInspector({
                 </div>
               </div>
             ))}
-            {busy && <Loader2 className="animate-spin text-sky-300" size={16} />}
+            {busy && <Loader2 className="animate-spin text-accent" size={16} />}
             {error && (
-              <p role="alert" className="text-sm text-red-300">
+              <p role="alert" className="text-sm text-red-700">
                 {error}
               </p>
             )}
           </div>
           <form
-            className="flex gap-2 border-t border-line p-4"
+            className="flex gap-2 border-t border-line bg-white p-4"
             onSubmit={(e) => {
               e.preventDefault();
               if (text.trim()) {

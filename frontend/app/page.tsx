@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Bell, Menu, MessageCircle, Plus, Search, X } from "lucide-react";
+import { Bell, LoaderCircle, Menu, MessageCircle, Plus, Search, X } from "lucide-react";
 import { api, ApiError, SESSION_EXPIRED_EVENT, upload } from "@/lib/api";
 import { AdminConsole } from "@/components/admin-console";
 import { PrivacySettings } from "@/components/privacy-settings";
@@ -60,7 +60,9 @@ export default function EnterAI() {
     [agentInspect, setAgentInspect] = useState<Agent | null>(null),
     [agentMessages, setAgentMessages] = useState<AgentMsg[]>([]),
     [agentChatBusy, setAgentChatBusy] = useState(false),
-    [agentChatError, setAgentChatError] = useState("");
+    [agentChatError, setAgentChatError] = useState(""),
+    [ceoChatLoading, setCeoChatLoading] = useState(false),
+    [ceoUnavailable, setCeoUnavailable] = useState(false);
   async function refresh() {
     try {
       const [me, d, p, u, t, n, a] = await Promise.all([
@@ -280,6 +282,25 @@ export default function EnterAI() {
       setError(e.message);
     }
   }
+  async function openCeoChat() {
+    if (ceoChatLoading) return;
+    setCeoChatLoading(true);
+    try {
+      const fresh = await api<Agent[]>("/agents");
+      setAgents(fresh);
+      const ceo = fresh.find((agent) => agent.hierarchy_level === "ceo");
+      if (!ceo) {
+        setCeoUnavailable(true);
+        return;
+      }
+      setCeoUnavailable(false);
+      await inspectAgent(ceo);
+    } catch (e: any) {
+      setError(e.message || "Could not check the agent hierarchy.");
+    } finally {
+      setCeoChatLoading(false);
+    }
+  }
   async function saveHierarchyConfig(values: Partial<HierarchyConfigT>) {
     const next = await api<HierarchyConfigT>("/hierarchy-config", {
       method: "PATCH",
@@ -302,20 +323,6 @@ export default function EnterAI() {
       if (transcript.current === claim) setAgentMessages(history);
     } catch (e: any) {
       if (transcript.current === claim) setAgentChatError(e.message);
-    }
-  }
-  async function chatWithCeo() {
-    try {
-      const current = await api<Agent[]>("/agents");
-      setAgents(current);
-      const ceo = current.find((agent) => agent.hierarchy_level === "ceo");
-      if (!ceo) {
-        setError("The CEO agent has not been configured yet.");
-        return;
-      }
-      await inspectAgent(ceo);
-    } catch (e: any) {
-      setError(e.message || "Could not open the CEO chat.");
     }
   }
   async function sendAgentMessage(agentId: string, text: string) {
@@ -536,7 +543,7 @@ export default function EnterAI() {
             <span className="hidden sm:inline">New project</span>
           </Button>
         </header>
-        <div className="mx-auto max-w-[1600px] p-4 sm:p-6">
+        <div className="app-content mx-auto max-w-[1600px] p-4 pb-24 sm:p-6 sm:pb-24">
           {error && (
             <div
               role="alert"
@@ -560,6 +567,33 @@ export default function EnterAI() {
           {main}
         </div>
       </main>
+      {ceoUnavailable && (
+        <section
+          aria-labelledby="ceo-setup-title"
+          className="fixed bottom-[5.25rem] right-5 z-20 w-[min(22rem,calc(100vw-2.5rem))] rounded-2xl border border-line bg-white p-4 shadow-float sm:bottom-[5.75rem] sm:right-6"
+        >
+          <div className="flex items-start gap-3">
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-blue-50 text-accent"><MessageCircle size={17} /></span>
+            <div>
+              <h2 id="ceo-setup-title" className="text-sm font-semibold text-ink">CEO chat isn’t set up yet</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-600">An administrator can create the CEO agent from the hierarchy settings.</p>
+            </div>
+          </div>
+          <div className="mt-3 flex items-center justify-between gap-3 pl-12">
+            <button className="text-xs font-semibold text-slate-500 hover:text-ink" onClick={() => setCeoUnavailable(false)}>Dismiss</button>
+            <Button size="sm" onClick={() => { setCeoUnavailable(false); nav("Agents"); }}>Open agent setup</Button>
+          </div>
+        </section>
+      )}
+      <button
+        type="button"
+        onClick={openCeoChat}
+        disabled={ceoChatLoading}
+        className="fixed bottom-5 right-5 z-20 inline-flex min-h-12 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white shadow-[0_10px_28px_rgba(49,95,206,.28)] transition hover:-translate-y-0.5 hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-wait disabled:opacity-80 sm:bottom-6 sm:right-6"
+      >
+        {ceoChatLoading ? <LoaderCircle size={17} className="animate-spin" /> : <MessageCircle size={17} />}
+        <span>{ceoChatLoading ? "Opening CEO chat…" : "Chat with CEO"}</span>
+      </button>
       {command && (
         <Command
           projects={projects}
@@ -629,14 +663,6 @@ export default function EnterAI() {
           }}
         />
       )}
-      <button
-        type="button"
-        onClick={chatWithCeo}
-        className="fixed bottom-5 right-5 z-20 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-black/30 transition hover:bg-sky-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
-      >
-        <MessageCircle size={17} />
-        Chat with CEO
-      </button>
       {task && (
         <Drawer
           key={task.id}

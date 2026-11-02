@@ -2,14 +2,22 @@
 import { useState } from "react";
 import {
   Archive,
+  ArrowUpRight,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  CircleAlert,
   FileText,
+  FolderKanban,
   Grid2X2,
+  Layers3,
   LayoutList,
+  ListTodo,
   Plus,
+  Search,
   Sparkles,
   Trash2,
+  Users,
 } from "lucide-react";
 import { API_BASE } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
@@ -21,17 +29,23 @@ import type { Doc, Project, Task, InboxNotice } from "@/lib/types";
 
 export function Home({ data, activity, project, task, toggle, all, ai }: any) {
   const tasks: Task[] = data?.my_tasks || [];
+  const stats = [
+    { label: "Active projects", value: data?.stats?.active_projects, icon: Layers3, tone: "blue" },
+    { label: "At risk", value: data?.stats?.at_risk, icon: CircleAlert, tone: "rose" },
+    { label: "Open tasks", value: data?.stats?.my_open_tasks, icon: ListTodo, tone: "amber" },
+    { label: "Completed this week", value: data?.stats?.completed_this_week, icon: CheckCircle2, tone: "green" },
+  ];
   return (
     <>
       <div className="mb-7 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-sm text-sky-300">
+          <p className="page-kicker mb-2">
             {new Intl.DateTimeFormat(undefined, { weekday: "long", month: "long", day: "numeric" }).format(
               new Date(),
             )}
           </p>
-          <h1 className="mt-1 text-2xl font-semibold">Your workspace</h1>
-          <p className="mt-1 text-sm text-zinc-400">Keep work moving or ask Enter AI to help.</p>
+          <h1 className="page-title">Workspace overview</h1>
+          <p className="page-description mt-2">A clear view of your projects, priorities, and team momentum.</p>
         </div>
         <Button onClick={ai}>
           <Sparkles size={16} />
@@ -39,27 +53,33 @@ export function Home({ data, activity, project, task, toggle, all, ai }: any) {
         </Button>
       </div>
       <div className="mb-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        {[
-          ["Active projects", data?.stats?.active_projects, "text-sky-300"],
-          ["At risk", data?.stats?.at_risk, "text-red-300"],
-          ["Open tasks", data?.stats?.my_open_tasks, "text-amber-300"],
-          ["Completed", data?.stats?.completed_this_week, "text-emerald-300"],
-        ].map(([l, v, c]) => (
-          <Card key={String(l)} className="p-4">
-            <p className="text-xs text-zinc-500">{l}</p>
-            <p className={cn("mt-2 text-2xl font-semibold", String(c))}>{v ?? "-"}</p>
+        {stats.map(({ label, value, icon: Icon, tone }) => (
+          <Card key={label} className="group flex items-center gap-4 p-4 transition duration-150 hover:-translate-y-0.5 hover:shadow-card sm:p-5">
+            <span className={cn(
+              "grid h-11 w-11 shrink-0 place-items-center rounded-xl",
+              tone === "blue" && "bg-blue-50 text-blue-700",
+              tone === "rose" && "bg-rose-50 text-rose-700",
+              tone === "amber" && "bg-amber-50 text-amber-700",
+              tone === "green" && "bg-emerald-50 text-emerald-700",
+            )}>
+              <Icon size={19} strokeWidth={1.8} />
+            </span>
+            <span>
+              <span className="block text-xs font-medium text-zinc-500">{label}</span>
+              <span className="mt-1 block text-2xl font-bold tracking-tight text-ink">{value ?? "—"}</span>
+            </span>
           </Card>
         ))}
       </div>
       <div className="grid gap-5 xl:grid-cols-[1.45fr_.85fr]">
         <Card>
-          <div className="flex justify-between border-b border-line px-5 py-4">
+          <div className="flex items-center justify-between border-b border-line px-5 py-4">
             <div>
-              <h2 className="text-sm font-semibold">My priorities</h2>
-              <p className="text-xs text-zinc-500">Completed work stays visible.</p>
+              <h2 className="text-sm font-semibold tracking-tight text-ink">My priorities</h2>
+              <p className="mt-1 text-xs text-zinc-500">The work that needs your attention next.</p>
             </div>
-            <Button variant="ghost" size="sm" onClick={all}>
-              View all
+            <Button variant="ghost" size="sm" onClick={all} className="text-accent hover:text-accent-hover">
+              View all <ArrowUpRight size={14} />
             </Button>
           </div>
           {tasks.length ? (
@@ -67,61 +87,80 @@ export function Home({ data, activity, project, task, toggle, all, ai }: any) {
               .slice(0, 6)
               .map((t) => <Row key={t.id} task={t} open={() => task(t)} toggle={() => toggle(t)} />)
           ) : (
-            <p className="p-5 text-sm text-zinc-500">No assigned work yet.</p>
+            <div className="p-8 text-center">
+              <p className="text-sm font-medium text-ink">You’re all caught up</p>
+              <p className="mt-1 text-xs text-zinc-500">New assignments will appear here.</p>
+            </div>
           )}
         </Card>
         <Card>
-          <div className="border-b border-line px-5 py-4">
-            <h2 className="text-sm font-semibold">Project health</h2>
+          <div className="flex items-center justify-between border-b border-line px-5 py-4">
+            <div>
+              <h2 className="text-sm font-semibold tracking-tight text-ink">Project health</h2>
+              <p className="mt-1 text-xs text-zinc-500">Progress across active work.</p>
+            </div>
+            <Layers3 size={16} className="text-slate-400" />
           </div>
           <div className="space-y-4 p-5">
             {(data?.projects || []).map((p: Project) => (
-              <button key={p.id} onClick={() => project(p)} className="block w-full text-left">
-                <div className="mb-1.5 flex justify-between">
-                  <span className="text-sm">{p.name}</span>
+              <button key={p.id} onClick={() => project(p)} className="block w-full rounded-lg p-1 text-left transition hover:bg-slate-50 focus-visible:outline-offset-1">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <span className="truncate text-sm font-medium text-ink">{p.name}</span>
                   <Health health={p.health} />
                 </div>
-                <div className="h-1.5 rounded-full bg-white/5">
+                <div className="h-1.5 overflow-hidden rounded-full bg-slate-100">
                   <div
-                    className="h-full rounded-full"
+                    className="h-full rounded-full transition-[width]"
                     style={{ width: p.progress + "%", background: p.color }}
                   />
                 </div>
-                <p className="mt-1 text-xs text-zinc-500">
-                  {p.progress}% complete, {p.task_count} {p.task_count === 1 ? "task" : "tasks"}
+                <p className="mt-1.5 text-[11px] text-zinc-500">
+                  {p.progress}% complete <span className="px-1 text-slate-300">·</span> {p.task_count} {p.task_count === 1 ? "task" : "tasks"}
                 </p>
               </button>
             ))}
+            {!data?.projects?.length && <p className="text-sm text-zinc-500">Create a project to see its health here.</p>}
           </div>
         </Card>
       </div>
       <Card className="mt-5">
-        <div className="border-b border-line px-5 py-4 text-sm font-semibold">Recent activity</div>
-        {activity.slice(0, 5).map((a: any) => (
-          <div key={a.id} className="flex gap-3 border-b border-line/60 px-5 py-3">
+        <div className="border-b border-line px-5 py-4">
+          <h2 className="text-sm font-semibold tracking-tight text-ink">Recent activity</h2>
+          <p className="mt-1 text-xs text-zinc-500">The latest changes across your workspace.</p>
+        </div>
+        {activity.slice(0, 5).map((a: any, index: number) => (
+          <div key={a.id} className="flex items-start gap-3 border-b border-line/60 px-5 py-3 last:border-b-0">
             <Avatar user={a.actor} />
-            <p className="text-sm text-zinc-300">
-              <b className="text-white">{a.actor?.name || "Enter AI"}</b> {describeActivity(a)}
+            <p className="pt-1 text-sm leading-5 text-zinc-500">
+              <b className="font-semibold text-ink">{a.actor?.name || "Enter AI"}</b> {describeActivity(a)}
             </p>
+            {index === 0 && <span className="ml-auto mt-2 h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500" />}
           </div>
         ))}
+        {!activity.length && <p className="px-5 py-6 text-sm text-zinc-500">Activity will appear here as work moves forward.</p>}
       </Card>
     </>
   );
 }
 export function Portfolio({ projects: all, open, create }: any) {
   const [showArchived, setShowArchived] = useState(false);
+  const [query, setQuery] = useState("");
   const archivedCount = all.filter((p: Project) => p.status === "archived").length;
-  const projects = all.filter((p: Project) => showArchived || p.status !== "archived");
+  const projects = all.filter((p: Project) => {
+    const matchesArchive = showArchived || p.status !== "archived";
+    const text = `${p.name} ${p.code} ${p.team || ""}`.toLowerCase();
+    return matchesArchive && text.includes(query.toLowerCase());
+  });
   return (
     <>
-      <div className="mb-6 flex justify-between">
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-sm text-sky-300">Portfolio</p>
-          <h1 className="mt-1 text-2xl font-semibold">All projects</h1>
+          <p className="page-kicker mb-2">Portfolio</p>
+          <h1 className="page-title">Projects</h1>
+          <p className="page-description mt-2">Plan, track, and keep delivery moving across your teams.</p>
           {archivedCount > 0 && (
             <button
-              className="mt-1 text-xs text-sky-300 hover:underline"
+              className="mt-3 text-xs font-semibold text-accent underline-offset-2 hover:underline"
               onClick={() => setShowArchived((v) => !v)}
             >
               {showArchived ? "Hide archived" : `Show ${archivedCount} archived`}
@@ -133,41 +172,56 @@ export function Portfolio({ projects: all, open, create }: any) {
           New project
         </Button>
       </div>
-      {!projects.length && (
-        <Card className="p-8 text-center">
-          <p className="font-medium">No projects yet</p>
-          <p className="mt-1 text-sm text-zinc-400">
-            Create one, or upload a brief and let Enter AI draft it.
-          </p>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="text-sm text-zinc-500"><span className="font-semibold text-ink">{projects.length}</span> {projects.length === 1 ? "project" : "projects"}</p>
+        <label className="flex h-10 w-full max-w-sm items-center gap-2 rounded-lg border border-line bg-panel px-3 text-zinc-500 shadow-sm focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-100">
+          <Search size={16} />
+          <input
+            aria-label="Search projects"
+            className="w-full bg-transparent text-sm text-ink outline-none placeholder:text-slate-400"
+            placeholder="Search projects or teams"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+          />
+        </label>
+      </div>
+      {!projects.length ? (
+        <Card className="p-10 text-center">
+          <span className="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-blue-50 text-blue-700"><FolderKanban size={21} /></span>
+          <p className="mt-4 font-semibold text-ink">{query ? "No matching projects" : "No projects yet"}</p>
+          <p className="mt-1 text-sm text-zinc-500">{query ? "Try a different project name or team." : "Create a project or upload a brief to start planning."}</p>
+          {!query && <Button className="mt-5" onClick={create}><Plus size={15} /> New project</Button>}
         </Card>
-      )}
-      <Card className={cn("overflow-x-auto", !projects.length && "hidden")}>
-        <div className="min-w-[650px]">
-          <div className="grid grid-cols-[1.6fr_.8fr_.6fr_.5fr] gap-4 border-b border-line px-5 py-2 text-xs uppercase tracking-wide text-zinc-500">
-            <span>Project</span>
-            <span>Team</span>
-            <span>Health</span>
-            <span>Progress</span>
+      ) : (
+      <Card className="overflow-x-auto">
+        <div className="min-w-[680px]">
+          <div className="grid grid-cols-[1.7fr_.9fr_.65fr_.5fr] gap-4 border-b border-line bg-slate-50/80 px-5 py-3 text-[10px] font-bold uppercase tracking-[.12em] text-slate-500">
+            <span>Project</span><span>Team</span><span>Health</span><span>Progress</span>
           </div>
           {projects.map((p: Project) => (
             <button
               key={p.id}
               onClick={() => open(p)}
-              className="grid w-full grid-cols-[1.6fr_.8fr_.6fr_.5fr] gap-4 border-b border-line/60 px-5 py-4 text-left hover:bg-white/[.025]"
+              className="grid w-full grid-cols-[1.7fr_.9fr_.65fr_.5fr] items-center gap-4 border-b border-line/70 px-5 py-4 text-left transition last:border-0 hover:bg-blue-50/35"
             >
-              <span className="text-sm font-medium">
-                <i className="mr-2 inline-block h-2 w-2 rounded-full" style={{ background: p.color }} />
-                {p.name}
-                {p.status === "archived" && <small className="ml-2 text-amber-200">Archived</small>}
-                <small className="ml-2 text-zinc-600">{p.code}</small>
+              <span className="flex min-w-0 items-center gap-3">
+                <i className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-xs font-bold text-white shadow-sm" style={{ background: p.color }}>{p.code.slice(0, 1)}</i>
+                <span className="min-w-0">
+                  <span className="block truncate text-sm font-semibold text-ink">{p.name}</span>
+                  <span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{p.code} {p.status === "archived" && "· Archived"}</span>
+                </span>
               </span>
               <span className="text-sm text-zinc-400">{p.team || "-"}</span>
               <Health health={p.health} />
-              <span className="text-sm text-zinc-400">{p.progress}%</span>
+              <span className="flex items-center gap-2 text-xs font-semibold text-slate-600">
+                <span className="h-1.5 w-14 overflow-hidden rounded-full bg-slate-100"><span className="block h-full rounded-full bg-blue-600" style={{ width: `${p.progress}%` }} /></span>
+                {p.progress}%
+              </span>
             </button>
           ))}
         </div>
       </Card>
+      )}
     </>
   );
 }
@@ -175,9 +229,9 @@ export function Work({ tasks, open, toggle }: any) {
   return (
     <>
       <div className="mb-6">
-        <p className="text-sm text-sky-300">Personal execution</p>
-        <h1 className="mt-1 text-2xl font-semibold">My work</h1>
-        <p className="mt-1 text-sm text-zinc-500">Tick work off without losing it from the list.</p>
+        <p className="page-kicker mb-2">Personal execution</p>
+        <h1 className="page-title">My work</h1>
+        <p className="page-description mt-2">Your assigned tasks, sorted by what needs attention.</p>
       </div>
       <Card>
         {tasks.length ? (
@@ -190,12 +244,16 @@ export function Work({ tasks, open, toggle }: any) {
   );
 }
 export function InboxView({ notices, open }: any) {
+  const unread = notices.filter((n: InboxNotice) => !n.read).length;
   return (
     <>
-      <div className="mb-6">
-        <p className="text-sm text-sky-300">Updates</p>
-        <h1 className="mt-1 text-2xl font-semibold">Inbox</h1>
-        <p className="mt-1 text-sm text-zinc-500">Open an update to mark it read and jump to its project.</p>
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="page-kicker mb-2">Updates</p>
+          <h1 className="page-title">Inbox</h1>
+          <p className="page-description mt-2">Stay current on the work happening across your workspace.</p>
+        </div>
+        <Badge tone={unread ? "blue" : "default"}>{unread} unread</Badge>
       </div>
       <Card>
         {notices.length ? (
@@ -204,15 +262,16 @@ export function InboxView({ notices, open }: any) {
               key={n.id}
               onClick={() => open(n)}
               className={cn(
-                "flex w-full gap-4 border-b border-line/70 px-5 py-4 text-left hover:bg-white/[.02]",
-                !n.read && "bg-sky-400/[.035]",
+                "flex w-full items-start gap-4 border-b border-line/70 px-5 py-4 text-left transition last:border-0 hover:bg-blue-50/35",
+                !n.read && "bg-blue-50/40",
               )}
             >
-              <i className={cn("mt-1.5 h-2 w-2 rounded-full", n.read ? "bg-transparent" : "bg-sky-400")} />
-              <span>
-                <b className="block text-sm">{n.title}</b>
-                <span className="mt-1 block text-sm text-zinc-400">{n.body}</span>
+              <i className={cn("mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full", n.read ? "border border-slate-300 bg-white" : "bg-blue-600 shadow-[0_0_0_3px_rgba(49,95,206,.10)]")} />
+              <span className="min-w-0 flex-1">
+                <b className={cn("block text-sm", n.read ? "font-medium text-slate-700" : "font-semibold text-ink")}>{n.title}</b>
+                <span className="mt-1 block text-sm leading-5 text-zinc-400">{n.body}</span>
               </span>
+              <ArrowUpRight size={15} className="mt-1 shrink-0 text-slate-400" />
             </button>
           ))
         ) : (
@@ -225,10 +284,11 @@ export function InboxView({ notices, open }: any) {
 export function Teams({ teams, selected, projects, open, create, select }: any) {
   return (
     <>
-      <div className="mb-6 flex justify-between">
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
         <div>
-          <p className="text-sm text-sky-300">People and ownership</p>
-          <h1 className="mt-1 text-2xl font-semibold">Teams</h1>
+          <p className="page-kicker mb-2">People and ownership</p>
+          <h1 className="page-title">Teams</h1>
+          <p className="page-description mt-2">Organize ownership and see each team’s active projects.</p>
         </div>
         <Button onClick={create}>
           <Plus size={15} />
@@ -249,17 +309,19 @@ export function Teams({ teams, selected, projects, open, create, select }: any) 
             key={t.id}
             onClick={() => select(t)}
             className={cn(
-              "rounded-lg border p-5 text-left",
+              "app-card rounded-card border p-5 text-left transition duration-150 hover:-translate-y-0.5 hover:shadow-card",
               selected?.id === t.id
-                ? "border-sky-400/50 bg-sky-400/[.05]"
-                : "border-line bg-panel hover:border-zinc-600",
+                ? "border-blue-300 ring-2 ring-blue-100"
+                : "hover:border-blue-200",
             )}
           >
-            <h2 className="font-medium">{t.name}</h2>
+            <div className="flex items-start justify-between gap-3">
+              <span className="grid h-10 w-10 place-items-center rounded-xl bg-indigo-50 text-indigo-700"><Users size={18} /></span>
+              <Badge tone="blue">{t.projects} {t.projects === 1 ? "project" : "projects"}</Badge>
+            </div>
+            <h2 className="mt-4 font-semibold text-ink">{t.name}</h2>
             <p className="mt-1 text-sm text-zinc-500">{t.description || "No description"}</p>
-            <p className="mt-5 text-xs text-zinc-500">
-              {t.projects} {t.projects === 1 ? "project" : "projects"}. Open to view.
-            </p>
+            <p className="mt-4 flex items-center gap-1 text-xs font-semibold text-accent">View team <ArrowUpRight size={13} /></p>
           </button>
         ))}
       </div>
@@ -272,7 +334,7 @@ export function Teams({ teams, selected, projects, open, create, select }: any) 
                 <button
                   key={p.id}
                   onClick={() => open(p)}
-                  className="rounded-lg border border-line bg-panel p-4 text-left hover:border-zinc-600"
+                  className="app-card rounded-xl border p-4 text-left transition hover:border-blue-200 hover:shadow-card"
                 >
                   <div className="flex justify-between">
                     <span className="text-sm font-medium">{p.name}</span>
@@ -315,11 +377,11 @@ export function ProjectView({
       {archived && (
         <div
           role="status"
-          className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-amber-400/30 bg-amber-400/[.06] px-4 py-3 text-sm text-amber-100"
+          className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900"
         >
           <span>This project is archived. It is hidden from the portfolio but nothing has been deleted.</span>
           {canManage && (
-            <Button size="sm" variant="ghost" onClick={() => archive(false)}>
+            <Button size="sm" variant="outline" onClick={() => archive(false)}>
               Restore project
             </Button>
           )}
@@ -327,31 +389,31 @@ export function ProjectView({
       )}
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-sm text-sky-300">{project.code}</p>
-          <div className="mt-1 flex gap-3">
-            <i className="mt-2 h-3 w-3 rounded-full" style={{ background: project.color }} />
-            <h1 className="text-2xl font-semibold">{project.name}</h1>
+          <p className="page-kicker mb-2">{project.code}</p>
+          <div className="mt-1 flex flex-wrap items-center gap-3">
+            <i className="h-3 w-3 rounded-full ring-4 ring-white" style={{ background: project.color }} />
+            <h1 className="page-title">{project.name}</h1>
             <Health health={project.health} />
           </div>
-          <p className="mt-2 text-sm text-zinc-400">{project.description}</p>
+          <p className="page-description mt-2 max-w-2xl">{project.description}</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="ghost" size="sm" onClick={ai}>
+          <Button variant="outline" size="sm" onClick={ai}>
             <Sparkles size={15} />
             Ask Enter AI
           </Button>
-          <Button variant="ghost" size="sm" onClick={edit}>
+          <Button variant="outline" size="sm" onClick={edit}>
             Edit project
           </Button>
           {canManage && !archived && (
-            <Button variant="ghost" size="sm" onClick={() => archive(true)}>
+            <Button variant="outline" size="sm" onClick={() => archive(true)}>
               <Archive size={15} />
               Archive
             </Button>
           )}
           {canManage && (
             <Button
-              variant="ghost"
+              variant="danger"
               size="sm"
               onClick={() => {
                 if (
@@ -366,17 +428,17 @@ export function ProjectView({
               Delete
             </Button>
           )}
-          <div className="flex rounded-lg border border-line bg-panel p-1">
+          <div className="flex rounded-lg border border-line bg-slate-100 p-1">
             <button
               aria-label="Board view"
-              className={cn("rounded p-1.5", mode === "board" && "bg-white/10")}
+              className={cn("rounded-md p-1.5 text-slate-500 transition hover:text-ink", mode === "board" && "bg-white text-blue-700 shadow-sm")}
               onClick={() => setMode("board")}
             >
               <Grid2X2 size={15} />
             </button>
             <button
               aria-label="List view"
-              className={cn("rounded p-1.5", mode === "list" && "bg-white/10")}
+              className={cn("rounded-md p-1.5 text-slate-500 transition hover:text-ink", mode === "list" && "bg-white text-blue-700 shadow-sm")}
               onClick={() => setMode("list")}
             >
               <LayoutList size={15} />
@@ -390,18 +452,18 @@ export function ProjectView({
       </div>
       <Card className="mb-5 p-4">
         <div className="flex flex-wrap items-center gap-3">
-          <FileText size={16} className="text-sky-300" />
-          <span className="text-sm font-medium">Project documents</span>
+          <span className="grid h-8 w-8 place-items-center rounded-lg bg-blue-50 text-blue-700"><FileText size={16} /></span>
+          <span className="text-sm font-semibold text-ink">Project documents</span>
           {project.documents?.map((d: Doc) => (
             <a
               key={d.id}
               href={`${API_BASE}/project-documents/${d.id}/download`}
-              className="rounded bg-white/5 px-2 py-1 text-xs text-sky-300 hover:underline"
+              className="rounded-md border border-blue-100 bg-blue-50 px-2.5 py-1.5 text-xs font-medium text-blue-800 hover:border-blue-200 hover:bg-blue-100"
             >
               {d.file_name}
             </a>
           ))}
-          <label className="ml-auto cursor-pointer text-xs text-sky-300">
+          <label className="ml-auto cursor-pointer rounded-lg px-3 py-2 text-xs font-semibold text-accent transition hover:bg-blue-50">
             Attach document
             <input
               className="hidden"
@@ -457,14 +519,14 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
             if (task && task.status !== s) update(task, { status: s });
           }}
         >
-          <div className="mb-3 flex justify-between px-1 text-xs text-zinc-400">
+          <div className="mb-2 flex items-center justify-between rounded-t-lg border-b-2 border-slate-200 px-2 pb-2 text-[11px] font-bold uppercase tracking-[.1em] text-slate-500">
             <span className="capitalize">{s.replace("_", " ")}</span>
-            <span>{tasks.filter((t: Task) => t.status === s).length}</span>
+            <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">{tasks.filter((t: Task) => t.status === s).length}</span>
           </div>
           <div
             className={cn(
-              "min-h-40 space-y-2 rounded-lg bg-white/[.025] p-2 transition-colors",
-              over === s && "bg-sky-400/[.08] ring-1 ring-sky-400/40",
+              "min-h-40 space-y-2 rounded-xl border border-dashed border-slate-200 bg-slate-100/70 p-2 transition-colors",
+              over === s && "border-blue-300 bg-blue-50 ring-2 ring-blue-100",
             )}
           >
             {tasks
@@ -480,8 +542,8 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                       e.dataTransfer.effectAllowed = "move";
                     }}
                     className={cn(
-                      "cursor-grab rounded-lg border border-line bg-panel p-3 hover:border-zinc-600 active:cursor-grabbing",
-                      t.status === "done" && "border-emerald-500/30 bg-emerald-500/[.035]",
+                      "cursor-grab rounded-xl border border-line bg-white p-3.5 shadow-sm transition hover:-translate-y-0.5 hover:border-blue-200 hover:shadow-card active:cursor-grabbing",
+                      t.status === "done" && "border-emerald-200 bg-emerald-50/70",
                     )}
                   >
                     <div className="mb-3 flex items-center justify-between gap-2">
@@ -494,7 +556,7 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                         <button
                           aria-label={"Move back " + t.title}
                           disabled={t.status === states[0]}
-                          className="text-zinc-500 hover:text-sky-300 disabled:opacity-30"
+                          className="rounded p-1 text-slate-400 transition hover:bg-blue-50 hover:text-blue-700 disabled:opacity-30"
                           onClick={() => move(t, -1)}
                         >
                           <ChevronLeft size={16} />
@@ -502,7 +564,7 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                         <button
                           aria-label={"Advance " + t.title}
                           disabled={t.status === states[states.length - 1]}
-                          className="text-zinc-500 hover:text-sky-300 disabled:opacity-30"
+                          className="rounded p-1 text-slate-400 transition hover:bg-blue-50 hover:text-blue-700 disabled:opacity-30"
                           onClick={() => move(t, 1)}
                         >
                           <ChevronRight size={16} />
@@ -512,8 +574,8 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                     <button
                       onClick={() => open(t)}
                       className={cn(
-                        "block w-full text-left text-sm hover:underline",
-                        t.status === "done" && "text-emerald-100/70 line-through",
+                        "block w-full text-left text-sm font-medium leading-5 text-ink hover:text-accent hover:underline",
+                        t.status === "done" && "text-emerald-700/70 line-through",
                       )}
                     >
                       {t.title}
@@ -532,8 +594,8 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                         )}
                       </div>
                     )}
-                    <div className="mt-4 flex justify-between">
-                      <span className="text-xs text-zinc-600">{when(t.due_date)}</span>
+                    <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-2.5">
+                      <span className="text-[10px] font-medium text-slate-500">{when(t.due_date)}</span>
                       <Avatar user={t.assignee} />
                     </div>
                   </article>

@@ -11,6 +11,7 @@ WorkspaceTools.search_documents for its own app.embeddings import.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 from urllib import error, request
 
@@ -78,7 +79,9 @@ class AnthropicCopilotProvider:
             raise CopilotProviderError("AI_API_KEY is not configured. Set it to use AI_PROVIDER=anthropic.")
         body = json.dumps({
             "model": self.model,
-            "max_tokens": 1024,
+            # Anthropic requires an explicit output budget. Keep it configurable
+            # for deployments and avoid the previous restrictive 1,024-token cap.
+            "max_tokens": int(os.getenv("AI_MAX_OUTPUT_TOKENS", "8192")),
             "system": system,
             "messages": messages,
             "tools": anthropic_tool_specs(role) + list(extra_tools or []),

@@ -1,8 +1,69 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+:root {
+  color-scheme: light;
+  --canvas: #f5f7fb;
+  --surface: #ffffff;
+  --surface-subtle: #f0f3f8;
+  --line: #e1e7f0;
+  --ink: #17243a;
+  --muted: #627189;
+  --accent: #315fce;
+  --accent-hover: #244fae;
+  --nav: #12213a;
+  --nav-hover: #1a2c49;
+  --nav-muted: #aab8cd;
+  --radius-card: 14px;
+  --shadow-card: 0 8px 24px rgba(21, 38, 67, 0.045), 0 1px 2px rgba(21, 38, 67, 0.035);
+}
+
 * { box-sizing: border-box; }
-body { margin: 0; background: #09090b; color: #f6f6f7; font-family: Arial, Helvetica, sans-serif; }
-button, input { font: inherit; }
-::selection { background: rgba(56,189,248,.35); }
-.text-zinc-500, .text-zinc-600 { color: #a1a1aa !important; }
+html { min-height: 100%; background: var(--canvas); }
+body {
+  min-height: 100vh;
+  margin: 0;
+  background: var(--canvas);
+  color: var(--ink);
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+button, input, select, textarea { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+::selection { background: rgba(49, 95, 206, 0.18); color: var(--ink); }
+:focus-visible { outline: 3px solid rgba(49, 95, 206, 0.34); outline-offset: 2px; }
+
+.app-content { color: var(--ink); }
+.app-content .text-zinc-100,
+.app-content .text-zinc-200 { color: #1d2c43 !important; }
+.app-content .text-zinc-300 { color: #3e4d63 !important; }
+.app-content .text-zinc-400,
+.app-content .text-zinc-500,
+.app-content .text-zinc-600 { color: #65748a !important; }
+.app-content .text-sky-200,
+.app-content .text-sky-300 { color: #2854b4 !important; }
+.app-content .text-emerald-200,
+.app-content .text-emerald-300 { color: #14724f !important; }
+.app-content .text-amber-200,
+.app-content .text-amber-300 { color: #8b5700 !important; }
+.app-content .text-red-200,
+.app-content .text-red-300 { color: #a93647 !important; }
+.app-content .text-slate-950 { color: #fff !important; }
+
+.app-sidebar { color: #eef3fa; background: var(--nav); }
+.app-sidebar .text-zinc-400,
+.app-sidebar .text-zinc-500 { color: var(--nav-muted) !important; }
+.app-sidebar .text-sky-300 { color: #a9c4ff !important; }
+
+.app-card { border-color: var(--line); background: var(--surface); box-shadow: var(--shadow-card); }
+.surface-soft { background: var(--surface-subtle); }
+.page-kicker { color: var(--accent); font-size: .75rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.page-title { color: var(--ink); font-size: clamp(1.55rem, 2.2vw, 1.9rem); font-weight: 700; letter-spacing: -.035em; line-height: 1.15; }
+.page-description { color: var(--muted); font-size: .925rem; line-height: 1.55; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+}

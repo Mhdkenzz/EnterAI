@@ -40,8 +40,8 @@ export function Notice({ tone, children }: { tone: "error" | "ok"; children: Rea
       className={cn(
         "rounded-lg border p-3 text-sm",
         tone === "error"
-          ? "border-red-500/30 bg-red-500/10 text-red-200"
-          : "border-emerald-500/30 bg-emerald-500/10 text-emerald-200",
+          ? "border-rose-200 bg-rose-50 text-rose-800"
+          : "border-emerald-200 bg-emerald-50 text-emerald-800",
       )}
     >
       {children}
@@ -118,11 +118,11 @@ function TermsCheckbox() {
       <input type="checkbox" required className="mt-0.5" />
       <span>
         I agree to the{" "}
-        <a href={TERMS_URL} target="_blank" rel="noreferrer" className="text-sky-300 underline">
+        <a href={TERMS_URL} target="_blank" rel="noreferrer" className="text-accent underline">
           Terms of Service
         </a>{" "}
         and{" "}
-        <a href={PRIVACY_URL} target="_blank" rel="noreferrer" className="text-sky-300 underline">
+        <a href={PRIVACY_URL} target="_blank" rel="noreferrer" className="text-accent underline">
           Privacy Policy
         </a>
         .
@@ -184,7 +184,7 @@ export function Login({ login, busy, error, forgot, signup }: any) {
       <div className="mt-5 border-t border-line pt-4">
         <button
           type="button"
-          className="w-full text-sm text-sky-300 underline-offset-2 hover:underline"
+          className="w-full text-sm text-accent underline-offset-2 hover:underline"
           onClick={() => setSso((v) => !v)}
         >
           {sso ? "Use password instead" : "Continue with SSO"}
@@ -216,7 +216,7 @@ export function Login({ login, busy, error, forgot, signup }: any) {
         )}
       </div>
       <div className="mt-5 flex flex-wrap items-center justify-between gap-2 text-xs">
-        <button type="button" onClick={forgot} className="text-sky-300 underline-offset-2 hover:underline">
+        <button type="button" onClick={forgot} className="text-accent underline-offset-2 hover:underline">
           Forgot your password?
         </button>
         <button type="button" onClick={signup} className="text-zinc-400 underline-offset-2 hover:underline">

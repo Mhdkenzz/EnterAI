@@ -56,7 +56,7 @@ export function Onboarding({
               aria-hidden
               className={cn(
                 "grid h-5 w-5 shrink-0 place-items-center rounded-full border",
-                step.done ? "border-emerald-400 bg-emerald-400 text-slate-950" : "border-zinc-600",
+                step.done ? "border-emerald-600 bg-emerald-600 text-white" : "border-slate-300",
               )}
             >
               {step.done && <Check size={12} />}
@@ -86,7 +86,7 @@ export function Onboarding({
             }
           }}
         >
-          <label className="min-w-48 flex-1 text-xs text-zinc-400">
+          <label className="min-w-48 flex-1 text-xs font-medium text-slate-600">
             Invite a teammate
             <input
               type="email"
@@ -97,7 +97,7 @@ export function Onboarding({
               onChange={(e) => setEmail(e.target.value)}
             />
           </label>
-          <label className="text-xs text-zinc-400">
+          <label className="text-xs font-medium text-slate-600">
             Role
             <select className={field} value={role} onChange={(e) => setRole(e.target.value)}>
               <option value="member">member</option>
@@ -109,12 +109,12 @@ export function Onboarding({
             {busy && <Loader2 className="animate-spin" size={15} />}Send invite
           </Button>
           {sent && (
-            <p role="status" className="w-full text-xs text-emerald-300">
+            <p role="status" className="w-full text-xs text-emerald-700">
               Invitation sent to {sent}.
             </p>
           )}
           {error && (
-            <p role="alert" className="w-full text-xs text-red-300">
+            <p role="alert" className="w-full text-xs text-red-700">
               {error}
             </p>
           )}
@@ -129,14 +129,14 @@ export function VerifyBanner({ user, resend }: { user: User | null; resend: () =
   return (
     <div
       role="status"
-      className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-100"
+      className="mb-4 flex flex-wrap items-center gap-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm font-medium text-amber-950 shadow-sm"
     >
       <span>Confirm your email address to secure your account.</span>
       {sent ? (
-        <span className="text-xs text-amber-200/80">Confirmation link sent.</span>
+        <span className="text-xs text-amber-800">Confirmation link sent.</span>
       ) : (
         <button
-          className="text-xs underline underline-offset-2"
+          className="text-xs font-semibold text-amber-900 underline underline-offset-2 hover:text-amber-700"
           onClick={async () => {
             await resend();
             setSent(true);
