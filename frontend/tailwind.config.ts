@@ -5,12 +5,12 @@ export default {
   theme: {
     extend: {
       colors: {
-        canvas: "var(--canvas)",
+        canvas: "rgb(var(--canvas-rgb) / <alpha-value>)",
         panel: "var(--surface)",
         muted: "var(--surface-subtle)",
-        line: "var(--line)",
+        line: "rgb(var(--line-rgb) / <alpha-value>)",
         ink: "var(--ink)",
-        accent: "var(--accent)",
+        accent: "rgb(var(--accent-rgb) / <alpha-value>)",
         "accent-hover": "var(--accent-hover)",
         nav: "var(--nav)",
       },

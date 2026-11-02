@@ -5,12 +5,15 @@
 :root {
   color-scheme: light;
   --canvas: #f5f7fb;
+  --canvas-rgb: 245 247 251;
   --surface: #ffffff;
   --surface-subtle: #f0f3f8;
   --line: #e1e7f0;
+  --line-rgb: 225 231 240;
   --ink: #17243a;
   --muted: #627189;
   --accent: #315fce;
+  --accent-rgb: 49 95 206;
   --accent-hover: #244fae;
   --nav: #12213a;
   --nav-hover: #1a2c49;
@@ -24,12 +27,15 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
   --canvas: #0d1420;
+  --canvas-rgb: 13 20 32;
   --surface: #141f2e;
   --surface-subtle: #1a293b;
   --line: #2a3a50;
+  --line-rgb: 42 58 80;
   --ink: #e8eef7;
   --muted: #9eacc0;
   --accent: #3d6fd1;
+  --accent-rgb: 61 111 209;
   --accent-hover: #315bb6;
   --nav: #08111d;
   --nav-hover: #18263a;
