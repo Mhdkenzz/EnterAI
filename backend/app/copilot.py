@@ -22,7 +22,6 @@ import jwt
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from .ai.context_budget import cap_tool_result
 from .ai.profiles import DEFAULT_PROFILE
 from .ai.providers import AnthropicCopilotProvider, DeterministicCopilotProvider, OpenAICompatibleCopilotProvider
 from .ai.tool_routing import preflight_tool_calls
@@ -582,7 +581,7 @@ class CopilotService:
                 try:
                     result = execute_read_tool(name, call["args"], tools)
                     used_read_tools.append(name)
-                    messages.append(self.provider.tool_result_message(call["id"], cap_tool_result(result)))
+                    messages.append(self.provider.tool_result_message(call["id"], result))
                 except (ValueError, KeyError) as exc:
                     messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
             if confirmed_action:
@@ -664,7 +663,7 @@ class CopilotService:
                 try:
                     result = execute_read_tool(name, call["args"], tools)
                     used_read_tools.append(name)
-                    messages.append(self.provider.tool_result_message(call["id"], cap_tool_result(result)))
+                    messages.append(self.provider.tool_result_message(call["id"], result))
                 except (ValueError, KeyError) as exc:
                     messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
         return {"outcome": "inconclusive", "text": None, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}

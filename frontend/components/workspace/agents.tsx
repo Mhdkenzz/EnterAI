@@ -100,7 +100,6 @@ export function HierarchyConfigForm({
             <input
               type="number"
               min={0}
-              max={20}
               className={small}
               value={form[key]}
               onChange={(e) => setForm((f) => ({ ...f, [key]: Number(e.target.value) }))}

@@ -29,11 +29,9 @@ from .copilot import CopilotProviderError, CopilotService, WorkspaceTools
 from .database import SessionLocal, engine
 from .models import AgentMessage, Task, User, Organization
 from .observability import execution_allowed, audit_context, scheduler_failure
-from .ratelimit import build_rate_limiter
 
 MAX_CONSECUTIVE_FAILURES = int(os.getenv("AGENT_EXECUTION_MAX_FAILURES", "3"))
 TICK_INTERVAL_SECONDS = float(os.getenv("AGENT_EXECUTION_INTERVAL_SECONDS", "30"))
-DAILY_CALL_LIMIT = int(os.getenv("AGENT_EXECUTION_DAILY_LIMIT", "50"))
 
 # Advisory-lock namespace for agent execution; pairing it with the agent key keeps
 # these locks from colliding with any other advisory lock in the same database.
@@ -47,7 +45,6 @@ LOCK_NAMESPACE = 0x454149
 # step's own duration) comfortably clear.
 STEP_COOLDOWN_SECONDS = TICK_INTERVAL_SECONDS * 0.9
 
-_daily_limiter = build_rate_limiter(max_calls=DAILY_CALL_LIMIT, window_seconds=86400, namespace="agent-daily")
 _background_task: asyncio.Task | None = None
 
 
@@ -178,8 +175,6 @@ def run_execution_tick(db: Session | None = None, service: CopilotService | None
                 # allowance is only drawn down after both checks pass, so a replica
                 # that loses the race never spends budget it will not use.
                 if not acquired or _stepped_recently(bind, agent_id, cooldown):
-                    continue
-                if not _daily_limiter.allow(agent_id):
                     continue
                 with audit_context("scheduler", agent_id):
                     try:

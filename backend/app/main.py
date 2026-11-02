@@ -20,8 +20,7 @@ from .models import Activity, AgentMessage, Attachment, Comment, CopilotConfirma
 from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
 from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging, configure_error_reporting
 from . import execution
-from .hierarchy import MAX_HIERARCHY_AGENTS, desired_counts, reconcile_agents
-from .ratelimit import build_rate_limiter
+from .hierarchy import reconcile_agents
 from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
 from .storage import get_storage
 from .indexing import index_document
@@ -179,10 +178,10 @@ class ConfirmAction(BaseModel): confirmation_token: str = Field(min_length=20, m
 class AssignAgent(BaseModel): agent_id: str
 class AgentMessageIn(BaseModel): message: str = Field(min_length=1, max_length=4000)
 class HierarchyConfigUpdate(BaseModel):
-    vp_count: int | None = Field(default=None, ge=0, le=20)
-    directors_per_vp: int | None = Field(default=None, ge=0, le=20)
-    managers_per_director: int | None = Field(default=None, ge=0, le=20)
-    workers_per_manager: int | None = Field(default=None, ge=0, le=20)
+    vp_count: int | None = Field(default=None, ge=0)
+    directors_per_vp: int | None = Field(default=None, ge=0)
+    managers_per_director: int | None = Field(default=None, ge=0)
+    workers_per_manager: int | None = Field(default=None, ge=0)
 
 def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"kind":user.kind,"title":user.title,"avatar":user.avatar,"email_verified":user.email_verified_at is not None}
 def project_out(p: Project, db: Session):
@@ -688,10 +687,6 @@ def hierarchy_config(user:User=Depends(current_user),db:Session=Depends(get_db))
 def update_hierarchy_config(data: HierarchyConfigUpdate, user:User=Depends(human_admin), db:Session=Depends(get_db)):
     cfg = ensure_hierarchy_config(db, user.organization_id)
     values = data.model_dump(exclude_unset=True)
-    prospective = {**_hierarchy_config_out(cfg), **values}
-    total = sum(desired_counts(**prospective).values())
-    if total > MAX_HIERARCHY_AGENTS:
-        raise HTTPException(422, f"This configuration would create {total} agents, above the {MAX_HIERARCHY_AGENTS}-agent limit. Reduce the counts per level.")
     for key, value in values.items(): setattr(cfg, key, value)
     db.commit()
     with audit_context(user.kind, user.id, user.id if user.kind == "human" else None):
@@ -738,9 +733,6 @@ def agent_messages(agent_id: str, user:User=Depends(current_user), db:Session=De
 
 @app.post("/api/agents/{agent_id}/messages", status_code=201)
 def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(current_user), db:Session=Depends(get_db)):
-    if not AI_PLAN_RATE_LIMITER.allow(user.id):
-        raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
-    _enforce_ai_usage_limit(db, user.organization_id)
     agent = _get_org_agent(db, user, agent_id)
     if agent.retired_at is not None:
         raise HTTPException(409, "This agent has been retired and can no longer be messaged")
@@ -799,18 +791,6 @@ def search(q:str=Query(min_length=1, max_length=200),user:User=Depends(current_u
 @app.get("/api/risks")
 def risks(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id,Project.health=="at_risk")).all()]
-AI_PLAN_RATE_LIMITER = build_rate_limiter(
-    max_calls=int(os.getenv("AI_PLAN_RATE_LIMIT_PER_MINUTE", "20")), window_seconds=60,
-    namespace="ai-plan",
-)
-
-def _enforce_ai_usage_limit(db: Session, organization_id: str) -> None:
-    from .billing_service import BillingService
-    problem = BillingService(db).entitlement_problem(organization_id, "ai_calls", 1)
-    if problem:
-        raise HTTPException(402, problem)
-
-
 def _record_ai_usage(db: Session, organization_id: str) -> None:
     from .billing_service import BillingService
     BillingService(db).record_usage(organization_id, "ai_calls", 1)
@@ -818,9 +798,6 @@ def _record_ai_usage(db: Session, organization_id: str) -> None:
 
 @app.post("/api/ai/plan")
 def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    if not AI_PLAN_RATE_LIMITER.allow(user.id):
-        raise HTTPException(429, "Too many Copilot requests. Wait a moment and try again.")
-    _enforce_ai_usage_limit(db, user.organization_id)
     if data.project_id:
         ensure_project(db, user, data.project_id)
     try:

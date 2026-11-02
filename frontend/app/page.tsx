@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useRef, useState } from "react";
-import { Bell, Menu, Plus, Search, X } from "lucide-react";
+import { Bell, Menu, MessageCircle, Plus, Search, X } from "lucide-react";
 import { api, ApiError, SESSION_EXPIRED_EVENT, upload } from "@/lib/api";
 import { AdminConsole } from "@/components/admin-console";
 import { PrivacySettings } from "@/components/privacy-settings";
@@ -304,6 +304,20 @@ export default function EnterAI() {
       if (transcript.current === claim) setAgentChatError(e.message);
     }
   }
+  async function chatWithCeo() {
+    try {
+      const current = await api<Agent[]>("/agents");
+      setAgents(current);
+      const ceo = current.find((agent) => agent.hierarchy_level === "ceo");
+      if (!ceo) {
+        setError("The CEO agent has not been configured yet.");
+        return;
+      }
+      await inspectAgent(ceo);
+    } catch (e: any) {
+      setError(e.message || "Could not open the CEO chat.");
+    }
+  }
   async function sendAgentMessage(agentId: string, text: string) {
     transcript.current++;
     setAgentChatBusy(true);
@@ -522,7 +536,7 @@ export default function EnterAI() {
             <span className="hidden sm:inline">New project</span>
           </Button>
         </header>
-        <div className="grid-bg mx-auto max-w-[1600px] p-4 sm:p-6">
+        <div className="mx-auto max-w-[1600px] p-4 sm:p-6">
           {error && (
             <div
               role="alert"
@@ -615,6 +629,14 @@ export default function EnterAI() {
           }}
         />
       )}
+      <button
+        type="button"
+        onClick={chatWithCeo}
+        className="fixed bottom-5 right-5 z-20 inline-flex items-center gap-2 rounded-full bg-accent px-4 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-black/30 transition hover:bg-sky-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-canvas"
+      >
+        <MessageCircle size={17} />
+        Chat with CEO
+      </button>
       {task && (
         <Drawer
           key={task.id}

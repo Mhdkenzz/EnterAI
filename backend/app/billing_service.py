@@ -13,7 +13,6 @@ log = logging.getLogger(__name__)
 # What an organization gets before it pays. Operators tune these per deployment;
 # paid plans come from BILLING_PLANS (see sync_plans_from_env).
 TRIAL_DAYS = int(os.getenv("TRIAL_DAYS", "14"))
-TRIAL_AI_CALL_LIMIT = int(os.getenv("TRIAL_AI_CALL_LIMIT", "200"))
 TRIAL_SEAT_LIMIT = int(os.getenv("TRIAL_SEAT_LIMIT", "0")) or None  # 0 = no seat cap during the trial
 # past_due keeps access while Stripe retries the card (its dunning window); an
 # organization is only cut off once Stripe gives up and cancels.
@@ -51,11 +50,8 @@ def sync_plans_from_env(db: Session) -> None:
 
 def ensure_trial_subscription(db: Session, organization_id: str):
     """Every organization gets exactly one OrganizationSubscription row, created
-    at registration (see main.py's register()). Without this, enforce_plan_limit
-    denies every org outright -- it treats "no subscription row" as "not entitled
-    to any usage" -- so every newly registered org would be locked out of AI
-    features from the first request. The trial runs for TRIAL_DAYS with
-    TRIAL_AI_CALL_LIMIT AI calls; after that an admin has to choose a plan."""
+    at registration (see main.py's register()). AI usage is uncapped; the trial
+    period remains for billing and seat entitlements."""
     from .billing_models import OrganizationSubscription
     existing = db.scalars(select(OrganizationSubscription).where(
         OrganizationSubscription.organization_id == organization_id)).first()
@@ -112,11 +108,13 @@ class BillingService:
 
     def limit_for(self, sub, metric: str) -> int | None:
         from .billing_models import BillingPlan
+        if metric == "ai_calls":
+            return None
         plan = self.db.get(BillingPlan, sub.plan_id) if sub.plan_id else None
         if plan is not None:
             return {"ai_calls": plan.ai_usage_limit, "seats": plan.seat_limit}.get(metric)
         if sub.status == "trial":
-            return {"ai_calls": TRIAL_AI_CALL_LIMIT, "seats": TRIAL_SEAT_LIMIT}.get(metric)
+            return {"seats": TRIAL_SEAT_LIMIT}.get(metric)
         return None  # active without a mapped plan: set up by hand, not metered
 
     def usage_since(self, organization_id: str, metric: str, since: datetime) -> int:

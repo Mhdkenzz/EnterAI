@@ -12,7 +12,7 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 - Copilot chat with organization-scoped read tools and signed, explicit confirmation required before any write; each proposal shows the project and fields it will change and can be rejected
 - New-project brief ingestion for PDF, DOC, DOCX, TXT, XLSX, CSV, and JSON with editable AI-drafted metadata and suggested tasks
 - S3-compatible upload storage (local disk for a single node), mirrored to a backup bucket
-- Trials, Stripe Checkout and customer portal, per-period usage and seat limits
+- Trials, Stripe Checkout and customer portal, per-period usage tracking and seat limits
 - Seeded demo workspace (three projects, users, teams, tasks and notifications)
 - Alembic migration, smoke tests, Docker Compose, and environment configuration
 

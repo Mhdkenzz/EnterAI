@@ -35,9 +35,6 @@ LEVEL_TITLES = {
 # Levels senior enough to act with admin-equivalent tool permissions (see TOOL_ROLES
 # in copilot.py); everyone else gets the same permissions as a human team member.
 SENIOR_LEVELS = {"ceo", "vp"}
-MAX_HIERARCHY_AGENTS = 200
-
-
 def desired_counts(vp_count: int, directors_per_vp: int, managers_per_director: int, workers_per_manager: int) -> dict[str, int]:
     vp = max(vp_count, 0)
     director = vp * max(directors_per_vp, 0)

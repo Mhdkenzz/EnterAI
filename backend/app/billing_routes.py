@@ -24,7 +24,7 @@ NOT_CONFIGURED = "Online billing is not set up for this deployment yet. Contact 
 
 def _plan_out(plan: BillingPlan) -> dict:
     return {"id": plan.id, "name": plan.name, "price_cents": plan.price_cents, "currency": plan.currency,
-            "seat_limit": plan.seat_limit, "ai_usage_limit": plan.ai_usage_limit}
+            "seat_limit": plan.seat_limit, "ai_usage_limit": None}
 
 
 @router.get("")
@@ -48,7 +48,7 @@ def billing_overview(user: User = Depends(human_admin), db: Session = Depends(ge
         "current_period_end": sub.current_period_end.replace(tzinfo=None).isoformat() + "Z" if sub.current_period_end else None,
         "usage": {"ai_calls": service.usage_since(user.organization_id, "ai_calls", service.period_start(sub)),
                   "ai_limit": service.limit_for(sub, "ai_calls"), "seat_limit": service.limit_for(sub, "seats")},
-        "blocked_reason": service.entitlement_problem(user.organization_id, "ai_calls", 0),
+        "blocked_reason": None,
         "plans": plans,
         "checkout_available": bool(service.stripe_key),
         "portal_available": bool(service.stripe_key and sub.stripe_customer_id),

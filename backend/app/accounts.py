@@ -43,7 +43,6 @@ INVITE_ROLES = ("admin", "manager", "member")
 _LOGIN_LIMITER = build_rate_limiter(int(os.getenv("AUTH_LOGIN_RATE_LIMIT_PER_MINUTE", "10")), 60, "auth-login")
 _SIGNUP_LIMITER = build_rate_limiter(int(os.getenv("AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE", "5")), 60, "auth-signup")
 _RECOVERY_LIMITER = build_rate_limiter(int(os.getenv("AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE", "5")), 60, "auth-recovery")
-_TOKEN_LIMITER = build_rate_limiter(int(os.getenv("AUTH_TOKEN_RATE_LIMIT_PER_MINUTE", "20")), 60, "auth-token")
 # Invites send mail from our domain to any address an admin types, and anyone can
 # become an admin by signing up -- without a cap this is a free spam relay that
 # burns the sending domain's reputation. Admins who have not confirmed their own
@@ -179,8 +178,7 @@ def forgot_password(data: EmailOnly, request: Request, db: Session = Depends(get
 
 
 @router.post("/api/auth/reset-password")
-def reset_password(data: ResetPassword, request: Request, db: Session = Depends(get_db)):
-    enforce(_TOKEN_LIMITER, request)
+def reset_password(data: ResetPassword, db: Session = Depends(get_db)):
     token = redeem_auth_token(db, data.token, PASSWORD_RESET)
     if not token:
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
@@ -229,8 +227,7 @@ def change_password(data: ChangePassword, request: Request, response: Response,
 
 
 @router.post("/api/auth/verify-email")
-def verify_email(data: TokenOnly, request: Request, db: Session = Depends(get_db)):
-    enforce(_TOKEN_LIMITER, request)
+def verify_email(data: TokenOnly, db: Session = Depends(get_db)):
     token = redeem_auth_token(db, data.token, EMAIL_VERIFICATION)
     if not token:
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
@@ -318,11 +315,10 @@ def revoke_invite(invite_id: str, user: User = Depends(human_admin), db: Session
 
 
 @router.get("/api/auth/invites/{token}/preview")
-def preview_invite(token: str, request: Request, db: Session = Depends(get_db)):
+def preview_invite(token: str, db: Session = Depends(get_db)):
     """Lets the accept screen show who invited you before you type a password. Only
     someone holding the token sees this, and it returns nothing they were not
     already told in the email."""
-    enforce(_TOKEN_LIMITER, request)
     invite = find_live_invite(db, token)
     if not invite:
         raise HTTPException(404, GENERIC_TOKEN_ERROR)
@@ -333,8 +329,7 @@ def preview_invite(token: str, request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/api/auth/accept-invite")
-def accept_invite(data: AcceptInvite, request: Request, response: Response, db: Session = Depends(get_db)):
-    enforce(_TOKEN_LIMITER, request)
+def accept_invite(data: AcceptInvite, response: Response, db: Session = Depends(get_db)):
     invite = find_live_invite(db, data.token)
     if not invite:
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
