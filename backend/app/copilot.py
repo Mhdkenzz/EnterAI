@@ -31,7 +31,8 @@ from .ai.conversation_memory import ConversationMemory
 from .auth import CONFIRMATION_SECRET
 from .models import Activity, Comment, Notification, Organization, Project, ProjectDocument, Task, Team, User
 from .agent_workspace import (
-    MAX_PATCH_PREVIEW, REPO_APPLY_PATCH_NAME, REPO_APPLY_PATCH_SPEC, REPO_PATCH_NAME, REPO_PATCH_SPEC,
+    MAX_AGENT_PATCHES_PER_RUN, MAX_AGENT_PATCH_BYTES_PER_RUN, MAX_PATCH_PREVIEW, REPO_APPLY_PATCH_NAME,
+    REPO_APPLY_PATCH_SPEC, REPO_PATCH_NAME, REPO_PATCH_SPEC,
     REPO_READ_NAMES, REPO_READ_SPECS, REPO_SCHEMA_BY_NAME, apply_agent_repo_patch,
     execute_repo_read_tool, repository_root, validate_repo_patch,
 )
@@ -640,6 +641,8 @@ class CopilotService:
         seen_calls: set[tuple[str, str]] = set()
         duplicate_already_warned = False
         direct_write_done = False
+        applied_repo_changes: list[dict[str, Any]] = []
+        applied_repo_bytes = 0
         provider_name = type(self.provider).__name__
         provider_model = getattr(self.provider, "model", None)
         for round_number in range(1, round_limit + 1):
@@ -652,15 +655,26 @@ class CopilotService:
                 extra_tools += REPO_READ_SPECS
                 extra_tools += [REPO_APPLY_PATCH_SPEC, REPO_PATCH_SPEC] if is_ceo else [REPO_PATCH_SPEC]
             provider_kwargs = {"extra_tools": extra_tools} if extra_tools else {}
-            turn = provider_call(
-                tools, self.mode, lambda: self.provider.respond(system, messages, role, **provider_kwargs),
-                provider=provider_name, model=provider_model, round_number=round_number,
-                extract_metrics=_provider_turn_metrics,
-            )
+            try:
+                turn = provider_call(
+                    tools, self.mode, lambda: self.provider.respond(system, messages, role, **provider_kwargs),
+                    provider=provider_name, model=provider_model, round_number=round_number,
+                    extract_metrics=_provider_turn_metrics,
+                )
+            except CopilotProviderError:
+                if applied_repo_changes:
+                    files = sorted({path for change in applied_repo_changes for path in change["files"]})
+                    return {"reply": f"I applied the repository edits to {', '.join(files)}. I couldn't finish the follow-up review because the AI provider stopped responding, so the changes still need validation.", "actions": [], "read_tools": used_read_tools}
+                raise
             if tools.user.kind == "agent":
                 require_execution(tools.db, tools.user)
             if not turn.tool_calls:
-                return {"reply": turn.text or "I don't have a response right now.", "actions": [], "read_tools": used_read_tools}
+                reply = turn.text or "I don't have a response right now."
+                if applied_repo_changes:
+                    files = sorted({path for change in applied_repo_changes for path in change["files"]})
+                    if not all(path in reply for path in files):
+                        reply += f"\n\nChanged files: {', '.join(files)}."
+                return {"reply": reply, "actions": [], "read_tools": used_read_tools}
             messages.append(self.provider.assistant_message(turn))
             # Mutations with a confirmation card stop this turn. Safe repo patches
             # return a tool result so the model can inspect the diff and continue.
@@ -702,8 +716,14 @@ class CopilotService:
                     if validate_tool_args(call["args"], REPO_SCHEMA_BY_NAME[name]) is None:
                         messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match the repository patch schema.", is_error=True))
                         continue
+                    patch_bytes = len(call["args"]["patch"].encode("utf-8"))
+                    if len(applied_repo_changes) >= MAX_AGENT_PATCHES_PER_RUN or applied_repo_bytes + patch_bytes > MAX_AGENT_PATCH_BYTES_PER_RUN:
+                        messages.append(self.provider.tool_result_message(call["id"], "This coding run reached its bounded patch budget. Review the current diff or start a narrower follow-up request.", is_error=True))
+                        continue
                     try:
                         result = apply_agent_repo_patch(call["args"], tools.user, tools.db)
+                        applied_repo_changes.append(result)
+                        applied_repo_bytes += patch_bytes
                         tool_audit(tools, "local_repository", "patch_applied", outcome="succeeded", paths=result["files"])
                         messages.append(self.provider.tool_result_message(call["id"], result))
                     except ValueError as exc:
@@ -790,6 +810,9 @@ class CopilotService:
             if confirmed_action:
                 reply = turn.text or f"I can {confirmed_action['label'][0].lower()}{confirmed_action['label'][1:]} once you confirm."
                 return {"reply": reply, "actions": [confirmed_action], "read_tools": used_read_tools}
+        if applied_repo_changes:
+            files = sorted({path for change in applied_repo_changes for path in change["files"]})
+            return {"reply": f"I applied the repository edits to {', '.join(files)}, but hit the tool-call limit before I could finish validation. Review the Git diff and run the relevant check.", "actions": [], "read_tools": used_read_tools}
         raise CopilotProviderError("Enter AI Copilot could not finish answering within the allotted tool calls. Try a narrower question.")
 
     def run_execution_step(self, tools: WorkspaceTools, task: Task) -> dict[str, Any]:
@@ -835,22 +858,34 @@ class CopilotService:
         messages: list[dict[str, Any]] = [self.provider.user_message(kickoff)]
         used_read_tools: list[str] = []
         progress_notes: list[str] = []
+        applied_repo_changes: list[dict[str, Any]] = []
+        applied_repo_bytes = 0
         provider_name = type(self.provider).__name__
         provider_model = getattr(self.provider, "model", None)
         round_limit = min(10, MAX_EXECUTION_TURNS + (4 if repo_enabled else 0))
         for round_number in range(1, round_limit + 1):
             require_execution(db, agent)
-            turn = provider_call(
-                tools, self.mode, lambda: self.provider.respond(
-                    system, messages, agent.role,
-                    extra_tools=EXECUTION_TOOL_SPECS + ([CEO_BROWSER_CLI_SPEC] if is_ceo else []) + (REPO_READ_SPECS + [REPO_APPLY_PATCH_SPEC] if repo_enabled else []),
-                ),
-                provider=provider_name, model=provider_model, round_number=round_number,
-                extract_metrics=_provider_turn_metrics,
-            )
+            try:
+                turn = provider_call(
+                    tools, self.mode, lambda: self.provider.respond(
+                        system, messages, agent.role,
+                        extra_tools=EXECUTION_TOOL_SPECS + ([CEO_BROWSER_CLI_SPEC] if is_ceo else []) + (REPO_READ_SPECS + [REPO_APPLY_PATCH_SPEC] if repo_enabled else []),
+                    ),
+                    provider=provider_name, model=provider_model, round_number=round_number,
+                    extract_metrics=_provider_turn_metrics,
+                )
+            except CopilotProviderError:
+                if applied_repo_changes:
+                    files = sorted({path for change in applied_repo_changes for path in change["files"]})
+                    return {"outcome": "narrated", "text": f"I edited {', '.join(files)} for this task, but the provider stopped responding before I could finish validation.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+                raise
             require_execution(db, agent)
             if not turn.tool_calls:
-                return {"outcome": "narrated", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+                text = turn.text
+                if applied_repo_changes:
+                    files = sorted({path for change in applied_repo_changes for path in change["files"]})
+                    text = (text + "\n\n" if text else "") + f"Changed files: {', '.join(files)}."
+                return {"outcome": "narrated", "text": text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
             messages.append(self.provider.assistant_message(turn))
             for call in turn.tool_calls:
                 name = call["name"]
@@ -869,7 +904,11 @@ class CopilotService:
                     task.completed_at = datetime.utcnow()
                     sync_agent_task_pointers(db, task, task.assignee_id)
                     log(db, agent.organization_id, agent.id, "task", task.id, "agent_completed", from_status=before_status)
-                    return {"outcome": "completed", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+                    text = turn.text
+                    if applied_repo_changes:
+                        files = sorted({path for change in applied_repo_changes for path in change["files"]})
+                        text = (text + "\n\n" if text else "") + f"Changed files: {', '.join(files)}."
+                    return {"outcome": "completed", "text": text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
                 if name == "enter_ai_cli":
                     if not is_ceo:
                         messages.append(self.provider.tool_result_message(call["id"], "The UI CLI is available only to the CEO agent.", is_error=True))
@@ -907,9 +946,15 @@ class CopilotService:
                     if not repo_enabled or validate_tool_args(call["args"], REPO_SCHEMA_BY_NAME[name]) is None:
                         messages.append(self.provider.tool_result_message(call["id"], "Repository editing is unavailable or the patch arguments were invalid.", is_error=True))
                         continue
+                    patch_bytes = len(call["args"]["patch"].encode("utf-8"))
+                    if len(applied_repo_changes) >= MAX_AGENT_PATCHES_PER_RUN or applied_repo_bytes + patch_bytes > MAX_AGENT_PATCH_BYTES_PER_RUN:
+                        messages.append(self.provider.tool_result_message(call["id"], "This coding run reached its bounded patch budget. Report current changes and finish this task with a focused follow-up.", is_error=True))
+                        continue
                     try:
                         require_execution(db, agent)
                         result = apply_agent_repo_patch(call["args"], agent, db, assigned_task=True)
+                        applied_repo_changes.append(result)
+                        applied_repo_bytes += patch_bytes
                         tool_audit(tools, "local_repository", "patch_applied", outcome="succeeded", paths=result["files"])
                         used_read_tools.append(name)
                         messages.append(self.provider.tool_result_message(call["id"], result))
@@ -952,6 +997,9 @@ class CopilotService:
                     messages.append(self.provider.tool_result_message(call["id"], result))
                 except (ValueError, KeyError) as exc:
                     messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
+        if applied_repo_changes:
+            files = sorted({path for change in applied_repo_changes for path in change["files"]})
+            return {"outcome": "narrated", "text": f"I edited {', '.join(files)} for this task, but reached the tool-call limit before I could finish validation.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
         return {"outcome": "inconclusive", "text": None, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
 
 

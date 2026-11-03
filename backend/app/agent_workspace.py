@@ -12,7 +12,6 @@ import math
 import os
 import re
 import subprocess
-import sys
 import threading
 from collections import Counter
 from dataclasses import dataclass
@@ -93,6 +92,8 @@ _CHUNK_LINES = 100
 _CHUNK_OVERLAP = 20
 _MAX_PATCH_BYTES = 48_000
 _MAX_PATCH_FILES = 30
+MAX_AGENT_PATCHES_PER_RUN = 6
+MAX_AGENT_PATCH_BYTES_PER_RUN = 120_000
 MAX_PATCH_PREVIEW = _MAX_PATCH_BYTES
 _INDEX_LOCK = threading.RLock()
 _PATCH_LOCK = threading.RLock()
