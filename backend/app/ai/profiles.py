@@ -78,6 +78,31 @@ DEFAULT_PROFILE = ModelProfile(
 )
 
 PROFILES: list[ModelProfile] = [
+    # Qwen3 supports native tool calls in Ollama and OpenAI-compatible servers.
+    # The local Ollama model is created with num_ctx=16384 for repository prompts.
+    ModelProfile(
+        name="qwen3-local-tools",
+        provider_families=("ollama", "openai_compatible", "lmstudio"),
+        model_pattern="*qwen3*",
+        supports_native_tool_calls=True,
+        needs_textual_adapter=False,
+        supports_auto_tool_choice=True,
+        supports_none_tool_choice=True,
+        supports_multiple_calls_per_turn=True,
+        parallel_tool_calls=False,
+        system_message_support=True,
+        reasoning_capable=True,
+        reasoning_channel=False,
+        structured_output=True,
+        vision=False,
+        streaming_tools=False,
+        timeout_seconds=180.0,
+        max_tool_turns=8,
+        context_window=16384,
+        practical_max_tools=24,
+        tool_schema_dialect="openai",
+        requires_tool_result_id=True,
+    ),
     ModelProfile(
         name="anthropic",
         provider_families=("anthropic",),

@@ -22,11 +22,13 @@ _DEFAULT_BASE_URL = {
     "anthropic": "https://api.anthropic.com",
     "openai_compatible": "http://127.0.0.1:1234/v1",
     "lmstudio": "http://127.0.0.1:1234/v1",
+    "ollama": "http://127.0.0.1:11434/v1",
 }
 _DEFAULT_MODEL = {
     "anthropic": "claude-sonnet-5",
     "openai_compatible": "local-model",
     "lmstudio": "local-model",
+    "ollama": "enterai-qwen3:4b",
 }
 
 
@@ -44,10 +46,12 @@ class AISettings:
     def from_env(cls) -> "AISettings":
         provider = os.getenv("AI_PROVIDER", "deterministic").strip().lower()
         raw_timeout = os.getenv("AI_TIMEOUT_SECONDS")
+        base_url = os.getenv("AI_BASE_URL", "").strip()
+        model = os.getenv("AI_MODEL", "").strip()
         return cls(
             provider=provider,
-            base_url=os.getenv("AI_BASE_URL", _DEFAULT_BASE_URL.get(provider, "http://127.0.0.1:1234/v1")).rstrip("/"),
-            model=os.getenv("AI_MODEL", _DEFAULT_MODEL.get(provider, "local-model")),
+            base_url=(base_url or _DEFAULT_BASE_URL.get(provider, "http://127.0.0.1:1234/v1")).rstrip("/"),
+            model=model or _DEFAULT_MODEL.get(provider, "local-model"),
             api_key=os.getenv("AI_API_KEY", ""),
             timeout_seconds=float(raw_timeout) if raw_timeout else None,
             anthropic_version=os.getenv("AI_ANTHROPIC_VERSION", "2023-06-01"),

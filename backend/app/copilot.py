@@ -521,7 +521,7 @@ class CopilotService:
         if provider_name == "anthropic":
             self.provider: Any = AnthropicCopilotProvider()
             self.mode = "tool_calling"
-        elif provider_name in {"openai_compatible", "lmstudio"}:
+        elif provider_name in {"openai_compatible", "lmstudio", "ollama"}:
             self.provider = OpenAICompatibleCopilotProvider()
             self.mode = "tool_calling"
         else:
