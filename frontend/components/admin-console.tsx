@@ -183,7 +183,7 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
                 : "Repository tools are disabled for this organization."}
             </p>
             <p className="mt-1 text-sm text-zinc-300">
-              Agents can read source and docs, search local RAG context, inspect Git status, and run fixed syntax/whitespace checks. Retrieved snippets go to your configured AI provider. Code patches show a diff preview and need human confirmation before applying. No arbitrary shell commands run.
+              Agents can read and search source with local RAG, inspect Git status, create and edit source files for requested work, and run fixed syntax/type checks. File removals still need human confirmation. Retrieved snippets go to your configured AI provider; arbitrary shell commands are unavailable.
             </p>
             {usage.provider_mode !== "tool_calling" && <p className="mt-2 text-sm text-amber-700">Configure a structured tool-calling AI provider to let agents use repository tools.</p>}
             {!settings.agent_workspace_available && <p className="mt-2 text-sm text-amber-700">Configure AGENT_WORKSPACE_ROOT to a Git checkout on the API host before enabling this.</p>}
@@ -191,7 +191,7 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
           <ExecutionSwitch label="Local repository access" enabled={settings.agent_workspace_enabled} disabled={pending || !settings.agent_workspace_available}
             onChange={() => {
               const enabled = !settings.agent_workspace_enabled;
-              if (enabled && !window.confirm("Enable local repository access for agents in this organization? They can read permitted source files from the API host, and retrieved snippets will be sent to your configured AI provider. Code changes still require human review and confirmation.")) return;
+              if (enabled && !window.confirm("Enable local repository access for agents in this organization? Agents can read permitted source files from the API host; when asked to do code work, they can create and edit allowed files directly. Retrieved snippets will be sent to your configured AI provider. File removals still require human review, and arbitrary shell commands are unavailable.")) return;
               void mutate(async () => {
                 await api<Settings>("/admin/settings", { method: "PATCH", body: JSON.stringify({ agent_workspace_enabled: enabled }) });
                 await reloadExecutionState();

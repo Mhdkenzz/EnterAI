@@ -10,7 +10,7 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 - Real URLs for every view (`/projects/<id>`, `/inbox`, `?task=<id>` for an open task): Back, refresh and shared links work
 - Activity history, notifications, My Work, Inbox, portfolio dashboard and global search
 - Copilot chat with organization-scoped read tools and signed, explicit confirmation before writes; an admin can optionally enable direct ordinary workspace changes for the isolated CEO agent
-- Optional local repository tools for agents: source search, cited local RAG context, safe file reads, fixed static checks, and human-confirmed patch application
+- Optional local repository harness for agents: source search, cited local RAG, bounded file reads and edits, task-scoped autonomous coding, fixed checks, and human-confirmed file removals
 - New-project brief ingestion for PDF, DOC, DOCX, TXT, XLSX, CSV, and JSON with editable AI-drafted metadata and suggested tasks
 - S3-compatible upload storage (local disk for a single node), mirrored to a backup bucket
 - Trials, Stripe Checkout and customer portal, per-period usage tracking and seat limits
@@ -73,12 +73,12 @@ Admin → Execution controls. It is off by default and scoped per organization.
 
 Repository tools are available with a structured tool-calling AI provider; the
 deterministic offline provider does not invoke tools. Agents receive safe source-tree, literal-search, bounded file-read, Git status,
-Python syntax, and diff-whitespace tools. A local BM25 index retrieves code chunks
+Python syntax, frontend type-check, and diff-whitespace tools. In CEO chat, a requested coding task can be completed in a loop: inspect relevant files, create or edit source files with a checked patch, review the resulting Git diff, run a fixed check, and report the outcome. Agents working an assigned task can use the same edit loop. The patch tool creates and edits files but cannot delete or move files, change executable modes, follow symlinks, write secrets or generated folders, or invoke arbitrary shell commands. Deletions and moves remain human-confirmed proposals.
+A local BM25 index retrieves code chunks
 with path/line citations; it does not send code to an embedding service. Retrieved
 snippets are included in the configured AI provider's context, so a hosted provider
 will receive the snippets used to answer. Environment files, credentials, binary
 files, dependencies, build output, and generated directories are excluded. Code
-changes are checked and displayed as patch previews and only applied after a human
-confirms them. The harness does not run arbitrary shell commands.
+changes stay in the local configured checkout; agents do not commit or push them.
 
 For production, add provider credentials through environment variables, make the role policy more granular, persist AI tool audit records, add object storage for attachments, and use a managed Postgres service.

@@ -1,8 +1,8 @@
 """Local repository tools for coding agents.
 
 The repository boundary is explicit and local to the API process. Reads use a
-small source allowlist and a private lexical RAG index; file changes are proposed
-as reviewable git patches and only applied after a human confirms them.
+small source allowlist and a private lexical RAG index. Bounded source edits are
+applied as checked unified patches; file removals remain reviewable proposals.
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import math
 import os
 import re
 import subprocess
+import sys
 import threading
 from collections import Counter
 from dataclasses import dataclass
@@ -47,18 +48,24 @@ REPO_TREE_SPEC = {
 }
 REPO_CHECK_SPEC = {
     "name": "repo_check",
-    "description": "Run one fixed, non-shell repository check: parse Python files for syntax errors or check the current tracked diff for whitespace errors. It does not install dependencies, run project scripts, contact the network, or modify files.",
-    "input_schema": {"type": "object", "properties": {"check": {"type": "string", "enum": ["python_syntax", "diff_whitespace"]}}, "required": ["check"], "additionalProperties": False},
+    "description": "Run one fixed repository check: parse Python files, check tracked diff whitespace, or type-check the frontend with its installed TypeScript compiler. It does not install dependencies, run project scripts, contact the network, or modify source files.",
+    "input_schema": {"type": "object", "properties": {"check": {"type": "string", "enum": ["python_syntax", "diff_whitespace", "frontend_typecheck"]}}, "required": ["check"], "additionalProperties": False},
 }
 REPO_PATCH_SPEC = {
     "name": "repo_propose_patch",
     "description": "Propose a unified git patch for the configured local repository. The patch is checked for scope and applyability but is not applied until a human reviews the exact diff preview and confirms it.",
     "input_schema": {"type": "object", "properties": {"patch": {"type": "string"}}, "required": ["patch"], "additionalProperties": False},
 }
+REPO_APPLY_PATCH_SPEC = {
+    "name": "repo_apply_patch",
+    "description": "Apply a bounded unified patch to allowed source and documentation files in the configured local repository. It creates or edits files but refuses deletions, moves, binary changes, symlinks, executable files, and paths outside the repository. Use this for requested code work, then inspect the diff and run an allowed check. File removals or moves must use repo_propose_patch for human confirmation.",
+    "input_schema": {"type": "object", "properties": {"patch": {"type": "string"}}, "required": ["patch"], "additionalProperties": False},
+}
 REPO_READ_SPECS = [REPO_CONTEXT_SPEC, REPO_SEARCH_SPEC, REPO_READ_SPEC, REPO_STATUS_SPEC, REPO_TREE_SPEC, REPO_CHECK_SPEC]
-REPO_WRITE_SPECS = [REPO_PATCH_SPEC]
+REPO_WRITE_SPECS = [REPO_PATCH_SPEC, REPO_APPLY_PATCH_SPEC]
 REPO_READ_NAMES = {spec["name"] for spec in REPO_READ_SPECS}
 REPO_PATCH_NAME = "repo_propose_patch"
+REPO_APPLY_PATCH_NAME = "repo_apply_patch"
 REPO_SCHEMA_BY_NAME = {spec["name"]: spec["input_schema"] for spec in REPO_READ_SPECS + REPO_WRITE_SPECS}
 
 _TEXT_EXTENSIONS = {
@@ -84,10 +91,11 @@ _MAX_INDEX_BYTES = 40_000_000
 _MAX_INDEX_FILES = 2500
 _CHUNK_LINES = 100
 _CHUNK_OVERLAP = 20
-_MAX_PATCH_BYTES = 12_000
-_MAX_PATCH_FILES = 12
+_MAX_PATCH_BYTES = 48_000
+_MAX_PATCH_FILES = 30
 MAX_PATCH_PREVIEW = _MAX_PATCH_BYTES
 _INDEX_LOCK = threading.RLock()
+_PATCH_LOCK = threading.RLock()
 _INDEX_CACHE: dict[str, tuple[tuple[tuple[str, int, int], ...], list["RepoChunk"]]] = {}
 
 
@@ -299,6 +307,19 @@ def repo_check(args: dict[str, Any]) -> dict[str, Any]:
             except (OSError, UnicodeDecodeError):
                 continue
         return {"check": check, "passed": not failures, "files_scanned": scanned, "errors": failures[:30]}
+    if check == "frontend_typecheck":
+        frontend = root / "frontend"
+        compiler = frontend / "node_modules" / "typescript" / "bin" / "tsc"
+        if not compiler.is_file():
+            raise ValueError("Frontend dependencies are not installed in the configured repository.")
+        result = subprocess.run(
+            ["node", str(compiler), "--noEmit", "--incremental", "false"],
+            cwd=frontend, capture_output=True, text=True, timeout=60,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "CI": "1"},
+            check=False,
+        )
+        output = (result.stdout + result.stderr)[:8000]
+        return {"check": check, "passed": result.returncode == 0, "output": output or "Frontend type check passed."}
     raise ValueError("Choose a supported repository check.")
 
 
@@ -392,9 +413,12 @@ def _patch_paths(patch: str) -> list[str]:
     for line in patch.splitlines():
         if line.startswith("diff --git "):
             match = re.match(r"diff --git a/(.+) b/(.+)$", line)
-            if not match or match.group(1) != match.group(2):
-                raise ValueError("Renames and non-standard patch paths are not supported.")
-            paths.add(match.group(1))
+            if not match:
+                raise ValueError("Non-standard patch paths are not supported.")
+            old_path, new_path = match.groups()
+            paths.update((old_path, new_path))
+            old_headers.add(old_path)
+            new_headers.add(new_path)
         elif line.startswith("--- ") or line.startswith("+++ "):
             header_path = line[4:].split("\t", 1)[0]
             if header_path == "/dev/null":
@@ -439,14 +463,47 @@ def validate_repo_patch(patch: str) -> dict[str, Any]:
             raise ValueError("Patches cannot modify symlinks.")
         if target.exists():
             _safe_file(root, name)
-    check = _git(root, "apply", "--check", "--whitespace=nowarn", "--", input_text=patch, timeout=8)
-    if check.returncode != 0:
-        raise ValueError("Patch does not apply cleanly to the current repository state. Refresh repository context and try again.")
-    summary = _git(root, "apply", "--stat", "--", input_text=patch, timeout=8)
-    if summary.returncode != 0:
-        raise ValueError("Patch summary could not be generated.")
+    with _PATCH_LOCK:
+        check = _git(root, "apply", "--check", "--whitespace=nowarn", "--", input_text=patch, timeout=8)
+        if check.returncode != 0:
+            raise ValueError("Patch does not apply cleanly to the current repository state. Refresh repository context and try again.")
+        summary = _git(root, "apply", "--stat", "--", input_text=patch, timeout=8)
+        if summary.returncode != 0:
+            raise ValueError("Patch summary could not be generated.")
     root_id = hashlib.sha256(str(root).encode()).hexdigest()
     return {"paths": paths, "summary": summary.stdout.strip()[:1200], "root_id": root_id}
+
+
+def apply_agent_repo_patch(args: dict[str, Any], agent: Any, db: Any, *, assigned_task: bool = False) -> dict[str, Any]:
+    """Apply a requested source patch for the CEO or an agent on its own active task."""
+    from .models import Organization, Project, Task
+
+    organization = db.get(Organization, agent.organization_id)
+    if not organization or not organization.agent_workspace_enabled:
+        raise ValueError("Local repository access is disabled for this organization.")
+    if assigned_task:
+        task = db.get(Task, agent.current_task_id) if agent.current_task_id else None
+        project = db.get(Project, task.project_id) if task else None
+        if agent.kind != "agent" or not task or not project or project.organization_id != agent.organization_id or task.assignee_id != agent.id or task.status == "done" or not organization.execution_enabled or not agent.execution_enabled:
+            raise ValueError("Repository edits are only available while this agent is actively working on its assigned task.")
+    elif agent.kind != "agent" or agent.hierarchy_level != "ceo":
+        raise ValueError("Interactive repository edits are available only to the CEO agent.")
+    patch = args.get("patch")
+    validated = validate_repo_patch(patch)
+    if re.search(r"(?m)^deleted file mode ", patch):
+        raise ValueError("File removal needs human confirmation. Use repo_propose_patch to show the exact deletion for review.")
+    if any(old != new for old, new in re.findall(r"(?m)^diff --git a/(.+) b/(.+)$", patch)):
+        raise ValueError("Moving or renaming files needs human confirmation. Use repo_propose_patch to show the exact move for review.")
+    root = _require_root()
+    with _PATCH_LOCK:
+        # Revalidate under the lock so concurrent agents cannot apply stale patches.
+        validated = validate_repo_patch(patch)
+        applied = _git(root, "apply", "--whitespace=nowarn", "--", input_text=patch, timeout=12)
+    if applied.returncode != 0:
+        raise ValueError("Patch could not be applied to the current repository. Refresh context and try again.")
+    from .services import log
+    log(db, agent.organization_id, agent.id, "local_repository", validated["root_id"], "agent_patch_applied", paths=validated["paths"], assigned_task=assigned_task)
+    return {"ok": True, "files": validated["paths"], "summary": validated["summary"], "next": "Inspect the diff and run an appropriate repo_check before reporting completion."}
 
 
 def apply_confirmed_repo_patch(args: dict[str, Any], confirmer: Any, db: Any) -> dict[str, Any]:

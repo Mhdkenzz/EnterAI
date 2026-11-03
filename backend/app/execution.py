@@ -4,10 +4,9 @@ An agent with a current_task makes real progress on it without a human confirmin
 every step, by polling on a timer rather than only responding to chat messages.
 Entirely gated by CopilotService.mode: a deterministic-provider org -- the default
 everywhere in dev/CI/tests -- never runs this loop, since deterministic mode has no
-structured tool-calling to safely execute autonomously. Only two actions ever execute
-without human confirmation (log_progress, mark_task_complete -- see copilot.py); every
-other write an agent proposes while executing still mints a confirmation token exactly
-like the interactive chat flow.
+structured tool-calling to safely execute autonomously. Repository source edits are
+available only on an agent's assigned task when organization access is enabled. File
+removals and ordinary workspace changes retain their confirmation rules.
 
 `run_execution_tick` is the unit under test: it takes an explicit `db`/`service` so
 tests can inject a scripted provider and a real session, with no dependency on the
