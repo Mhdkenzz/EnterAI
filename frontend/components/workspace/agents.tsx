@@ -318,7 +318,23 @@ export function AgentInspector({
                       key={a.label}
                       className="mt-3 rounded-lg border border-blue-100 bg-blue-50 p-3 text-ink"
                     >
-                      <p>{a.label}</p>
+                      <p className="font-semibold">{a.label}</p>
+                      {!!a.details?.length && (
+                        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                          {a.details.map((detail) => (
+                            <div key={detail.label + detail.value} className="contents">
+                              <dt className="text-slate-500">{detail.label}</dt>
+                              <dd className="break-words">{detail.value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      )}
+                      {a.preview && (
+                        <details className="mt-3">
+                          <summary className="cursor-pointer text-xs font-semibold">Review patch preview</summary>
+                          <pre className="mt-2 max-h-72 overflow-auto rounded-md bg-slate-950 p-3 text-xs leading-5 text-slate-100">{a.preview}</pre>
+                        </details>
+                      )}
                       <Button size="sm" className="mt-3" onClick={() => confirm(a)}>
                         <Check size={14} />
                         Confirm and run

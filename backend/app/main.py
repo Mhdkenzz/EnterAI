@@ -18,6 +18,7 @@ from .auth import CONFIRMATION_SECRET, CSRF_HEADER, SESSION_COOKIE, clear_sessio
 from .database import Base, engine, get_db
 from .models import Activity, AgentMessage, Attachment, Comment, CopilotConfirmation, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
 from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
+from .agent_workspace import REPO_PATCH_NAME, apply_confirmed_repo_patch
 from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging, configure_error_reporting
 from . import execution
 from .hierarchy import reconcile_agents
@@ -824,6 +825,7 @@ WRITE_TOOL_HANDLERS: dict[str, Callable[[dict[str, Any], User, Session], Any]] =
     "add_comment": lambda args, user, db: add_comment(args["task_id"], CommentIn(**_without(args, "task_id")), user, db),
     "create_team": lambda args, user, db: create_team(TeamIn(**args), user, db),
     "delegate_task": lambda args, user, db: assign_task_to_agent(args["task_id"], AssignAgent(agent_id=args["agent_id"]), user, db),
+    REPO_PATCH_NAME: lambda args, user, db: apply_confirmed_repo_patch(args, user, db),
 }
 
 def _audit_before_state(tool: str, args: dict[str, Any], db: Session) -> dict[str, Any] | None:
@@ -933,7 +935,11 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
     try:
         with audit_context("agent" if proposer_agent_id else "copilot", proposer_agent_id or user.id, user.id):
             result = handler(args, user, db)
+    except ValueError as error:
+        db.rollback()
+        raise HTTPException(409, str(error)) from error
     except (TypeError, KeyError, ValidationError) as error:
+        db.rollback()
         raise HTTPException(422, "This Copilot proposal is missing required details.") from error
     with audit_context("agent" if proposer_agent_id else "copilot", proposer_agent_id or user.id, user.id):
         log(db, user.organization_id, user.id, "copilot", user.id, "confirmed",

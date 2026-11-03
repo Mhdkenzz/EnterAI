@@ -10,6 +10,7 @@ from .database import get_db
 from .hierarchy import retire_agent
 from .models import AuditEvent, Organization, ProviderCall, ExecutionRun, User
 from .services import log
+from .agent_workspace import repository_root
 
 router = APIRouter(prefix='/api/admin', tags=['admin'])
 
@@ -191,10 +192,11 @@ class ExecutionSetting(BaseModel):
 class OrganizationSettingsUpdate(BaseModel):
     execution_enabled: StrictBool | None = None
     ceo_full_access_enabled: StrictBool | None = None
+    agent_workspace_enabled: StrictBool | None = None
 
     @model_validator(mode="after")
     def require_setting(self):
-        if self.execution_enabled is None and self.ceo_full_access_enabled is None:
+        if self.execution_enabled is None and self.ceo_full_access_enabled is None and self.agent_workspace_enabled is None:
             raise ValueError("Provide at least one organization setting.")
         return self
 
@@ -231,7 +233,8 @@ def retire_agent_route(agent_id: str, user: User = Depends(human_admin), db: Ses
 @router.get('/settings')
 def settings(user: User = Depends(human_admin), db: Session = Depends(get_db)):
     org = db.get(Organization, user.organization_id)
-    return {'execution_enabled': org.execution_enabled, 'ceo_full_access_enabled': org.ceo_full_access_enabled}
+    return {'execution_enabled': org.execution_enabled, 'ceo_full_access_enabled': org.ceo_full_access_enabled,
+            'agent_workspace_enabled': org.agent_workspace_enabled, 'agent_workspace_available': repository_root() is not None}
 
 
 @router.patch('/settings')
@@ -243,5 +246,11 @@ def update_settings(data: OrganizationSettingsUpdate, user: User = Depends(human
     if data.ceo_full_access_enabled is not None:
         org.ceo_full_access_enabled = data.ceo_full_access_enabled
         log(db, org.id, user.id, 'organization', org.id, 'ceo_full_access_updated', ceo_full_access_enabled=data.ceo_full_access_enabled)
+    if data.agent_workspace_enabled is not None:
+        if data.agent_workspace_enabled and repository_root() is None:
+            raise HTTPException(409, 'Configure AGENT_WORKSPACE_ROOT to a Git checkout on the API host before enabling agent repository tools.')
+        org.agent_workspace_enabled = data.agent_workspace_enabled
+        log(db, org.id, user.id, 'organization', org.id, 'agent_workspace_updated', agent_workspace_enabled=data.agent_workspace_enabled)
     db.commit()
-    return {'execution_enabled': org.execution_enabled, 'ceo_full_access_enabled': org.ceo_full_access_enabled}
+    return {'execution_enabled': org.execution_enabled, 'ceo_full_access_enabled': org.ceo_full_access_enabled,
+            'agent_workspace_enabled': org.agent_workspace_enabled, 'agent_workspace_available': repository_root() is not None}

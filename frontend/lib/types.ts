@@ -42,6 +42,7 @@ export type Action = {
   label: string;
   confirmation_token: string;
   requires_confirmation: boolean;
+  preview?: string;
 };
 export type Agent = {
   id: string;

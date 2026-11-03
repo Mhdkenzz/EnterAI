@@ -10,6 +10,7 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 - Real URLs for every view (`/projects/<id>`, `/inbox`, `?task=<id>` for an open task): Back, refresh and shared links work
 - Activity history, notifications, My Work, Inbox, portfolio dashboard and global search
 - Copilot chat with organization-scoped read tools and signed, explicit confirmation before writes; an admin can optionally enable direct ordinary workspace changes for the isolated CEO agent
+- Optional local repository tools for agents: source search, cited local RAG context, safe file reads, fixed static checks, and human-confirmed patch application
 - New-project brief ingestion for PDF, DOC, DOCX, TXT, XLSX, CSV, and JSON with editable AI-drafted metadata and suggested tasks
 - S3-compatible upload storage (local disk for a single node), mirrored to a backup bucket
 - Trials, Stripe Checkout and customer portal, per-period usage tracking and seat limits
@@ -60,5 +61,24 @@ Writes ask for confirmation. Append `--yes` for a deliberate non-interactive wri
 `backend/app/copilot.py` defines the Copilot boundary. The API creates an organization-scoped workspace snapshot through backend read functions; the provider receives only that minimised data, never a database session or application credentials. `AI_PROVIDER=deterministic` is the offline default. Set `AI_PROVIDER=lmstudio` or `openai_compatible`, plus `AI_BASE_URL`, `AI_MODEL`, and (when needed) `AI_API_KEY`, to use LM Studio or a hosted OpenAI-compatible endpoint.
 
 The UI calls `/api/ai/plan`, which reads workspace data and returns proposed writes with a short-lived signed confirmation token. `/api/ai/confirm` validates the token against the signed-in user and organization, validates the action through the existing API schemas, then performs the mutation. For the CEO agent, an organization administrator can enable direct ordinary workspace changes in Admin → Execution controls. This is off by default; human-admin, authentication, billing, privacy, and security controls remain protected.
+
+## Local repository tools for agents
+
+In local development, agents can use the app's own Git checkout. Set
+`AGENT_WORKSPACE_ROOT` to an absolute Git checkout path to select another local
+repository. The API must have filesystem access to that checkout; for Docker,
+bind-mount it into the API container and set the variable to the container path.
+An organization administrator must then enable **Local repository access** in
+Admin → Execution controls. It is off by default and scoped per organization.
+
+Repository tools are available with a structured tool-calling AI provider; the
+deterministic offline provider does not invoke tools. Agents receive safe source-tree, literal-search, bounded file-read, Git status,
+Python syntax, and diff-whitespace tools. A local BM25 index retrieves code chunks
+with path/line citations; it does not send code to an embedding service. Retrieved
+snippets are included in the configured AI provider's context, so a hosted provider
+will receive the snippets used to answer. Environment files, credentials, binary
+files, dependencies, build output, and generated directories are excluded. Code
+changes are checked and displayed as patch previews and only applied after a human
+confirms them. The harness does not run arbitrary shell commands.
 
 For production, add provider credentials through environment variables, make the role policy more granular, persist AI tool audit records, add object storage for attachments, and use a managed Postgres service.

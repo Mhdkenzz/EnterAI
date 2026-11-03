@@ -7,9 +7,15 @@ import { Card } from "@/components/ui/card";
 import { BillingSection } from "@/components/billing-settings";
 import { TeamInvitesSection } from "@/components/team-invites";
 
-type Settings = { execution_enabled: boolean; ceo_full_access_enabled: boolean };
+type Settings = {
+  execution_enabled: boolean;
+  ceo_full_access_enabled: boolean;
+  agent_workspace_enabled: boolean;
+  agent_workspace_available: boolean;
+};
 type AdminUser = { id: string; name: string; email?: string; role: "admin" | "manager" | "member"; active: boolean };
-type AgentUsage = Settings & {
+type AgentUsage = {
+  execution_enabled: boolean;
   id: string; name: string; status: string; last_execution_at: string | null;
   consecutive_task_failures: number; calls: number; failures: number;
   executions: number; execution_failures: number;
@@ -166,6 +172,30 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
                 await api<Settings>("/admin/settings", { method: "PATCH", body: JSON.stringify({ ceo_full_access_enabled: enabled }) });
                 await reloadExecutionState();
               }, `CEO full access ${enabled ? "enabled" : "disabled"}.`);
+            }} />
+        </Card>
+        <Card className="flex flex-wrap items-center justify-between gap-3 p-5">
+          <div className="min-w-0 flex-1">
+            <h3 className="font-medium">Local repository access</h3>
+            <p className="mt-1 text-sm text-zinc-300">
+              {settings.agent_workspace_enabled
+                ? "Agents can inspect and search the configured local repository."
+                : "Repository tools are disabled for this organization."}
+            </p>
+            <p className="mt-1 text-sm text-zinc-300">
+              Agents can read source and docs, search local RAG context, inspect Git status, and run fixed syntax/whitespace checks. Retrieved snippets go to your configured AI provider. Code patches show a diff preview and need human confirmation before applying. No arbitrary shell commands run.
+            </p>
+            {usage.provider_mode !== "tool_calling" && <p className="mt-2 text-sm text-amber-700">Configure a structured tool-calling AI provider to let agents use repository tools.</p>}
+            {!settings.agent_workspace_available && <p className="mt-2 text-sm text-amber-700">Configure AGENT_WORKSPACE_ROOT to a Git checkout on the API host before enabling this.</p>}
+          </div>
+          <ExecutionSwitch label="Local repository access" enabled={settings.agent_workspace_enabled} disabled={pending || !settings.agent_workspace_available}
+            onChange={() => {
+              const enabled = !settings.agent_workspace_enabled;
+              if (enabled && !window.confirm("Enable local repository access for agents in this organization? They can read permitted source files from the API host, and retrieved snippets will be sent to your configured AI provider. Code changes still require human review and confirmation.")) return;
+              void mutate(async () => {
+                await api<Settings>("/admin/settings", { method: "PATCH", body: JSON.stringify({ agent_workspace_enabled: enabled }) });
+                await reloadExecutionState();
+              }, `Local repository access ${enabled ? "enabled" : "disabled"}.`);
             }} />
         </Card>
         <h3 className="font-medium">Agent usage and execution</h3>
