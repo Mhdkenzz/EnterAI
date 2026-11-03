@@ -68,7 +68,7 @@ _DOMAIN_KEYWORDS = {
 }
 
 _DOMAIN_CANDIDATES: dict[str, list[str]] = {
-    "PROJECTS": ["get_projects", "search", "get_activity"],
+    "PROJECTS": ["get_projects", "search", "get_activity", "create_project"],
     "TASKS": ["get_tasks", "get_my_tasks", "search", "get_comments"],
     "DOCUMENTS": ["search_documents", "get_projects"],
     "USERS": ["get_users", "get_teams", "get_direct_reports"],

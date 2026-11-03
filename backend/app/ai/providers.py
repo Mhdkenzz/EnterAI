@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
 from typing import Any
 from urllib import error, request
 
@@ -128,42 +129,95 @@ class OpenAICompatibleCopilotProvider:
 
     def __init__(self, settings: AISettings | None = None):
         settings = settings or AISettings.from_env()
+        self.provider = settings.provider
         self.base_url = settings.base_url
         self.model = settings.model
         self.api_key = settings.api_key
         self.profile = resolve_profile(settings.provider, settings.model)
         self.timeout = settings.timeout_seconds if settings.timeout_seconds is not None else self.profile.timeout_seconds
+        self._ollama_tool_names: dict[str, str] = {}
 
     def respond(self, system: str, messages: list[dict[str, Any]], role: str | None = None, extra_tools: list[dict[str, Any]] | None = None) -> ProviderTurn:
         from ..copilot import CopilotProviderError, openai_tool_specs
         extra = [{"type": "function", "function": {"name": t["name"], "description": t["description"], "parameters": t["input_schema"]}} for t in (extra_tools or [])]
         rendered_tools = openai_tool_specs(role) + extra
-        body = json.dumps({
-            "model": self.model,
-            "messages": [{"role": "system", "content": system}, *messages],
-            "tools": rendered_tools,
-            "tool_choice": "auto",
-            "temperature": 0.2,
-        }).encode()
+        ollama = self.provider == "ollama"
+        if ollama:
+            # Qwen3 local tool calls become extremely slow when given the full
+            # workspace catalog. Keep Ollama's offered tools focused on the
+            # user's latest request; RBAC still filters the catalog first.
+            from .tool_routing import detect_domains, domain_candidates
+            latest_request = next(
+                (item.get("content", "") for item in reversed(messages) if item.get("role") == "user"),
+                "",
+            )
+            candidate_names = set(domain_candidates(detect_domains(str(latest_request))))
+            candidate_names.update(tool["function"]["name"] for tool in extra)
+            rendered_tools = [tool for tool in rendered_tools if tool["function"]["name"] in candidate_names]
+            native_messages = [{"role": "system", "content": system}]
+            for message in messages:
+                item = dict(message)
+                if item.get("role") == "assistant" and item.get("tool_calls"):
+                    item["tool_calls"] = [
+                        {
+                            "function": {
+                                "name": call["function"]["name"],
+                                "arguments": json.loads(call["function"]["arguments"])
+                                if isinstance(call["function"].get("arguments"), str)
+                                else call["function"].get("arguments", {}),
+                            }
+                        }
+                        for call in item["tool_calls"]
+                    ]
+                elif item.get("role") == "tool":
+                    call_id = item.pop("tool_call_id", "")
+                    item["tool_name"] = self._ollama_tool_names.get(call_id, item.get("tool_name", "unknown"))
+                native_messages.append(item)
+            body = json.dumps({
+                "model": self.model,
+                "messages": native_messages,
+                "tools": rendered_tools,
+                "stream": False,
+                "think": False,
+                "options": {"temperature": 0.2},
+            }).encode()
+            endpoint = f"{self.base_url.rsplit('/v1', 1)[0].rstrip('/')}/api/chat"
+        else:
+            body = json.dumps({
+                "model": self.model,
+                "messages": [{"role": "system", "content": system}, *messages],
+                "tools": rendered_tools,
+                "tool_choice": "auto",
+                "temperature": 0.2,
+            }).encode()
+            endpoint = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        outgoing = request.Request(f"{self.base_url}/chat/completions", data=body, headers=headers, method="POST")
+        outgoing = request.Request(endpoint, data=body, headers=headers, method="POST")
         try:
             with request.urlopen(outgoing, timeout=self.timeout) as response:  # nosec B310 -- URL is explicit operator configuration
                 payload = json.loads(response.read().decode())
-            choice = payload["choices"][0]["message"]
+            choice = payload["message"] if ollama else payload["choices"][0]["message"]
         except (error.URLError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise CopilotProviderError("The configured AI provider is unavailable. Check AI_PROVIDER settings and try again.") from exc
         text = (choice.get("content") or "").strip() or None
         tool_calls: list[dict[str, Any]] = []
         for call in choice.get("tool_calls") or []:
             fn = call.get("function", {})
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except ValueError:
-                args = {}
-            tool_calls.append({"id": call.get("id"), "name": fn.get("name"), "args": args})
+            raw_args = fn.get("arguments") or {}
+            if isinstance(raw_args, str):
+                try:
+                    args = json.loads(raw_args)
+                except ValueError:
+                    args = {}
+            else:
+                args = raw_args
+            call_id = call.get("id") or f"ollama_{uuid.uuid4().hex}"
+            name = fn.get("name")
+            if ollama:
+                self._ollama_tool_names[call_id] = name
+            tool_calls.append({"id": call_id, "name": name, "args": args})
 
         # Only attempted when the resolved model profile says this model needs it
         # (see profiles.py) -- e.g. fabliq's native tool_calls are already reliable,
@@ -186,6 +240,15 @@ class OpenAICompatibleCopilotProvider:
         return turn_result
 
     def assistant_message(self, turn: ProviderTurn) -> dict[str, Any]:
+        if self.provider == "ollama":
+            calls = []
+            for call in turn.tool_calls:
+                self._ollama_tool_names[call["id"]] = call["name"]
+                calls.append({"function": {"name": call["name"], "arguments": call["args"]}})
+            message: dict[str, Any] = {"role": "assistant", "content": turn.text or ""}
+            if calls:
+                message["tool_calls"] = calls
+            return message
         message: dict[str, Any] = {"role": "assistant", "content": turn.text}
         if turn.tool_calls:
             message["tool_calls"] = [
@@ -198,6 +261,8 @@ class OpenAICompatibleCopilotProvider:
         text = content if isinstance(content, str) else json.dumps(content)
         if is_error:
             text = f"Error: {text}"
+        if self.provider == "ollama":
+            return {"role": "tool", "tool_name": self._ollama_tool_names.get(tool_call_id, "unknown"), "content": text}
         return {"role": "tool", "tool_call_id": tool_call_id, "content": text}
 
     def user_message(self, text: str) -> dict[str, Any]:
