@@ -238,10 +238,10 @@ WRITE_TOOL_SPECS: list[dict[str, Any]] = [
          "priority": {"type": "string", "enum": ["low", "medium", "high"]}, "assignee_id": {"type": "string"},
          "due_date": {"type": "string", "description": "ISO-8601 date-time"},
      }, "required": ["task_id"], "additionalProperties": False}},
-    {"name": "create_project", "description": "Propose creating a new project. Never executes without user confirmation.",
+    {"name": "create_project", "description": "Create a new project in this organization. Use team_id only when the user provided it or get_teams returned it; otherwise omit it. CEO full access may execute directly; other writes require human confirmation.",
      "input_schema": {"type": "object", "properties": {
          "name": {"type": "string"}, "code": {"type": "string"}, "description": {"type": "string"},
-         "team_id": {"type": "string"}, "health": {"type": "string", "enum": ["on_track", "at_risk", "off_track"]},
+         "team_id": {"type": "string", "description": "Optional existing team ID. Use only an ID returned by get_teams or provided by the user; otherwise omit."}, "health": {"type": "string", "enum": ["on_track", "at_risk", "off_track"]},
      }, "required": ["name", "code"], "additionalProperties": False}},
     {"name": "update_project", "description": "Propose changes to an existing project, such as its status or health. Never executes without user confirmation.",
      "input_schema": {"type": "object", "properties": {
@@ -399,6 +399,16 @@ def describe_action(db: Session, user: User, name: str, args: dict[str, Any], to
     return {"label": label, "details": details, "confirmation_token": token, "requires_confirmation": True}
 
 
+def _ground_write_args(db: Session, user: User, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Drop optional foreign IDs a model guessed instead of grounding in workspace data."""
+    grounded = dict(args)
+    if name == "create_project" and grounded.get("team_id"):
+        team = db.get(Team, grounded["team_id"])
+        if not team or team.organization_id != user.organization_id:
+            grounded.pop("team_id", None)
+    return grounded
+
+
 def _describe_write_call(name: str, args: dict[str, Any]) -> str:
     if name == "create_task": return f"Create task: {args.get('title', 'New task')}"
     if name == "update_task": return "Update task"
@@ -419,9 +429,11 @@ def _describe_write_call(name: str, args: dict[str, Any]) -> str:
 
 SYSTEM_PROMPT = (
     "You are Enter AI Copilot, embedded in a project-management workspace. Use the read tools to ground every "
-    "answer in this organisation's real data; never invent projects, tasks, or people. You may call at most one "
+    "answer in this organisation's real data; never invent projects, tasks, people, or teams. You may call at most one "
     "write tool per turn, from whichever write tools are available to you in this turn's tool list. The application "
     "either executes an explicitly authorized CEO full-access change or returns other writes for human confirmation. "
+    "Do not ask the user to confirm in chat; call the relevant write tool and let the application enforce its configured approval. "
+    "When a required project name or code can be inferred from the user's goal, choose a concise, clear value instead of asking. "
     "Whenever you call a write tool, also include a short plain-language explanation of the requested change. "
     "If a tool call fails or finds no match for a specific id or name the user gave you, tell them it was not found "
     "-- never substitute a different real project, task, or person and answer as if it were the one asked about."
@@ -768,18 +780,19 @@ class CopilotService:
                         messages.append(self.provider.tool_result_message(call["id"], "The isolated Enter AI browser could not complete that command.", is_error=True))
                     continue
                 if name in WRITE_TOOL_NAMES:
+                    args = _ground_write_args(tools.db, tools.user, name, call["args"])
                     if name not in allowed_write_tools(role):
                         messages.append(self.provider.tool_result_message(call["id"], "Your role is not permitted to perform this action.", is_error=True))
                     elif confirmed_action is not None:
                         messages.append(self.provider.tool_result_message(call["id"], "Only one proposed action is allowed per turn.", is_error=True))
-                    elif validate_tool_args(call["args"], _INPUT_SCHEMA_BY_NAME[name]) is None:
+                    elif validate_tool_args(args, _INPUT_SCHEMA_BY_NAME[name]) is None:
                         messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match this tool's schema.", is_error=True))
                     elif is_ceo and full_access and name in _CEO_DIRECT_WRITE_TOOLS:
                         if direct_write_done:
                             messages.append(self.provider.tool_result_message(call["id"], "Only one direct workspace change is allowed per turn.", is_error=True))
                             continue
                         try:
-                            result = _execute_ceo_workspace_write(tools, name, call["args"])
+                            result = _execute_ceo_workspace_write(tools, name, args)
                             direct_write_done = True
                             messages.append(self.provider.tool_result_message(call["id"], result))
                         except Exception:
@@ -788,8 +801,8 @@ class CopilotService:
                             messages.append(self.provider.tool_result_message(call["id"], "The requested workspace change could not be completed.", is_error=True))
                     else:
                         mint = create_agent_confirmation if tools.user.kind == "agent" else create_confirmation
-                        token = mint(tools.user, name, call["args"])
-                        confirmed_action = describe_action(tools.db, tools.user, name, call["args"], token)
+                        token = mint(tools.user, name, args)
+                        confirmed_action = describe_action(tools.db, tools.user, name, args, token)
                     continue
                 if name not in READ_TOOL_NAMES:
                     messages.append(self.provider.tool_result_message(call["id"], "This tool does not exist.", is_error=True))
@@ -966,15 +979,16 @@ class CopilotService:
                         messages.append(self.provider.tool_result_message(call["id"], "The repository patch could not be applied.", is_error=True))
                     continue
                 if name in WRITE_TOOL_NAMES:
+                    args = _ground_write_args(db, agent, name, call["args"])
                     if name not in allowed_write_tools(agent.role):
                         messages.append(self.provider.tool_result_message(call["id"], "Your role is not permitted to perform this action.", is_error=True))
                         continue
-                    if validate_tool_args(call["args"], _INPUT_SCHEMA_BY_NAME[name]) is None:
+                    if validate_tool_args(args, _INPUT_SCHEMA_BY_NAME[name]) is None:
                         messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match this tool's schema.", is_error=True))
                         continue
                     if is_ceo and full_access and name in _CEO_DIRECT_WRITE_TOOLS:
                         try:
-                            result = _execute_ceo_workspace_write(tools, name, call["args"])
+                            result = _execute_ceo_workspace_write(tools, name, args)
                             return {"outcome": "succeeded", "text": turn.text, "read_tools": used_read_tools,
                                     "progress_notes": progress_notes, "action": None, "workspace_change": result}
                         except Exception:
@@ -982,8 +996,8 @@ class CopilotService:
                             tool_audit(tools, "copilot", "ceo_full_access_write", outcome="failed", tool=name)
                             return {"outcome": "failed", "text": "The requested workspace change could not be completed.",
                                     "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
-                    token = create_agent_confirmation(agent, name, call["args"])
-                    action = describe_action(db, agent, name, call["args"], token)
+                    token = create_agent_confirmation(agent, name, args)
+                    action = describe_action(db, agent, name, args, token)
                     return {"outcome": "proposed", "text": turn.text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": action}
                 if name not in READ_TOOL_NAMES:
                     messages.append(self.provider.tool_result_message(call["id"], "This tool does not exist.", is_error=True))
