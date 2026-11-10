@@ -8,13 +8,16 @@ BACKUP_OFFSITE_HOOK="${BACKUP_OFFSITE_HOOK:-}"
 mkdir -p "$BACKUP_DIR"
 TIMESTAMP=$(date -u +%Y%m%d_%H%M%S)
 ARCHIVE="$BACKUP_DIR/enterai_$TIMESTAMP.dump"
+TEMP_ARCHIVE="$ARCHIVE.partial"
+trap 'rm -f "$TEMP_ARCHIVE"' EXIT
 # SQLAlchemy dialect URLs are not libpq connection strings.  Keep passwords out
 # of logs and convert only the driver prefix pg_dump cannot understand.
 LIBPQ_URL="${DB_URL/postgresql+psycopg:/postgresql}"
 echo "Starting backup at $TIMESTAMP"
-pg_dump -Fc --no-owner --clean --if-exists -d "$LIBPQ_URL" > "$ARCHIVE"
-test -s "$ARCHIVE"
-pg_restore --list "$ARCHIVE" > /dev/null
+pg_dump -Fc --no-owner --clean --if-exists -d "$LIBPQ_URL" > "$TEMP_ARCHIVE"
+test -s "$TEMP_ARCHIVE"
+pg_restore --list "$TEMP_ARCHIVE" > /dev/null
+mv "$TEMP_ARCHIVE" "$ARCHIVE"
 if [ -n "$BACKUP_OFFSITE_HOOK" ]; then
   "$BACKUP_OFFSITE_HOOK" "$ARCHIVE"
 fi

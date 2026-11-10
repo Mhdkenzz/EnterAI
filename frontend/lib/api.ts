@@ -1,4 +1,7 @@
-export const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api";
+export const API_BASE = process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window !== "undefined" && window.location.hostname === "127.0.0.1"
+    ? "http://127.0.0.1:8000/api"
+    : "http://localhost:8000/api");
 
 // The session lives in an httpOnly cookie the API sets at sign-in, so page script
 // never holds the token. Cookie-authenticated writes must carry this header; a

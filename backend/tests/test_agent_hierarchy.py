@@ -39,14 +39,12 @@ def test_hierarchy_config_defaults_to_all_zero_and_is_idempotent():
 
 
 def test_agents_endpoint_is_empty_until_agents_exist():
-    headers, _org, db = _admin_headers_and_org()
-    try:
-        with TestClient(app) as client:
-            response = client.get("/api/agents", headers=headers)
-        assert response.status_code == 200
-        assert response.json() == []
-    finally:
-        db.close()
+    from test_observability import workspace
+    with TestClient(app) as client:
+        headers, _account = workspace(client)
+        response = client.get("/api/agents", headers=headers)
+    assert response.status_code == 200
+    assert response.json() == []
 
 
 def _make_agent(db, org_id, name, level, parent_id=None, current_task_id=None, last_completed_task_id=None):
@@ -96,7 +94,7 @@ def test_agents_endpoint_reports_hierarchy_links_and_current_and_last_task():
             response = client.get("/api/agents", headers=headers)
         assert response.status_code == 200
         by_id = {a["id"]: a for a in response.json()}
-        assert set(by_id) == {ceo.id, vp.id}
+        assert {ceo.id, vp.id} <= set(by_id)
         assert by_id[ceo.id]["hierarchy_level"] == "ceo"
         assert by_id[ceo.id]["parent_agent_id"] is None
         assert by_id[vp.id]["hierarchy_level"] == "vp"

@@ -12,6 +12,7 @@ type Settings = {
   ceo_full_access_enabled: boolean;
   agent_workspace_enabled: boolean;
   agent_workspace_available: boolean;
+  agent_workspace_id: string;
 };
 type AdminUser = { id: string; name: string; email?: string; role: "admin" | "manager" | "member"; active: boolean };
 type AgentUsage = {
@@ -23,6 +24,14 @@ type AgentUsage = {
 type Usage = {
   totals: { calls: number; failures: number; duration_ms: number; executions: number; execution_failures: number };
   agents: AgentUsage[]; provider_mode: string;
+};
+type AIProviderSettings = {
+  provider: string;
+  configured_provider: string;
+  model: string;
+  api_key_configured: boolean;
+  requests_per_minute: number;
+  maximum_requests_per_minute: number;
 };
 type AuditEvent = {
   id: string; actor_id: string | null; initiator_id: string | null; actor_name?: string | null; initiator_name?: string | null; source: string;
@@ -43,6 +52,89 @@ function ExecutionSwitch({ label, enabled, disabled, onChange }: {
     aria-checked={enabled} disabled={disabled} onClick={onChange}>
     {enabled ? "Enabled" : "Disabled"}
   </Button>;
+}
+
+function AIProviderWorkspaceSettings({ onSaved }: { onSaved: () => void }) {
+  const [settings, setSettings] = useState<AIProviderSettings | null>(null);
+  const [provider, setProvider] = useState<"ifm" | "openrouter">("ifm");
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState("IFM/K2-Horizon-375B-A23B");
+  const [rpm, setRpm] = useState(20);
+  const [loading, setLoading] = useState(true);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    api<AIProviderSettings>("/admin/ai-provider", { signal: controller.signal })
+      .then(value => {
+        if (controller.signal.aborted) return;
+        setSettings(value);
+        setProvider(value.configured_provider === "openrouter" ? "openrouter" : "ifm");
+        setModel(value.model || "IFM/K2-Horizon-375B-A23B"); setRpm(value.requests_per_minute);
+      })
+      .catch(reason => { if (!controller.signal.aborted) setError(errorText(reason)); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, []);
+
+  async function save(event?: FormEvent, clear = false) {
+    event?.preventDefault();
+    if (pending) return;
+    setPending(true); setError(""); setNotice("");
+    try {
+      const body: { provider: "ifm" | "openrouter"; model?: string; requests_per_minute: number; api_key?: string; clear_api_key?: boolean } = {
+        provider, requests_per_minute: rpm,
+      };
+      if (provider === "openrouter") body.model = model.trim();
+      if (clear) body.clear_api_key = true;
+      else if (apiKey.trim()) body.api_key = apiKey.trim();
+      const next = await api<AIProviderSettings>("/admin/ai-provider", { method: "PATCH", body: JSON.stringify(body) });
+      setSettings(next); setProvider(next.configured_provider === "openrouter" ? "openrouter" : "ifm"); setModel(next.model || "IFM/K2-Horizon-375B-A23B"); setRpm(next.requests_per_minute); setApiKey("");
+      setNotice(clear ? "Saved AI key removed." : "AI provider settings saved.");
+      onSaved();
+    } catch (reason) { setError(errorText(reason)); }
+    finally { setPending(false); }
+  }
+
+  return <section aria-labelledby="ai-provider-heading" className="space-y-3">
+    <div>
+      <h2 id="ai-provider-heading" className="text-lg font-semibold">Workspace AI provider</h2>
+      <p className="mt-1 text-sm text-zinc-300">Save an IFM K2 Horizon or OpenRouter key for this workspace. It is encrypted at rest and never shown again. Requests and relevant workspace context are sent to the selected provider.</p>
+    </div>
+    <Card className="space-y-4 p-5">
+      {loading && <p role="status" className="text-sm text-zinc-300">Loading provider settings…</p>}
+      {error && <p role="alert" className="text-sm text-red-300">{error}</p>}
+      {notice && <p role="status" className="text-sm text-sky-200">{notice}</p>}
+      {settings && <>
+        <p className="text-sm text-zinc-300">Active provider: <strong>{settings.provider}</strong>{settings.api_key_configured ? ` (workspace ${settings.configured_provider === "ifm" ? "IFM" : "OpenRouter"} key)` : " (server default)"}</p>
+        <form className="grid gap-3 sm:grid-cols-2" onSubmit={event => void save(event)}>
+          <label className="text-sm text-zinc-300">Provider
+            <select className={field} value={provider} onChange={event => { setProvider(event.target.value as "ifm" | "openrouter"); setApiKey(""); }}>
+              <option value="ifm">IFM · K2 Horizon</option><option value="openrouter">OpenRouter</option>
+            </select>
+          </label>
+          <label className="text-sm text-zinc-300">Requests per minute (1–{settings.maximum_requests_per_minute})
+            <input className={field} type="number" min={1} max={settings.maximum_requests_per_minute} value={rpm} required onChange={event => setRpm(Number(event.target.value))} />
+          </label>
+          {provider === "ifm" ? <div className="text-sm text-zinc-300 sm:col-span-2">Model and endpoint<div className={`${field} text-ink`}>IFM/K2-Horizon-375B-A23B · https://api.ifm.ai/v1</div></div> : <label className="text-sm text-zinc-300 sm:col-span-2">OpenRouter model ID
+            <input className={field} value={model} maxLength={200} required onChange={event => setModel(event.target.value)} placeholder="openai/gpt-4o-mini" />
+          </label>}
+          <label className="text-sm text-zinc-300 sm:col-span-2">{provider === "ifm" ? "IFM API key" : "OpenRouter API key"}
+            <input className={field} type="password" autoComplete="new-password" value={apiKey} maxLength={512} onChange={event => setApiKey(event.target.value)} placeholder={settings.api_key_configured && settings.configured_provider === provider ? "Saved key is hidden; enter a new key to replace it" : `Enter ${provider === "ifm" ? "IFM" : "OpenRouter"} key`} />
+          </label>
+          <div className="flex flex-wrap gap-2 sm:col-span-2">
+            <Button type="submit" disabled={pending}>{pending ? "Saving…" : "Save AI provider"}</Button>
+            {settings.api_key_configured && <Button type="button" variant="outline" disabled={pending} onClick={() => {
+              if (window.confirm("Remove the saved workspace AI key? This workspace will return to the server default AI provider.")) void save(undefined, true);
+            }}>Remove saved key</Button>}
+          </div>
+        </form>
+        <p className="text-xs text-zinc-400">Saving a key requires SECRETS_ENCRYPTION_KEY on the server. The request limit applies across all API replicas for this organization.</p>
+      </>}
+    </Card>
+  </section>;
 }
 
 export function AdminConsole({ currentUserId }: { currentUserId: string }) {
@@ -118,6 +210,7 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
     <p role="status" aria-live="polite" className="text-sm text-sky-200">{pending ? "Saving changes…" : notice}</p>
     <BillingSection />
     <TeamInvitesSection />
+    <AIProviderWorkspaceSettings onSaved={() => setRevision(value => value + 1)} />
     {!loading && !loadError && usage && settings && <>
       <section aria-labelledby="usage-heading" className="space-y-3">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -176,26 +269,26 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
         </Card>
         <Card className="flex flex-wrap items-center justify-between gap-3 p-5">
           <div className="min-w-0 flex-1">
-            <h3 className="font-medium">Local repository access</h3>
+            <h3 className="font-medium">Organization repository</h3>
             <p className="mt-1 text-sm text-zinc-300">
               {settings.agent_workspace_enabled
-                ? "Agents can inspect and search the configured local repository."
+                ? "Agents can inspect and search this organization's isolated repository."
                 : "Repository tools are disabled for this organization."}
             </p>
             <p className="mt-1 text-sm text-zinc-300">
-              Agents can read and search source with local RAG, inspect Git status, create and edit source files for requested work, and run fixed syntax/type checks. File removals still need human confirmation. Retrieved snippets go to your configured AI provider; arbitrary shell commands are unavailable.
+              Agents can read and search source, inspect Git status, create and edit source files for requested work, and run fixed syntax/type checks. File removals still need human confirmation. Retrieved snippets go to your configured AI provider; arbitrary shell commands are unavailable.
             </p>
             {usage.provider_mode !== "tool_calling" && <p className="mt-2 text-sm text-amber-700">Configure a structured tool-calling AI provider to let agents use repository tools.</p>}
-            {!settings.agent_workspace_available && <p className="mt-2 text-sm text-amber-700">Configure AGENT_WORKSPACE_ROOT to a Git checkout on the API host before enabling this.</p>}
+            {!settings.agent_workspace_available && <p className="mt-2 text-sm text-amber-700">Provision a separate Git checkout at AGENT_WORKSPACE_ROOT/{settings.agent_workspace_id} on the API host before enabling this organization.</p>}
           </div>
-          <ExecutionSwitch label="Local repository access" enabled={settings.agent_workspace_enabled} disabled={pending || !settings.agent_workspace_available}
+          <ExecutionSwitch label="Organization repository access" enabled={settings.agent_workspace_enabled} disabled={pending || !settings.agent_workspace_available}
             onChange={() => {
               const enabled = !settings.agent_workspace_enabled;
-              if (enabled && !window.confirm("Enable local repository access for agents in this organization? Agents can read permitted source files from the API host; when asked to do code work, they can create and edit allowed files directly. Retrieved snippets will be sent to your configured AI provider. File removals still require human review, and arbitrary shell commands are unavailable.")) return;
+              if (enabled && !window.confirm("Enable this organization's isolated repository for agents? Agents can read permitted source files from its checkout; when asked to do code work, they can create and edit allowed files directly. Retrieved snippets will be sent to your configured AI provider. File removals still require human review, and arbitrary shell commands are unavailable.")) return;
               void mutate(async () => {
                 await api<Settings>("/admin/settings", { method: "PATCH", body: JSON.stringify({ agent_workspace_enabled: enabled }) });
                 await reloadExecutionState();
-              }, `Local repository access ${enabled ? "enabled" : "disabled"}.`);
+              }, `Organization repository access ${enabled ? "enabled" : "disabled"}.`);
             }} />
         </Card>
         <h3 className="font-medium">Agent usage and execution</h3>

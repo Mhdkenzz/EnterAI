@@ -158,7 +158,7 @@ def test_scheduler_execution_outcomes_are_durable_and_correlated(outcome, monkey
         task = c.post('/api/tasks', headers=h, json={'project_id': project['id'], 'title': 'PRIVATE-TASK'}).json()
         c.post(f"/api/tasks/{task['id']}/assign-agent", headers=h, json={'agent_id': agent_id})
         calls = {'narrated': [], 'proposed': [{'id': 'w', 'name': 'add_comment', 'args': {'task_id': task['id'], 'body': 'PRIVATE-BODY'}}],
-                 'completed': [{'id': 'w', 'name': 'mark_task_complete', 'args': {}}],
+                 'completed': [{'id': 'w', 'name': 'mark_task_complete', 'args': {'result': 'Prepared the requested checklist with detailed findings and documented the next steps.'}}],
                  'inconclusive': [{'id': 'r', 'name': 'get_projects', 'args': {}}]}
         turns = [ProviderTurn('PRIVATE-NARRATION', calls[outcome])] * (4 if outcome == 'inconclusive' else 1)
         with SessionLocal() as db:

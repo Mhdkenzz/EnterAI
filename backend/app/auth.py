@@ -201,6 +201,11 @@ def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db
             raise HTTPException(status_code=401, detail="Invalid session")
     user = db.scalar(select(User).where(User.id == payload.get("sub")))
     if not user or not user.active: raise HTTPException(status_code=401, detail="User unavailable")
+    # Worker agents operate through their assigned-task tools, not the human API.
+    # The ordinary API is organization-wide and must not become a bypass around
+    # those tool restrictions if a worker session token is ever presented.
+    if user.kind == "agent" and user.hierarchy_level == "worker":
+        raise HTTPException(status_code=403, detail="Worker agents cannot use the workspace API")
     # Tokens minted before this file existed carry no epoch; treating that as 0
     # matches the default column value, so upgrading does not sign everyone out.
     if int(payload.get("epoch") or 0) != int(user.session_epoch or 0):

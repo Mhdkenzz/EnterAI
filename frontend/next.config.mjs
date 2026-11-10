@@ -12,7 +12,7 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  `connect-src 'self' ${apiOrigin}${isDev ? " ws:" : ""}`,
+  `connect-src 'self' ${apiOrigin}${isDev && !process.env.NEXT_PUBLIC_API_URL ? " http://127.0.0.1:8000" : ""}${isDev ? " ws:" : ""}`,
   // SSO sign-in is a top-level navigation to the API, which redirects to the IdP.
   `form-action 'self' ${apiOrigin}`,
   "frame-ancestors 'none'",

@@ -224,6 +224,8 @@ jobs:
       STORAGE_BUCKET: enterai-uploads
       STORAGE_ACCESS_KEY: enterai_storage_ci
       STORAGE_SECRET_KEY: enterai_storage_ci_password
+      BACKUP_OBJECTS_BUCKET: enterai-uploads-backup-ci
+      DATABASE_BACKUP_BUCKET: enterai-database-backup-ci
       SMTP_HOST: 127.0.0.1
       EMAIL_FROM: ci@enterai.test
       APP_BASE_URL: http://127.0.0.1:3000
@@ -243,9 +245,9 @@ jobs:
           docker build -t "$ENTERAI_FRONTEND_IMAGE" ./frontend
           openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TLS_KEY_PATH" -out "$TLS_CERT_PATH" -days 1 -subj '/CN=localhost'
       - name: Start two API replicas behind a load balancer
-        # `up lb` pulls in the API replicas and their dependencies but not the web
-        # image, which this job does not exercise.
-        run: docker compose -f docker-compose.prod.yml up -d lb
+        # Compose needs an explicit scale flag; `deploy.replicas` is not applied by
+        # ordinary `docker compose up`. The web image is not exercised by this job.
+        run: docker compose -f docker-compose.prod.yml up -d --scale api=2 lb
       - name: Wait for the load balancer
         run: |
           for attempt in $(seq 1 60); do curl -kfsS https://127.0.0.1/health && break || sleep 2; done

@@ -125,13 +125,30 @@ def _git(root: Path, *args: str, input_text: str | None = None, timeout: float =
     )
 
 
-def repository_root() -> Path | None:
-    """Resolve one explicit root; local dev may use the app's own git checkout."""
+def repository_root(organization_id: str | None = None, db: Any = None) -> Path | None:
+    """Resolve an organization-specific checkout, never a shared hosted checkout."""
+    if not isinstance(organization_id, str) or not organization_id or organization_id in {".", ".."} or "/" in organization_id or "\\" in organization_id:
+        return None
     configured = os.getenv("AGENT_WORKSPACE_ROOT", "").strip()
     if configured:
-        candidate = Path(configured).expanduser()
+        try:
+            base = Path(configured).expanduser().resolve(strict=True)
+            organization_path = base / organization_id
+            if organization_path.is_symlink():
+                return None
+            candidate = organization_path.resolve(strict=True)
+            if candidate.parent != base:
+                return None
+        except (OSError, RuntimeError):
+            return None
     else:
         if os.getenv("ENVIRONMENT", "development").strip().lower() in {"production", "staging"}:
+            return None
+        if db is None:
+            return None
+        from sqlalchemy import func, select
+        from .models import Organization
+        if db.scalar(select(func.count(Organization.id))) != 1:
             return None
         candidate = Path(__file__).resolve().parents[2]
     try:
@@ -149,10 +166,10 @@ def repository_root() -> Path | None:
         return None
 
 
-def _require_root() -> Path:
-    root = repository_root()
+def _require_root(organization_id: str, db: Any) -> Path:
+    root = repository_root(organization_id, db)
     if root is None:
-        raise ValueError("Local repository tools are unavailable. Configure AGENT_WORKSPACE_ROOT to a Git checkout on the API host.")
+        raise ValueError("This organization has no isolated Git checkout. Configure AGENT_WORKSPACE_ROOT with a separate Git checkout under its organization ID.")
     return root
 
 
@@ -230,8 +247,8 @@ def _source_paths(root: Path, subpath: str | None = None) -> list[Path]:
     return paths
 
 
-def repo_tree(args: dict[str, Any]) -> dict[str, Any]:
-    root = _require_root()
+def repo_tree(args: dict[str, Any], organization_id: str, db: Any) -> dict[str, Any]:
+    root = _require_root(organization_id, db)
     subpath = args.get("path")
     paths = _source_paths(root, subpath)
     limit = max(1, min(int(args.get("limit", 120)), 250))
@@ -239,8 +256,8 @@ def repo_tree(args: dict[str, Any]) -> dict[str, Any]:
     return {"root": root.name, "files": [prefix + p.relative_to(root.joinpath(*PurePosixPath(subpath).parts)).as_posix() if subpath else p.relative_to(root).as_posix() for p in paths[:limit]], "shown": min(len(paths), limit), "truncated": len(paths) > limit}
 
 
-def repo_read(args: dict[str, Any]) -> dict[str, Any]:
-    root = _require_root()
+def repo_read(args: dict[str, Any], organization_id: str, db: Any) -> dict[str, Any]:
+    root = _require_root(organization_id, db)
     path = args["path"]
     _full, text = _safe_file(root, path)
     lines = text.splitlines()
@@ -254,11 +271,11 @@ def repo_read(args: dict[str, Any]) -> dict[str, Any]:
     return {"path": path, "line_start": start, "line_end": end, "content": content[:24_000], "truncated": end < len(lines) or len(content) > 24_000}
 
 
-def repo_search(args: dict[str, Any]) -> dict[str, Any]:
+def repo_search(args: dict[str, Any], organization_id: str, db: Any) -> dict[str, Any]:
     query = str(args.get("query", "")).strip()
     if not query or len(query) > 300:
         raise ValueError("Search text must contain 1–300 characters.")
-    root = _require_root()
+    root = _require_root(organization_id, db)
     limit = max(1, min(int(args.get("limit", 20)), 50))
     needle = query.casefold()
     results = []
@@ -277,8 +294,8 @@ def repo_search(args: dict[str, Any]) -> dict[str, Any]:
     return {"query": query, "results": results, "truncated": False}
 
 
-def repo_status(_args: dict[str, Any]) -> dict[str, Any]:
-    root = _require_root()
+def repo_status(_args: dict[str, Any], organization_id: str, db: Any) -> dict[str, Any]:
+    root = _require_root(organization_id, db)
     status = _git(root, "status", "--short", "--branch", timeout=5)
     diff = _git(root, "diff", "--stat", "--no-ext-diff", "--no-textconv", timeout=5)
     if status.returncode or diff.returncode:
@@ -286,8 +303,8 @@ def repo_status(_args: dict[str, Any]) -> dict[str, Any]:
     return {"branch_and_changes": status.stdout[:12_000], "tracked_diff_summary": diff.stdout[:4_000]}
 
 
-def repo_check(args: dict[str, Any]) -> dict[str, Any]:
-    root = _require_root()
+def repo_check(args: dict[str, Any], organization_id: str, db: Any) -> dict[str, Any]:
+    root = _require_root(organization_id, db)
     check = args.get("check")
     if check == "diff_whitespace":
         result = _git(root, "diff", "--check", "--no-ext-diff", "--no-textconv", timeout=8)
@@ -373,11 +390,11 @@ def _repo_index(root: Path) -> list[RepoChunk]:
         return chunks
 
 
-def repo_context(args: dict[str, Any]) -> dict[str, Any]:
+def repo_context(args: dict[str, Any], organization_id: str, db: Any) -> dict[str, Any]:
     query = str(args.get("query", "")).strip()
     if not query or len(query) > 500:
         raise ValueError("Context query must contain 1–500 characters.")
-    root = _require_root()
+    root = _require_root(organization_id, db)
     query_terms = Counter(_terms(query))
     if not query_terms:
         raise ValueError("The repository context query needs searchable words.")
@@ -446,8 +463,8 @@ def _patch_paths(patch: str) -> list[str]:
     return sorted(paths)
 
 
-def validate_repo_patch(patch: str) -> dict[str, Any]:
-    root = _require_root()
+def validate_repo_patch(patch: str, organization_id: str, db: Any) -> dict[str, Any]:
+    root = _require_root(organization_id, db)
     paths = _patch_paths(patch)
     for name in paths:
         target = root.joinpath(*PurePosixPath(name).parts)
@@ -490,15 +507,15 @@ def apply_agent_repo_patch(args: dict[str, Any], agent: Any, db: Any, *, assigne
     elif agent.kind != "agent" or agent.hierarchy_level != "ceo":
         raise ValueError("Interactive repository edits are available only to the CEO agent.")
     patch = args.get("patch")
-    validated = validate_repo_patch(patch)
+    validated = validate_repo_patch(patch, agent.organization_id, db)
     if re.search(r"(?m)^deleted file mode ", patch):
         raise ValueError("File removal needs human confirmation. Use repo_propose_patch to show the exact deletion for review.")
     if any(old != new for old, new in re.findall(r"(?m)^diff --git a/(.+) b/(.+)$", patch)):
         raise ValueError("Moving or renaming files needs human confirmation. Use repo_propose_patch to show the exact move for review.")
-    root = _require_root()
+    root = _require_root(agent.organization_id, db)
     with _PATCH_LOCK:
         # Revalidate under the lock so concurrent agents cannot apply stale patches.
-        validated = validate_repo_patch(patch)
+        validated = validate_repo_patch(patch, agent.organization_id, db)
         applied = _git(root, "apply", "--whitespace=nowarn", "--", input_text=patch, timeout=12)
     if applied.returncode != 0:
         raise ValueError("Patch could not be applied to the current repository. Refresh context and try again.")
@@ -516,10 +533,10 @@ def apply_confirmed_repo_patch(args: dict[str, Any], confirmer: Any, db: Any) ->
     patch = args.get("patch")
     if not isinstance(patch, str):
         raise ValueError("The repository patch is invalid.")
-    current = validate_repo_patch(patch)
+    current = validate_repo_patch(patch, confirmer.organization_id, db)
     if current["root_id"] != args.get("root_id"):
         raise ValueError("The configured repository changed since this patch was proposed. Ask the agent to prepare a new proposal.")
-    root = _require_root()
+    root = _require_root(confirmer.organization_id, db)
     applied = _git(root, "apply", "--whitespace=nowarn", "--", input_text=patch, timeout=8)
     if applied.returncode != 0:
         raise ValueError("Patch could not be applied. The repository may have changed since it was proposed.")
@@ -528,13 +545,13 @@ def apply_confirmed_repo_patch(args: dict[str, Any], confirmer: Any, db: Any) ->
     return {"ok": True, "files": current["paths"], "summary": current["summary"]}
 
 
-def execute_repo_read_tool(name: str, args: dict[str, Any]) -> Any:
-    if name == "repo_context": return repo_context(args)
-    if name == "repo_search": return repo_search(args)
-    if name == "repo_read": return repo_read(args)
-    if name == "repo_status": return repo_status(args)
-    if name == "repo_tree": return repo_tree(args)
-    if name == "repo_check": return repo_check(args)
+def execute_repo_read_tool(name: str, args: dict[str, Any], organization_id: str, db: Any) -> Any:
+    if name == "repo_context": return repo_context(args, organization_id, db)
+    if name == "repo_search": return repo_search(args, organization_id, db)
+    if name == "repo_read": return repo_read(args, organization_id, db)
+    if name == "repo_status": return repo_status(args, organization_id, db)
+    if name == "repo_tree": return repo_tree(args, organization_id, db)
+    if name == "repo_check": return repo_check(args, organization_id, db)
     raise KeyError(f"Unknown repository read tool {name!r}")
 
 

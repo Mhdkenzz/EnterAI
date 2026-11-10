@@ -5,6 +5,7 @@ import { Check, Moon, Sun } from "lucide-react";
 import { api } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
+import { AIProviderSettings } from "@/components/ai-provider-settings";
 
 type DeletionRequest = {
   id: string; status: string; requested_at: string; scheduled_for: string; reason: string | null;
@@ -21,7 +22,7 @@ function downloadJson(data: unknown, filename: string) {
   URL.revokeObjectURL(url);
 }
 
-export function PrivacySettings({ userId }: { userId: string }) {
+export function PrivacySettings({ userId, isAdmin = false }: { userId: string; isAdmin?: boolean }) {
   const [theme, setTheme] = useState<"light" | "dark">("light");
   const [status, setStatus] = useState<DeletionRequest | null>(null);
   const [statusError, setStatusError] = useState("");
@@ -126,6 +127,8 @@ export function PrivacySettings({ userId }: { userId: string }) {
         </div>
       </Card>
     </section>
+
+    {isAdmin && <AIProviderSettings />}
 
     <section aria-labelledby="account-privacy-heading" className="space-y-5">
       <div>

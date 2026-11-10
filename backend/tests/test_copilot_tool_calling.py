@@ -88,7 +88,7 @@ class _ScriptedProvider:
         self._turns = list(turns)
         self.seen_messages = []
 
-    def respond(self, system, messages, role=None):
+    def respond(self, system, messages, role=None, extra_tools=None):
         self.seen_messages.append(list(messages))
         self.seen_role = role
         return self._turns.pop(0)

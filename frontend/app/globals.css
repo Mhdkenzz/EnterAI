@@ -58,6 +58,21 @@ body {
   text-rendering: optimizeLegibility;
 }
 button, input, select, textarea { font: inherit; }
+select option, select optgroup { background-color: var(--surface); color: var(--ink); }
+.task-select { color: var(--ink); font-weight: 600; }
+.task-select:disabled { cursor: wait; opacity: .75; }
+.task-select[data-tone="priority-low"], .task-select[data-tone="status-backlog"], .task-select[data-tone="status-todo"] { background-color: #f1f5f9; border-color: #cbd5e1; color: #334155; }
+.task-select[data-tone="priority-medium"], .task-select[data-tone="health-at_risk"], .task-select[data-tone="status-review"] { background-color: #fffbeb; border-color: #fcd34d; color: #854d0e; }
+.task-select[data-tone="priority-high"], .task-select[data-tone="health-off_track"], .task-select[data-tone="status-blocked"] { background-color: #fff1f2; border-color: #fda4af; color: #9f1239; }
+.task-select[data-tone="health-on_track"], .task-select[data-tone="status-done"] { background-color: #ecfdf5; border-color: #6ee7b7; color: #065f46; }
+.task-select[data-tone="status-in_progress"] { background-color: #eff6ff; border-color: #93c5fd; color: #1e40af; }
+.task-select-error { color: #b91c1c; }
+:root[data-theme="dark"] .task-select[data-tone="priority-low"], :root[data-theme="dark"] .task-select[data-tone="status-backlog"], :root[data-theme="dark"] .task-select[data-tone="status-todo"] { background-color: #243247; border-color: #53657b; color: #e2e8f0; }
+:root[data-theme="dark"] .task-select[data-tone="priority-medium"], :root[data-theme="dark"] .task-select[data-tone="health-at_risk"], :root[data-theme="dark"] .task-select[data-tone="status-review"] { background-color: #493712; border-color: #a77927; color: #fde68a; }
+:root[data-theme="dark"] .task-select[data-tone="priority-high"], :root[data-theme="dark"] .task-select[data-tone="health-off_track"], :root[data-theme="dark"] .task-select[data-tone="status-blocked"] { background-color: #4c202c; border-color: #a44b5c; color: #fecdd3; }
+:root[data-theme="dark"] .task-select[data-tone="health-on_track"], :root[data-theme="dark"] .task-select[data-tone="status-done"] { background-color: #123c30; border-color: #328667; color: #a7f3d0; }
+:root[data-theme="dark"] .task-select[data-tone="status-in_progress"] { background-color: #1b3458; border-color: #4d7cbb; color: #bfdbfe; }
+:root[data-theme="dark"] .task-select-error { color: #fda4af; }
 button { -webkit-tap-highlight-color: transparent; }
 ::selection { background: rgba(49, 95, 206, 0.18); color: var(--ink); }
 :focus-visible { outline: 3px solid rgba(49, 95, 206, 0.34); outline-offset: 2px; }
@@ -95,6 +110,8 @@ button { -webkit-tap-highlight-color: transparent; }
 .agent-status-dot.is-working, .agent-node-status.is-working { background: #3986f6; box-shadow: 0 0 0 3px rgba(57, 134, 246, .12); }
 .agent-status-dot.is-idle, .agent-node-status.is-idle { background: #8b9bb0; }
 .agent-status-dot.is-blocked, .agent-node-status.is-blocked { background: #e15b69; box-shadow: 0 0 0 3px rgba(225, 91, 105, .12); }
+.agent-status-dot.is-limited, .agent-node-status.is-limited { background: #e39b28; box-shadow: 0 0 0 3px rgba(227, 155, 40, .14); }
+.agent-status-dot.is-review, .agent-node-status.is-review { background: #8b73d6; box-shadow: 0 0 0 3px rgba(139, 115, 214, .14); }
 .agent-map-panel { background: var(--surface); }
 .agent-map-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; min-height: 48px; padding: 0 20px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 11px; font-weight: 600; }
 .agent-map-legend > span { display: inline-flex; align-items: center; gap: 7px; }

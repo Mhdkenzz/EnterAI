@@ -12,6 +12,12 @@ Enter AI is an AI-native enterprise project-management MVP. It is a modular mono
 - Copilot chat with organization-scoped read tools and signed, explicit confirmation before writes; an admin can optionally enable direct ordinary workspace changes for the isolated CEO agent
 - Optional local repository harness for agents: source search, cited local RAG, bounded file reads and edits, task-scoped autonomous coding, fixed checks, and human-confirmed file removals
 - New-project brief ingestion for PDF, DOC, DOCX, TXT, XLSX, CSV, and JSON with editable AI-drafted metadata and suggested tasks
+- Incoming request queue with source links, review status, manual capture, and organization-scoped duplicate protection
+- Gmail shared-mailbox OAuth connection with encrypted tokens and incremental Inbox sync; Slack workspace and opt-in per-person DM OAuth with signed Events API intake; Notion OAuth with page-picker-scoped polling. All three feed deduplicated, source-linked requests into CEO triage and human-reviewed project plans when an AI provider is configured.
+- Organization admins can configure an encrypted IFM K2 Horizon or OpenRouter API key, with a shared per-workspace request-rate limit. IFM uses `IFM/K2-Horizon-375B-A23B` at `https://api.ifm.ai/v1` by default.
+- Slack app setup and workspace installation steps: [docs/SLACK_INTEGRATION.md](docs/SLACK_INTEGRATION.md)
+- Notion OAuth and page sharing setup steps: [docs/NOTION_INTEGRATION.md](docs/NOTION_INTEGRATION.md)
+- Request plans can be drafted from captured messages, edited, approved or rejected; approval creates the project and priority-ordered CEO task queue. Agents can delegate scoped child tasks to direct reports, record progress, and raise task blockers that pause execution and notify workspace admins; repeated provider failures or no-progress responses also block the task for human review.
 - S3-compatible upload storage (local disk for a single node), mirrored to a backup bucket
 - Trials, Stripe Checkout and customer portal, per-period usage tracking and seat limits
 - Seeded demo workspace (three projects, users, teams, tasks and notifications)
@@ -64,11 +70,12 @@ The UI calls `/api/ai/plan`, which reads workspace data and returns proposed wri
 
 ## Local repository tools for agents
 
-In local development, agents can use the app's own Git checkout. Set
-`AGENT_WORKSPACE_ROOT` to an absolute Git checkout path to select another local
-repository. The API must have filesystem access to that checkout; for Docker,
-bind-mount it into the API container and set the variable to the container path.
-An organization administrator must then enable **Local repository access** in
+In local development with a single organization, agents can use the app's own Git
+checkout. For hosted or multi-organization use, set `AGENT_WORKSPACE_ROOT` to a
+parent directory containing a separate Git checkout for each organization, named
+with that organization's ID. The API must have filesystem access to those isolated
+checkouts; for Docker, mount the parent directory into the API container. An
+organization administrator must then enable **Organization repository access** in
 Admin → Execution controls. It is off by default and scoped per organization.
 
 Repository tools are available with a structured tool-calling AI provider; the

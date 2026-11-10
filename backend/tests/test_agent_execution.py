@@ -7,6 +7,14 @@ from app.execution import MAX_CONSECUTIVE_FAILURES, run_execution_tick
 import app.execution as execution
 from app.main import app
 from app.models import Comment, Organization, Task, User
+from app.ratelimit import SlidingWindowRateLimiter
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def isolate_agent_daily_budget(monkeypatch):
+    """Each test gets a fresh rolling budget despite reusing seeded agent IDs."""
+    monkeypatch.setattr(execution, "_daily_limiter", SlidingWindowRateLimiter(execution.DAILY_CALL_LIMIT, 86400))
 
 
 def _admin_headers_and_org():
@@ -31,7 +39,11 @@ def _agent_with_task(client, headers, db, vp_count=1, directors_per_vp=0):
     project = client.get("/api/projects", headers=headers).json()[0]
     task = client.post("/api/tasks", headers=headers, json={"project_id": project["id"], "title": "Autonomous work item", "description": "Do the thing."}).json()
     client.post(f"/api/tasks/{task['id']}/assign-agent", headers=headers, json={"agent_id": ceo["id"]})
-    return db.get(User, ceo["id"]), db.get(Task, task["id"])
+    agent = db.get(User, ceo["id"])
+    agent.last_execution_at = None  # don't carry scheduler cooldown across tests
+    agent.daily_limit_reached_at = None
+    db.commit()
+    return agent, db.get(Task, task["id"])
 
 
 class _ScriptedProvider:
@@ -141,13 +153,31 @@ def test_log_progress_executes_immediately_as_a_task_comment_and_agent_message()
         db.close()
 
 
+def test_completion_without_a_result_does_not_finish_the_task():
+    headers, org, db = _admin_headers_and_org()
+    try:
+        with TestClient(app) as client:
+            agent, task = _agent_with_task(client, headers, db)
+        provider = _ScriptedProvider([
+            ProviderTurn(text=None, tool_calls=[{"id": "c1", "name": "mark_task_complete", "args": {}}]),
+            ProviderTurn(text="I still need to produce the deliverable.", tool_calls=[]),
+        ])
+        assert run_execution_tick(db, _service_with(provider)) == 1
+        db.refresh(task)
+        assert task.status != "done"
+    finally:
+        with TestClient(app) as client:
+            _reset_hierarchy(client, headers)
+        db.close()
+
+
 def test_mark_task_complete_finishes_the_task_and_moves_the_agents_pointers():
     headers, org, db = _admin_headers_and_org()
     try:
         with TestClient(app) as client:
             agent, task = _agent_with_task(client, headers, db)
         provider = _ScriptedProvider([
-            ProviderTurn(text="Done -- shipped it.", tool_calls=[{"id": "c1", "name": "mark_task_complete", "args": {}}]),
+            ProviderTurn(text="Done.", tool_calls=[{"id": "c1", "name": "mark_task_complete", "args": {"result": "Drafted the release checklist: verify rollout, monitor errors, and prepare rollback steps."}}]),
         ])
         stepped = run_execution_tick(db, _service_with(provider))
         assert stepped == 1
@@ -155,6 +185,7 @@ def test_mark_task_complete_finishes_the_task_and_moves_the_agents_pointers():
         db.refresh(agent)
         db.refresh(task)
         assert task.status == "done"
+        assert db.scalar(select(Comment).where(Comment.task_id == task.id, Comment.author_id == agent.id)).body.startswith("Completed work:")
         assert agent.current_task_id is None
         assert agent.last_completed_task_id == task.id
     finally:
@@ -177,10 +208,50 @@ def test_a_proposed_write_during_execution_mints_a_confirmation_instead_of_execu
 
         titles = [t.title for t in db.scalars(select(Task)).all()]
         assert "Follow-up from autonomous work" not in titles  # never executes without confirmation
+        db.refresh(task)
+        assert task.status == "review"
+        assert run_execution_tick(db, _service_with(_ScriptedProvider([]))) == 0
 
         with TestClient(app) as client:
             history = client.get(f"/api/agents/{agent.id}/messages", headers=headers).json()
+            proposals = client.get("/api/agent-proposals", headers=headers).json()
+            agent_state = next(a for a in client.get("/api/agents", headers=headers).json() if a["id"] == agent.id)
         assert any("follow-up" in m["body"].lower() for m in history)
+        assert agent_state["is_awaiting_approval"] is True
+        assert agent_state["is_working"] is False
+        proposal = next(p for p in proposals if p["task_id"] == task.id)
+        assert proposal["label"]
+        with TestClient(app) as client:
+            response = client.post("/api/ai/confirm", headers=headers,
+                                   json={"confirmation_token": proposal["confirmation_token"]})
+            assert response.status_code == 200, response.text
+        db.refresh(task)
+        assert task.status == "in_progress"
+        assert "Follow-up from autonomous work" in [t.title for t in db.scalars(select(Task)).all()]
+    finally:
+        with TestClient(app) as client:
+            _reset_hierarchy(client, headers)
+        db.close()
+
+
+def test_rejecting_an_execution_proposal_pauses_its_task():
+    headers, org, db = _admin_headers_and_org()
+    try:
+        with TestClient(app) as client:
+            agent, task = _agent_with_task(client, headers, db)
+            project = client.get("/api/projects", headers=headers).json()[0]
+        provider = _ScriptedProvider([
+            ProviderTurn(text="I can add a follow-up.", tool_calls=[{"id": "c1", "name": "create_task", "args": {"project_id": project["id"], "title": "Rejected follow-up"}}]),
+        ])
+        assert run_execution_tick(db, _service_with(provider)) == 1
+        with TestClient(app) as client:
+            proposals = client.get("/api/agent-proposals", headers=headers).json()
+            proposal = next(p for p in proposals if p["task_id"] == task.id)
+            response = client.post(f"/api/agent-proposals/{proposal['id']}/reject", headers=headers)
+            assert response.status_code == 200, response.text
+        db.refresh(task)
+        assert task.status == "blocked"
+        assert "rejected" in task.blocked_reason.lower()
     finally:
         with TestClient(app) as client:
             _reset_hierarchy(client, headers)
@@ -230,7 +301,10 @@ def test_circuit_breaker_stops_polling_an_agent_after_repeated_provider_failures
         for _ in range(MAX_CONSECUTIVE_FAILURES):
             assert run_execution_tick(db, service, cooldown_seconds=0) == 1
         db.refresh(agent)
+        db.refresh(task)
         assert agent.consecutive_task_failures == MAX_CONSECUTIVE_FAILURES
+        assert task.status == "blocked"
+        assert task.blocked_reason and "failed repeatedly" in task.blocked_reason
         calls_before = provider.calls
 
         assert run_execution_tick(db, service, cooldown_seconds=0) == 0  # circuit breaker excludes it now
@@ -238,8 +312,37 @@ def test_circuit_breaker_stops_polling_an_agent_after_repeated_provider_failures
 
         with TestClient(app) as client:
             status = next(a for a in client.get("/api/agents", headers=headers).json() if a["id"] == agent.id)
+            reopened = client.patch(f"/api/tasks/{task.id}", headers=headers, json={"status": "todo"})
+        assert reopened.status_code == 200
+        db.refresh(agent)
+        assert agent.consecutive_task_failures == 0
         assert status["is_blocked"] is True
         assert status["is_working"] is False
+    finally:
+        with TestClient(app) as client:
+            _reset_hierarchy(client, headers)
+        db.close()
+
+
+def test_repeated_narration_without_progress_blocks_the_task_for_human_review():
+    headers, org, db = _admin_headers_and_org()
+    try:
+        with TestClient(app) as client:
+            agent, task = _agent_with_task(client, headers, db)
+        provider = _ScriptedProvider([
+            ProviderTurn(text="I am still considering this task.", tool_calls=[])
+            for _ in range(MAX_CONSECUTIVE_FAILURES)
+        ])
+        service = _service_with(provider)
+        for _ in range(MAX_CONSECUTIVE_FAILURES):
+            assert run_execution_tick(db, service, cooldown_seconds=0) == 1
+        db.refresh(agent)
+        db.refresh(task)
+        assert task.status == "blocked"
+        assert task.blocked_reason and "without recording progress" in task.blocked_reason
+        assert agent.consecutive_task_failures == MAX_CONSECUTIVE_FAILURES
+        assert run_execution_tick(db, service, cooldown_seconds=0) == 0
+        assert provider.calls == MAX_CONSECUTIVE_FAILURES
     finally:
         with TestClient(app) as client:
             _reset_hierarchy(client, headers)
@@ -257,6 +360,13 @@ def test_daily_call_limit_skips_an_agent_that_has_exhausted_it():
         stepped = run_execution_tick(db, _service_with(provider))
         assert stepped == 0
         assert provider.calls == 0
+        db.refresh(agent)
+        assert agent.daily_limit_reached_at is not None
+        with TestClient(app) as client:
+            status = next(a for a in client.get("/api/agents", headers=headers).json() if a["id"] == agent.id)
+            notifications = client.get("/api/notifications", headers=headers).json()
+        assert status["is_rate_limited"] is True
+        assert any("daily limit" in notice["title"].lower() for notice in notifications)
     finally:
         with TestClient(app) as client:
             _reset_hierarchy(client, headers)

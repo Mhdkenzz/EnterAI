@@ -26,3 +26,12 @@ def test_staging_configuration_rejects_local_fallbacks_and_wildcard_hosts():
 
 def test_development_does_not_require_hosted_configuration():
     assert deployment_configuration_errors({"ENVIRONMENT": "development"}) == []
+
+
+def test_unknown_environment_does_not_disable_hosted_guards():
+    assert "ENVIRONMENT must be development, test, staging, or production" in deployment_configuration_errors({"ENVIRONMENT": "prod"})
+
+
+def test_hosted_configuration_rejects_sqlite_and_malformed_database_urls():
+    for value in ("sqlite:///local.db", "not a database url"):
+        assert "DATABASE_URL must use PostgreSQL in hosted environments" in deployment_configuration_errors(_hosted_env(DATABASE_URL=value))

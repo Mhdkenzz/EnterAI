@@ -24,8 +24,39 @@ The pre-provisioned host keeps a mode-600 `.env` outside release bundles. Requir
 in hosted mode: `ENVIRONMENT=staging`, `DATABASE_URL`, `JWT_SECRET`, `REDIS_URL`,
 `APP_BASE_URL`, `API_BASE_URL`, `CORS_ALLOWED_ORIGINS`, `TRUSTED_HOSTS`,
 `SEED_ADMIN_EMAIL`, `SEED_ADMIN_PASSWORD`, SMTP settings, storage settings,
-`POSTGRES_*`, and `TLS_CERT_PATH`/`TLS_KEY_PATH`. Set `SECRETS_ENCRYPTION_KEY` if
-`OIDC_ENABLED=true`. Do not set localhost URLs or wildcard trusted hosts.
+`POSTGRES_*`, `BACKUP_OBJECTS_BUCKET`, `DATABASE_BACKUP_BUCKET`, and
+`TLS_CERT_PATH`/`TLS_KEY_PATH`. The two backup buckets must be separate from each
+other and from primary storage; configure off-host versioning/lifecycle retention
+there. The release workflow starts the PostgreSQL archive job and both off-site
+backup workers. Set `SECRETS_ENCRYPTION_KEY` if
+OIDC or any Gmail, Slack, or Notion integration is enabled. Set the matching
+`GMAIL_OAUTH_CLIENT_ID`/`GMAIL_OAUTH_CLIENT_SECRET`, `SLACK_CLIENT_ID`/
+`SLACK_CLIENT_SECRET`/`SLACK_SIGNING_SECRET`, or `NOTION_CLIENT_ID`/
+`NOTION_CLIENT_SECRET` variables to make that connector available. OAuth
+redirect URLs use `API_BASE_URL`; Slack also sends Events API callbacks to the
+public API address. Do not set localhost URLs or wildcard trusted hosts.
+Set `SECRETS_ENCRYPTION_KEY` before admins save an organization-specific IFM or
+OpenRouter key from Settings → AI provider.
+
+For CEO triage, plan generation, and autonomous agent execution, configure a
+structured tool-calling provider with `AI_PROVIDER`, `AI_MODEL`, and the provider
+credentials it requires. The default `deterministic` provider is an offline mode:
+it keeps requests available for human review but does not run the autonomous
+planning/execution loop. Enable execution in the workspace's **Admin → Execution
+controls** after reviewing the provider and agent permissions.
+Agent execution is capped at 500 steps per agent in a rolling 24-hour window by
+default (`AGENT_EXECUTION_DAILY_STEP_LIMIT`). The counter is shared through Redis
+across API replicas; a limit of zero or less is not supported.
+
+To enable coding agents, mount a host directory as `AGENT_WORKSPACE_ROOT` and
+provision one isolated Git checkout at `<AGENT_WORKSPACE_ROOT>/<organization-id>`
+for each organization. Do not point the setting at one shared application checkout.
+`docker-compose.prod.yml` mounts `AGENT_WORKSPACE_HOST_PATH` (default
+`/srv/enterai/workspaces`) at `/var/lib/enterai/workspaces`; the API runs as UID
+10001, so provision the directory and checkouts with appropriate ownership and
+permissions. The organization ID is shown in Admin → Execution controls; the
+repository switch remains disabled until that organization's checkout is present
+and valid.
 
 `docker-compose.prod.yml` accepts only `ENTERAI_BACKEND_IMAGE` and
 `ENTERAI_FRONTEND_IMAGE` immutable digest references supplied by the workflow.
@@ -43,10 +74,11 @@ serves both from one host), or signed-in requests will not carry the session.
    The deploy account should be dedicated and limited to the release directory;
    Docker access is privileged and must be treated accordingly.
 3. Run the manual workflow for one exact SHA. It pulls digest-pinned images, runs
-   one migration job with `alembic current --check`, starts two replicas, and waits
+   one migration job that compares `alembic current` with `alembic heads`, starts two replicas, and waits
    on public `/ready`.
 4. Smoke test sign-in, a write-confirmation flow, uploads, SSO callback, and both
-   replicas. Perform a disposable restore drill before relying on backups.
+   replicas. Confirm successful backup-worker logs and perform a disposable restore
+   drill before relying on backups.
 5. Application-image rollback is a deliberate new release of a prior digest.
    Do **not** automatically downgrade a database; follow the restore runbook.
 

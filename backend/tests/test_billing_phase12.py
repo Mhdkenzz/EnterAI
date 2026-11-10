@@ -99,7 +99,7 @@ def test_enforce_plan_limit_denies_without_a_subscription(db_session, org):
     assert service.enforce_plan_limit(org.id, "ai_calls", 1) is False
 
 
-def test_enforce_plan_limit_denies_usage_that_would_exceed_the_plan(db_session, org):
+def test_ai_usage_remains_unlimited_even_when_plan_has_an_old_limit(db_session, org):
     from app.billing_service import BillingService
     from app.billing_models import UsageRecord
     _subscribe(db_session, org, ai_usage_limit=10)
@@ -107,7 +107,7 @@ def test_enforce_plan_limit_denies_usage_that_would_exceed_the_plan(db_session, 
     db_session.flush()
     service = BillingService(db_session)
     assert service.enforce_plan_limit(org.id, "ai_calls", 1) is True   # 9 + 1 == 10, at the limit
-    assert service.enforce_plan_limit(org.id, "ai_calls", 2) is False  # 9 + 2 > 10
+    assert service.enforce_plan_limit(org.id, "ai_calls", 2) is True
 
 
 def test_enforce_plan_limit_allows_a_metric_the_plan_does_not_cap(db_session, org):

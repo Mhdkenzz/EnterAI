@@ -1,4 +1,5 @@
 from uuid import uuid4
+from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -9,7 +10,7 @@ from app.copilot import CopilotService
 from app.database import SessionLocal
 from app.hierarchy import MAX_HIERARCHY_AGENTS, desired_counts
 from app.main import _issue_confirmation, app
-from app.models import Organization, User
+from app.models import AgentMessage, Organization, User
 
 
 def _admin_headers_and_org():
@@ -22,14 +23,72 @@ def _admin_headers_and_org():
 
 
 def _reset_hierarchy(client, headers):
-    """Tests run against a shared demo DB; zero the hierarchy out first so each test
-    starts from a known, empty tree regardless of what earlier tests configured."""
+    """Reset the configurable reports while retaining the workspace CEO chat entry."""
     client.patch("/api/hierarchy-config", headers=headers, json={"vp_count": 0, "directors_per_vp": 0, "managers_per_director": 0, "workers_per_manager": 0})
 
 
 def test_desired_counts_multiply_top_down_and_zero_out_below_a_zero_level():
     assert desired_counts(2, 3, 4, 5) == {"ceo": 1, "vp": 2, "director": 6, "senior_manager": 24, "worker": 120}
-    assert desired_counts(0, 3, 4, 5) == {"ceo": 0, "vp": 0, "director": 0, "senior_manager": 0, "worker": 0}
+    assert desired_counts(0, 3, 4, 5) == {"ceo": 1, "vp": 0, "director": 0, "senior_manager": 0, "worker": 0}
+
+
+def test_ceo_chat_bootstraps_a_persistent_ceo_without_configured_reports_and_counts_unread_replies():
+    headers, _org, db = _admin_headers_and_org()
+    message = None
+    try:
+        with TestClient(app) as client:
+            _reset_hierarchy(client, headers)
+            first = client.post("/api/ceo-chat", headers=headers)
+            second = client.post("/api/ceo-chat", headers=headers)
+            assert first.status_code == 200
+            assert first.json()["hierarchy_level"] == "ceo"
+            assert second.json()["id"] == first.json()["id"]
+            assert [a["hierarchy_level"] for a in client.get("/api/agents", headers=headers).json()] == ["ceo"]
+
+            message = AgentMessage(
+                agent_id=first.json()["id"], author_id=None, role="agent", body="Unread reply",
+                created_at=datetime.utcnow() + timedelta(seconds=1),
+            )
+            db.add(message)
+            db.commit()
+            since = datetime.utcnow().isoformat()
+            unread = client.get("/api/ceo-chat/unread", headers=headers, params={"since": since})
+            assert unread.status_code == 200
+            assert unread.json()["unread_count"] == 1
+    finally:
+        if message is not None:
+            db.delete(message)
+            db.commit()
+        with TestClient(app) as client:
+            _reset_hierarchy(client, headers)
+        db.close()
+
+
+def test_ceo_chat_asks_for_a_project_name_then_proposes_creation_when_provided():
+    headers, _org, db = _admin_headers_and_org()
+    ceo_id = None
+    try:
+        with TestClient(app) as client:
+            _reset_hierarchy(client, headers)
+            ceo = client.post("/api/ceo-chat", headers=headers).json()
+            ceo_id = ceo["id"]
+            needs_name = client.post(f"/api/agents/{ceo_id}/messages", headers=headers, json={"message": "Start a new project"})
+            assert needs_name.status_code == 201
+            assert needs_name.json()["reply"] == "Sure. What should I call the project?"
+            assert needs_name.json()["actions"] == []
+
+            named = client.post(f"/api/agents/{ceo_id}/messages", headers=headers, json={"message": "Start a new project called Atlas rollout"})
+            assert named.status_code == 201
+            action = named.json()["actions"][0]
+            assert action["requires_confirmation"] is True
+            assert action["label"] == "Create project: Atlas rollout"
+    finally:
+        if ceo_id:
+            db.query(AgentMessage).filter(AgentMessage.agent_id == ceo_id).delete()
+            db.commit()
+        with TestClient(app) as client:
+            _reset_hierarchy(client, headers)
+        db.close()
 
 
 def test_hierarchy_config_update_requires_admin_role():
@@ -224,7 +283,7 @@ class _ScriptedProvider:
     def __init__(self, turns):
         self._turns = list(turns)
 
-    def respond(self, system, messages, role=None):
+    def respond(self, system, messages, role=None, extra_tools=None):
         return self._turns.pop(0)
 
     def assistant_message(self, turn):

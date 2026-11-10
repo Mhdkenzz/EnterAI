@@ -142,7 +142,7 @@ jobs:
           docker compose --env-file "$path/.env" --env-file "$path/.env.release" pull
           docker compose --env-file "$path/.env" --env-file "$path/.env.release" up -d db redis objectstore objectstore-init
           docker compose --env-file "$path/.env" --env-file "$path/.env.release" run --rm migrate
-          docker compose --env-file "$path/.env" --env-file "$path/.env.release" up -d --no-build --scale api=2 api web lb
+          docker compose --env-file "$path/.env" --env-file "$path/.env.release" up -d --no-build --scale api=2 api web lb backup objectstore-backup database-backup-offsite
           test "$(docker compose --env-file "$path/.env" --env-file "$path/.env.release" ps -q api | wc -l)" = 2
           REMOTE
       - name: Verify externally reachable readiness

@@ -8,6 +8,8 @@ const VIEW_PATHS: [string, string][] = [
   ["Portfolio", "/projects"],
   ["My work", "/my-work"],
   ["Inbox", "/inbox"],
+  ["Requests", "/requests"],
+  ["Integrations", "/integrations"],
   ["Teams", "/teams"],
   ["Agents", "/agents"],
   ["AI", "/ai"],

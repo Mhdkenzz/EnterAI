@@ -32,6 +32,10 @@ def _run_startup(env_overrides: dict[str, str]) -> subprocess.CompletedProcess:
         "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"
         "from fastapi.testclient import TestClient\n"
         "from app.main import app\n"
+        # This isolated harness uses SQLite to test the other startup guards.
+        # Hosted database URL validation has its own regression tests.
+        "import app.deployment_config as deployment_config\n"
+        "deployment_config.make_url = lambda value: type('TestURL', (), {'get_backend_name': lambda self: 'postgresql'})()\n"
         "with TestClient(app):\n"
         "    pass\n"
     )

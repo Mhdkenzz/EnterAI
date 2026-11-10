@@ -14,7 +14,7 @@ from . import secrets_store, sso_oidc
 from .admin import human_admin
 from .auth import set_session_cookie
 from .database import get_db
-from .models import User, AuditEvent
+from .models import User, AuditEvent, IntegrationConnection, OrganizationAISettings
 from .services import log
 from .sso_models import IdentityProvider, SCIMUserMapping
 from .sso_auth import (
@@ -206,14 +206,31 @@ def sso_audit(q: str | None = None, action: str | None = None,
 
 @router_admin.post('/rotate-secrets')
 def rotate_provider_secrets(user: User = Depends(human_admin), db: Session = Depends(get_db)):
-    """Re-encrypts every stored OIDC client_secret for this organization under
+    """Re-encrypts every stored OIDC, integration, and AI-provider secret for this organization under
     the current SECRETS_ENCRYPTION_KEY -- see secrets_store.py's module
     docstring for the full rotation procedure (set SECRETS_ENCRYPTION_KEY to a
     new value, keep the old one in SECRETS_ENCRYPTION_KEY_PREVIOUS, call this,
     then remove the previous key). Scoped to this org: one tenant's rotation
     can never touch another's secrets."""
-    result = secrets_store.rotate_stored_secrets(
+    identity_provider = secrets_store.rotate_stored_secrets(
         db, IdentityProvider, 'client_secret_encrypted', organization_id=user.organization_id)
+    integration_access = secrets_store.rotate_stored_secrets(
+        db, IntegrationConnection, 'access_token_ciphertext', organization_id=user.organization_id)
+    integration_refresh = secrets_store.rotate_stored_secrets(
+        db, IntegrationConnection, 'refresh_token_ciphertext', organization_id=user.organization_id)
+    openrouter_key = secrets_store.rotate_stored_secrets(
+        db, OrganizationAISettings, 'api_key_encrypted', organization_id=user.organization_id)
+    failed_ids = sorted(set(identity_provider['failed_ids'] + integration_access['failed_ids'] + integration_refresh['failed_ids'] + openrouter_key['failed_ids']))
+    result = {
+        'rewritten': identity_provider['rewritten'] + integration_access['rewritten'] + integration_refresh['rewritten'] + openrouter_key['rewritten'],
+        'failed_ids': failed_ids,
+        'by_type': {
+            'identity_provider': identity_provider['rewritten'],
+            'integration_access_tokens': integration_access['rewritten'],
+            'integration_refresh_tokens': integration_refresh['rewritten'],
+            'organization_ai_provider_keys': openrouter_key['rewritten'],
+        },
+    }
     log(db, user.organization_id, user.id, 'identity_provider', user.organization_id, 'secrets_rotated',
         count=result['rewritten'])
     db.commit()

@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from uuid import uuid4
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from .database import Base
@@ -49,11 +49,12 @@ class User(Base):
     current_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", name="fk_users_current_task_id_tasks", use_alter=True), nullable=True)
     last_completed_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", name="fk_users_last_completed_task_id_tasks", use_alter=True), nullable=True)
     # Autonomous execution (Phase 6): consecutive_task_failures is a circuit breaker --
-    # an agent stops being polled for its current task once this hits the configured
-    # threshold, until a human intervenes (message, reassignment). last_execution_at
-    # drives the "agent is working" status shown in the hierarchy tree/inspector.
+    # repeated provider failures or narration without recorded progress block the
+    # current task until a human intervenes. last_execution_at drives the "agent is
+    # working" status shown in the hierarchy tree/inspector.
     consecutive_task_failures: Mapped[int] = mapped_column(Integer, default=0)
     last_execution_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    daily_limit_reached_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # Bumped whenever credentials change. Session tokens carry the epoch they were
     # minted under, so a password reset silently invalidates every token issued
@@ -117,6 +118,7 @@ class Task(Base):
     title: Mapped[str] = mapped_column(String(240))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="todo")
+    blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     priority: Mapped[str] = mapped_column(String(20), default="medium")
     assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     reporter_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
@@ -126,6 +128,15 @@ class Task(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+class TaskDependency(Base):
+    """A task may begin only after its prerequisite task is complete."""
+    __tablename__ = "task_dependencies"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    depends_on_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    __table_args__ = (UniqueConstraint("task_id", "depends_on_task_id", name="uq_task_dependency_pair"),)
 
 class Comment(Base):
     __tablename__ = "comments"
@@ -216,6 +227,115 @@ class Notification(Base):
     read: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
+
+class InboundMessage(Base):
+    """A durable source message awaiting human review or downstream planning.
+
+    Provider IDs are unique within an organization and source, making retries from
+    future polling/webhook adapters idempotent without leaking identity across orgs.
+    The message body is retained as source material and must be treated as untrusted
+    input by any agent that later summarizes or plans from it.
+    """
+    __tablename__ = "inbound_messages"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "source", "external_id", name="uq_inbound_message_source_id"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    source: Mapped[str] = mapped_column(String(20), default="manual")
+    external_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    thread_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sender: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    subject: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    body: Mapped[str] = mapped_column(Text)
+    source_url: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="new", index=True)
+    triage_status: Mapped[str] = mapped_column(String(30), default="not_started", index=True)
+    triage_category: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    triage_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    triage_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    triage_concerns: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    triage_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    triage_next_attempt_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive)
+
+
+class InboundPlan(Base):
+    """Editable project/task proposal tied to its source request and approval."""
+    __tablename__ = "inbound_plans"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    inbound_message_id: Mapped[str] = mapped_column(ForeignKey("inbound_messages.id"), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    summary: Mapped[str] = mapped_column(Text)
+    proposal: Mapped[dict] = mapped_column(JSON)
+    planner_provider: Mapped[str] = mapped_column(String(40), default="deterministic")
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    project_id: Mapped[str | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class IntegrationConnection(Base):
+    """Org-scoped third-party account and encrypted credentials for background sync."""
+    __tablename__ = "integration_connections"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "provider", "external_account_id", name="uq_integration_org_provider_account"),
+        Index(
+            "uq_connected_slack_workspace", "external_account_id", unique=True,
+            postgresql_where=text("provider = 'slack' AND status = 'connected'"),
+            sqlite_where=text("provider = 'slack' AND status = 'connected'"),
+        ),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    external_account_id: Mapped[str] = mapped_column(String(500))
+    display_name: Mapped[str] = mapped_column(String(500))
+    status: Mapped[str] = mapped_column(String(30), default="connected", index=True)
+    granted_scopes: Mapped[list] = mapped_column(JSON, default=list)
+    access_token_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refresh_token_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    access_token_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    history_cursor: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    connected_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    last_sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive, onupdate=utc_naive)
+
+
+class IntegrationOAuthState(Base):
+    """Single-use short-lived OAuth state tied to one human and organization."""
+    __tablename__ = "integration_oauth_states"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    state_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    provider: Mapped[str] = mapped_column(String(30))
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    code_verifier_ciphertext: Mapped[str] = mapped_column(Text)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive)
+
+
+class OrganizationAISettings(Base):
+    """Organization-scoped hosted AI configuration. API keys are encrypted before
+    persistence and are never returned by the settings API.
+    """
+    __tablename__ = "organization_ai_settings"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), unique=True, index=True)
+    provider: Mapped[str] = mapped_column(String(30), default="ifm")
+    api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str] = mapped_column(String(200), default="IFM/K2-Horizon-375B-A23B")
+    requests_per_minute: Mapped[int] = mapped_column(Integer, default=20)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utc_naive, onupdate=utc_naive)
+
 class AgentMessage(Base):
     """Persistent per-agent conversation history, separate from the general Copilot's
     ephemeral per-request tool-calling transcript -- this is what backs the "chat with
@@ -273,6 +393,14 @@ class CopilotConfirmation(Base):
     organization_id: Mapped[str] = mapped_column(String, index=True)
     tool: Mapped[str] = mapped_column(String(64))
     expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    # Execution-time agent proposals remain reviewable after the worker tick ends.
+    # The bearer token is encrypted at rest and only returned to an authorized
+    # human in this organization while the proposal is pending.
+    token_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    label: Mapped[str | None] = mapped_column(String(240), nullable=True)
+    details: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True)
+    rejected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 

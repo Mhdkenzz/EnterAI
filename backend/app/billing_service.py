@@ -22,8 +22,9 @@ ENTITLED_STATUSES = ("trial", "active", "past_due")
 def sync_plans_from_env(db: Session) -> None:
     """Upsert the plan catalog from BILLING_PLANS, a JSON list such as
     [{"name": "Team", "stripe_price_id": "price_123", "price_cents": 2900,
-      "currency": "USD", "seat_limit": 25, "ai_usage_limit": 2000}].
-    Limits are per billing period; omit one to leave it uncapped. Malformed
+      "currency": "USD", "seat_limit": 25}].
+    AI usage is unlimited; the legacy ai_usage_limit field is retained for existing
+    records but is not enforced. Malformed
     configuration stops startup rather than silently selling the wrong plan."""
     from .billing_models import BillingPlan
     raw = os.getenv("BILLING_PLANS", "").strip()

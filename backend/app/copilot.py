@@ -13,6 +13,7 @@ import json
 import os
 import re
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -22,6 +23,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .ai.profiles import DEFAULT_PROFILE
+from .ai.context_budget import cap_tool_result
+from .ai.config import AISettings
 from .ai.providers import AnthropicCopilotProvider, DeterministicCopilotProvider, OpenAICompatibleCopilotProvider
 from .ai.tool_routing import preflight_tool_calls
 from .ai.tool_schema import render_anthropic, render_openai
@@ -29,15 +32,18 @@ from .ai.tool_validation import validate_tool_args
 from .ai.turn import ProviderTurn
 from .ai.conversation_memory import ConversationMemory
 from .auth import CONFIRMATION_SECRET
-from .models import Activity, Comment, Notification, Organization, Project, ProjectDocument, Task, Team, User
+from .models import Activity, Comment, Notification, Organization, OrganizationAISettings, Project, ProjectDocument, Task, Team, User
+from . import secrets_store
+from .ratelimit import enforce_ai_provider_rpm
 from .agent_workspace import (
     MAX_AGENT_PATCHES_PER_RUN, MAX_AGENT_PATCH_BYTES_PER_RUN, MAX_PATCH_PREVIEW, REPO_APPLY_PATCH_NAME,
     REPO_APPLY_PATCH_SPEC, REPO_PATCH_NAME, REPO_PATCH_SPEC,
     REPO_READ_NAMES, REPO_READ_SPECS, REPO_SCHEMA_BY_NAME, apply_agent_repo_patch,
     execute_repo_read_tool, repository_root, validate_repo_patch,
 )
-from .services import log, sync_agent_task_pointers
+from .services import advance_project_to_completion_review, log, sync_agent_task_pointers
 from .observability import legacy_detail, provider_call, require_execution, execution_run, audit, audit_context, tool_audit
+from .task_dependencies import unmet_dependency_ids
 
 
 class CopilotProviderError(RuntimeError):
@@ -54,6 +60,8 @@ def _task_data(task: Task, project: Project) -> dict[str, Any]:
         "project_id": project.id,
         "project_name": project.name,
         "project_health": project.health,
+        "parent_id": task.parent_id,
+        "assignee_id": task.assignee_id,
     }
 
 
@@ -65,8 +73,14 @@ class WorkspaceTools:
         self.user = user
         self.scope_project_id = scope_project_id
 
+    @property
+    def worker_scoped(self) -> bool:
+        return self.user.kind == "agent" and self.user.hierarchy_level == "worker"
+
     def get_projects(self) -> list[dict[str, Any]]:
         stmt = select(Project).where(Project.organization_id == self.user.organization_id)
+        if self.worker_scoped:
+            stmt = stmt.where(Project.id.in_(select(Task.project_id).where(Task.assignee_id == self.user.id)))
         if self.scope_project_id:
             stmt = stmt.where(Project.id == self.scope_project_id)
         projects = self.db.scalars(stmt.order_by(Project.created_at.desc())).all()
@@ -75,7 +89,7 @@ class WorkspaceTools:
                 "id": project.id,
                 "name": project.name,
                 "code": project.code,
-                "description": project.description or "",
+                "description": "" if self.worker_scoped else project.description or "",
                 "status": project.status,
                 "health": project.health,
                 "due_date": project.due_date.isoformat() if project.due_date else None,
@@ -91,6 +105,8 @@ class WorkspaceTools:
         )
         if self.scope_project_id:
             stmt = stmt.where(Project.id == self.scope_project_id)
+        if self.worker_scoped:
+            stmt = stmt.where(Task.assignee_id == self.user.id)
         rows = self.db.execute(stmt.order_by(Task.due_date)).all()
         return [_task_data(task, project) for task, project in rows]
 
@@ -100,14 +116,20 @@ class WorkspaceTools:
         return [task for task in tasks if task["id"] in assigned_ids]
 
     def get_teams(self) -> list[dict[str, Any]]:
+        if self.worker_scoped:
+            return []
         teams = self.db.scalars(select(Team).where(Team.organization_id == self.user.organization_id)).all()
         return [{"id": team.id, "name": team.name, "description": team.description or ""} for team in teams]
 
     def get_users(self) -> list[dict[str, Any]]:
+        if self.worker_scoped:
+            return []
         users = self.db.scalars(select(User).where(User.organization_id == self.user.organization_id, User.kind == "human")).all()
         return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role, "title": u.title or ""} for u in users]
 
     def get_notifications(self) -> list[dict[str, Any]]:
+        if self.worker_scoped:
+            return []
         notifications = self.db.scalars(
             select(Notification).where(Notification.user_id == self.user.id).order_by(Notification.created_at.desc()).limit(20)
         ).all()
@@ -117,6 +139,8 @@ class WorkspaceTools:
         ]
 
     def get_activity(self) -> list[dict[str, Any]]:
+        if self.worker_scoped:
+            return []
         rows = self.db.scalars(
             select(Activity).where(Activity.organization_id == self.user.organization_id).order_by(Activity.created_at.desc()).limit(20)
         ).all()
@@ -129,7 +153,9 @@ class WorkspaceTools:
         task_row = self.db.execute(
             select(Task, Project).join(Project, Project.id == Task.project_id).where(Task.id == task_id)
         ).first()
-        if not task_row or task_row[1].organization_id != self.user.organization_id:
+        if (not task_row or task_row[1].organization_id != self.user.organization_id
+                or (self.worker_scoped and task_row[0].assignee_id != self.user.id)
+                or (self.worker_scoped and self.scope_project_id and task_row[0].project_id != self.scope_project_id)):
             raise ValueError(f"No task with id {task_id!r} was found in this workspace.")
         comments = self.db.scalars(select(Comment).where(Comment.task_id == task_id)).all()
         return [
@@ -138,6 +164,12 @@ class WorkspaceTools:
         ]
 
     def search(self, query: str) -> dict[str, Any]:
+        if self.worker_scoped:
+            term = query.casefold()
+            return {
+                "projects": [{k: p[k] for k in ("id", "name", "code")} for p in self.get_projects() if term in p["name"].casefold() or term in p["code"].casefold()],
+                "tasks": [{k: t[k] for k in ("id", "title", "project_id")} for t in self.get_tasks() if term in t["title"].casefold()],
+            }
         term = f"%{query}%"
         projects = self.db.scalars(
             select(Project).where(Project.organization_id == self.user.organization_id, or_(Project.name.ilike(term), Project.code.ilike(term)))
@@ -156,6 +188,8 @@ class WorkspaceTools:
         parameterized pgvector queries through indexing.search_similar_chunks.
         Results are scoped to the user's organization; cross-tenant chunks are excluded
         by the WHERE clause in search_similar_chunks."""
+        if self.worker_scoped:
+            return []
         from .embeddings import get_embedding_provider
         from .indexing import search_similar_chunks
         provider = get_embedding_provider()
@@ -182,7 +216,14 @@ class WorkspaceTools:
         return results
 
     def get_direct_reports(self) -> list[dict[str, Any]]:
-        reports = self.db.scalars(select(User).where(User.parent_agent_id == self.user.id)).all()
+        if self.worker_scoped:
+            return []
+        reports = self.db.scalars(select(User).where(
+            User.organization_id == self.user.organization_id,
+            User.kind == "agent",
+            User.parent_agent_id == self.user.id,
+            User.retired_at.is_(None),
+        )).all()
         return [
             {"id": r.id, "name": r.name, "hierarchy_level": r.hierarchy_level, "current_task_id": r.current_task_id}
             for r in reports
@@ -200,9 +241,9 @@ class WorkspaceTools:
 # --------------------------------------------------------------------------
 
 READ_TOOL_SPECS: list[dict[str, Any]] = [
-    {"name": "get_projects", "description": "List every project in the workspace with status, health, and description.",
+    {"name": "get_projects", "description": "List projects available to the current user or agent.",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
-    {"name": "get_tasks", "description": "List every task across every project in the workspace.",
+    {"name": "get_tasks", "description": "List tasks available to the current user or agent.",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
     {"name": "get_my_tasks", "description": "List tasks assigned to the current user only.",
      "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
@@ -270,14 +311,14 @@ _CONFIRMABLE_TOOL_NAMES = WRITE_TOOL_NAMES | {REPO_PATCH_NAME}
 
 
 def _repo_tools_enabled(db: Session, user: User) -> bool:
-    if user.kind != "agent" or repository_root() is None:
+    if user.kind != "agent" or user.hierarchy_level == "worker" or repository_root(user.organization_id, db) is None:
         return False
     organization = db.get(Organization, user.organization_id)
     return bool(organization and organization.agent_workspace_enabled)
 
 
-def _repo_patch_action(agent: User, args: dict[str, Any]) -> dict[str, Any]:
-    inspection = validate_repo_patch(args.get("patch"))
+def _repo_patch_action(agent: User, args: dict[str, Any], db: Session) -> dict[str, Any]:
+    inspection = validate_repo_patch(args.get("patch"), agent.organization_id, db)
     signed_args = {"patch": args["patch"], "root_id": inspection["root_id"]}
     token = create_agent_confirmation(agent, REPO_PATCH_NAME, signed_args)
     preview = args["patch"][:MAX_PATCH_PREVIEW]
@@ -409,6 +450,18 @@ def _ground_write_args(db: Session, user: User, name: str, args: dict[str, Any])
     return grounded
 
 
+def _worker_write_in_scope(tools: WorkspaceTools, args: dict[str, Any]) -> bool:
+    if not tools.worker_scoped:
+        return True
+    if args.get("task_id") and args["task_id"] not in {task["id"] for task in tools.get_tasks()}:
+        return False
+    if args.get("project_id") and args["project_id"] not in {project["id"] for project in tools.get_projects()}:
+        return False
+    if args.get("team_id") or args.get("agent_id") or (args.get("assignee_id") and args["assignee_id"] != tools.user.id):
+        return False
+    return True
+
+
 def _describe_write_call(name: str, args: dict[str, Any]) -> str:
     if name == "create_task": return f"Create task: {args.get('title', 'New task')}"
     if name == "update_task": return "Update task"
@@ -433,7 +486,8 @@ SYSTEM_PROMPT = (
     "write tool per turn, from whichever write tools are available to you in this turn's tool list. The application "
     "either executes an explicitly authorized CEO full-access change or returns other writes for human confirmation. "
     "Do not ask the user to confirm in chat; call the relevant write tool and let the application enforce its configured approval. "
-    "When a required project name or code can be inferred from the user's goal, choose a concise, clear value instead of asking. "
+    "For a project request, ask one concise question only when a useful project name cannot be inferred; infer a short code from the name. "
+    "Never claim a project was created until the application reports the write succeeded. "
     "Whenever you call a write tool, also include a short plain-language explanation of the requested change. "
     "If a tool call fails or finds no match for a specific id or name the user gave you, tell them it was not found "
     "-- never substitute a different real project, task, or person and answer as if it were the one asked about."
@@ -503,19 +557,104 @@ def _execute_ceo_workspace_write(tools: WorkspaceTools, name: str, args: dict[st
 EXECUTION_SYSTEM_PROMPT = (
     "You are {name}, a {title} agent in an AI-native workspace, autonomously working on your assigned task. Use "
     "your read tools to check any context you need, then call log_progress to record concrete progress as you make "
-    "it, or mark_task_complete once the task is genuinely finished -- never claim you did something you did not "
-    "actually do. If real progress requires something outside your own task (delegating to a report, creating a "
-    "task, editing another task or project), propose it with the matching tool; a human will review and confirm it "
-    "before anything changes. Call at most one tool per turn."
+    "it, or mark_task_complete once the task is genuinely finished, supplying the actual deliverable or verifiable evidence of the work -- never claim you did something you did not "
+    "actually do. If a bounded piece of your assigned work can be done by a direct report, create a child task "
+    "with delegate_subtask and keep your parent task open until every child is complete. Inspect existing tasks "
+    "first and do not create duplicate subtasks. Internal delegation stays within your direct reports; changes "
+    "outside that boundary and external actions still need human confirmation. If a real dependency, missing access, "
+    "unclear decision, or external wait blocks progress, call raise_blocker with the issue and what a person must resolve. "
+    "Do not keep the task running or claim completion while blocked. Call at most one tool per turn."
 )
 EXECUTION_TOOL_SPECS: list[dict[str, Any]] = [
     {"name": "log_progress", "description": "Record a progress note as a comment on your current task. Use this to narrate concrete work as you do it.",
      "input_schema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"], "additionalProperties": False}},
-    {"name": "mark_task_complete", "description": "Mark your current task as done. Only call this once the work is genuinely finished.",
-     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False}},
+    {"name": "mark_task_complete", "description": "Mark your current task as done after finishing it. Include the actual deliverable or concrete evidence and its location; do not claim external work without tool evidence.",
+     "input_schema": {"type": "object", "properties": {"result": {"type": "string", "minLength": 40, "maxLength": 4000}}, "required": ["result"], "additionalProperties": False}},
+    {"name": "raise_blocker", "description": "Pause your current task when a real dependency, missing access, unclear decision, or external wait prevents progress. Explain the blocker and what a person needs to do; the task moves to Blocked and workspace admins are notified.",
+     "input_schema": {"type": "object", "properties": {"reason": {"type": "string", "minLength": 8, "maxLength": 2000}}, "required": ["reason"], "additionalProperties": False}},
+    {"name": "delegate_subtask", "description": "Create a child task under your current task and assign it to one of your direct reports. This is an internal workspace delegation; do not use it for external actions.",
+     "input_schema": {"type": "object", "properties": {
+         "agent_id": {"type": "string", "description": "ID of one of your direct reports from get_direct_reports"},
+         "title": {"type": "string", "minLength": 1, "maxLength": 240},
+         "description": {"type": "string", "maxLength": 3000},
+         "priority": {"type": "string", "enum": ["low", "medium", "high"]},
+     }, "required": ["agent_id", "title", "description", "priority"], "additionalProperties": False}},
 ]
 EXECUTION_TOOL_NAMES = {spec["name"] for spec in EXECUTION_TOOL_SPECS}
 MAX_EXECUTION_TURNS = 4
+
+
+def _create_delegated_subtask(tools: WorkspaceTools, parent_task: Task, args: dict[str, Any]) -> dict[str, Any]:
+    """Create an auditable child task assigned only to the executing agent's direct report."""
+    agent, db = tools.user, tools.db
+    require_execution(db, agent)
+    if agent.kind != "agent" or parent_task.assignee_id != agent.id or agent.current_task_id != parent_task.id:
+        raise CopilotProviderError("Only the agent assigned to the current task can delegate a subtask.")
+    report = db.get(User, args.get("agent_id"))
+    if (not report or report.kind != "agent" or report.organization_id != agent.organization_id
+            or report.parent_agent_id != agent.id or report.retired_at is not None):
+        raise CopilotProviderError("Choose an active direct report from your hierarchy.")
+    if not report.execution_enabled or not execution_allowed(db, report):
+        raise CopilotProviderError("That direct report is not enabled for agent execution.")
+    title = " ".join(str(args.get("title") or "").split())[:240]
+    description = str(args.get("description") or "").strip()[:3000]
+    priority = args.get("priority") if args.get("priority") in {"low", "medium", "high"} else "medium"
+    if not title:
+        raise CopilotProviderError("A subtask title is required.")
+    siblings = db.scalars(select(Task).where(Task.parent_id == parent_task.id)).all()
+    existing = next((item for item in siblings if item.status != "done" and item.title.casefold() == title.casefold()), None)
+    if existing:
+        raise CopilotProviderError("A matching unfinished subtask already exists. Continue that task rather than creating a duplicate.")
+    subtask = Task(
+        project_id=parent_task.project_id, parent_id=parent_task.id, title=title,
+        description=description, status="todo", priority=priority,
+        assignee_id=report.id, reporter_id=agent.id,
+        position=max((item.position for item in siblings), default=-1) + 1,
+    )
+    db.add(subtask)
+    db.flush()
+    sync_agent_task_pointers(db, subtask, None)
+    if parent_task.status in {"todo", "backlog"}:
+        parent_task.status = "in_progress"
+    db.add(Comment(task_id=parent_task.id, author_id=agent.id,
+                   body=f"Delegated subtask to {report.name}: {title}"))
+    log(db, agent.organization_id, agent.id, "task", subtask.id, "subtask_delegated",
+        parent_task_id=parent_task.id, agent_id=report.id, agent_name=report.name, priority=priority)
+    tool_audit(tools, "agent_execution", "subtask_delegated", outcome="succeeded")
+    return {"id": subtask.id, "title": subtask.title, "assigned_to": report.name, "parent_task_id": parent_task.id}
+
+
+def _raise_task_blocker(tools: WorkspaceTools, task: Task, reason: str) -> str:
+    agent, db = tools.user, tools.db
+    require_execution(db, agent)
+    if agent.kind != "agent" or task.assignee_id != agent.id or agent.current_task_id != task.id:
+        raise CopilotProviderError("Only the agent assigned to the current task can raise a blocker.")
+    blocker = " ".join(reason.split())[:2000]
+    if len(blocker) < 8:
+        raise CopilotProviderError("Describe the blocker and what needs to happen next.")
+    if task.status == "blocked":
+        return task.blocked_reason or blocker
+    task.status = "blocked"
+    task.blocked_reason = blocker
+    task.completed_at = None
+    db.add(Comment(task_id=task.id, author_id=agent.id, body=f"Blocked: {blocker}"))
+    recipients = db.scalars(select(User).where(
+        User.organization_id == agent.organization_id, User.kind == "human",
+        User.role == "admin", User.active.is_(True),
+    )).all()
+    if task.reporter_id:
+        reporter = db.get(User, task.reporter_id)
+        if reporter and reporter.kind == "human" and reporter.active and reporter.organization_id == agent.organization_id:
+            recipients = list(recipients) + [reporter]
+    for recipient in {person.id: person for person in recipients}.values():
+        db.add(Notification(
+            user_id=recipient.id, title=f"Agent needs help: {task.title}"[:220],
+            body=blocker, href=f"project:{task.project_id}",
+        ))
+    sync_agent_task_pointers(db, task, task.assignee_id)
+    log(db, agent.organization_id, agent.id, "task", task.id, "agent_blocked")
+    tool_audit(tools, "agent_execution", "task_blocked", outcome="succeeded")
+    return blocker
 
 
 def _provider_turn_metrics(turn: ProviderTurn) -> dict[str, Any]:
@@ -528,13 +667,35 @@ def _provider_turn_metrics(turn: ProviderTurn) -> dict[str, Any]:
 
 
 class CopilotService:
-    def __init__(self):
-        provider_name = os.getenv("AI_PROVIDER", "deterministic").strip().lower()
+    def __init__(self, db: Session | None = None, organization_id: str | None = None):
+        settings = AISettings.from_env()
+        before_request = None
+        if db is not None and organization_id:
+            org_settings = db.scalar(select(OrganizationAISettings).where(
+                OrganizationAISettings.organization_id == organization_id,
+            ))
+            if org_settings and org_settings.api_key_encrypted:
+                provider_name = org_settings.provider or "openrouter"
+                provider_base_urls = {
+                    "ifm": "https://api.ifm.ai/v1",
+                    "openrouter": "https://openrouter.ai/api/v1",
+                }
+                settings = replace(
+                    settings,
+                    provider=provider_name,
+                    base_url=provider_base_urls[provider_name],
+                    model=org_settings.model,
+                    api_key=secrets_store.decrypt(org_settings.api_key_encrypted),
+                    timeout_seconds=120.0 if provider_name == "ifm" else 45.0,
+                )
+                rpm = org_settings.requests_per_minute
+                before_request = lambda: enforce_ai_provider_rpm(organization_id, rpm)
+        provider_name = settings.provider
         if provider_name == "anthropic":
-            self.provider: Any = AnthropicCopilotProvider()
+            self.provider: Any = AnthropicCopilotProvider(settings)
             self.mode = "tool_calling"
-        elif provider_name in {"openai_compatible", "lmstudio", "ollama"}:
-            self.provider = OpenAICompatibleCopilotProvider()
+        elif provider_name in {"openai_compatible", "lmstudio", "ollama", "openrouter", "ifm"}:
+            self.provider = OpenAICompatibleCopilotProvider(settings, before_request=before_request)
             self.mode = "tool_calling"
         else:
             self.provider = DeterministicCopilotProvider()
@@ -556,6 +717,18 @@ class CopilotService:
 
     def _plan_deterministic(self, message: str, tools: WorkspaceTools) -> dict[str, Any]:
         snapshot = tools.snapshot()
+        project_match = re.search(
+            r"\b(?:create|start|set up|setup|launch|begin)\s+(?:a\s+)?(?:new\s+)?project(?:\s+(?:called|named|for|:))?\s*(.*)$",
+            message.strip(), re.I,
+        )
+        if project_match:
+            project_name = project_match.group(1).strip(" \t\r\n:.,!?\"'")
+            # Common project-request endings that don't identify a useful name.
+            if project_name.lower() in {"", "please", "for me", "now", "today"}:
+                return {"reply": "Sure. What should I call the project?", "actions": [], "read_tools": []}
+            actions = self._proposed_actions(message, snapshot, tools)
+            if actions:
+                return {"reply": "I’ve prepared the project request for review.", "actions": actions, "read_tools": []}
         reply = provider_call(tools, self.mode, lambda: self.provider.answer(message, _provider_snapshot(snapshot)))
         if tools.user.kind == "agent":
             require_execution(tools.db, tools.user)
@@ -565,6 +738,17 @@ class CopilotService:
     def _proposed_actions(self, message: str, snapshot: dict[str, Any], tools: "WorkspaceTools") -> list[dict[str, Any]]:
         user = tools.user
         normalized = message.lower()
+        project_match = re.search(
+            r"\b(?:create|start|set up|setup|launch|begin)\s+(?:a\s+)?(?:new\s+)?project(?:\s+(?:called|named|for|:))?\s*(.+)$",
+            message.strip(), re.I,
+        )
+        if project_match and "create_project" in allowed_write_tools(user.role):
+            name = project_match.group(1).strip(" \t\r\n:.,!?\"'")
+            if name.lower() not in {"", "please", "for me", "now", "today"}:
+                code = re.sub(r"[^A-Za-z0-9]+", "-", name).strip("-").upper()[:16] or "PROJECT"
+                args = {"name": name[:120], "code": code}
+                mint = create_agent_confirmation if user.kind == "agent" else create_confirmation
+                return [describe_action(tools.db, user, "create_project", args, mint(user, "create_project", args))]
         if "create_task" not in allowed_write_tools(user.role):
             return []
         if not any(trigger in normalized for trigger in ("create task", "add task", "make a task")):
@@ -631,7 +815,7 @@ class CopilotService:
             try:
                 result = execute_read_tool(preflight_name, preflight_args, tools)
                 used_read_tools.append(preflight_name)
-                messages.append(self.provider.tool_result_message(preflight_call["id"], result))
+                messages.append(self.provider.tool_result_message(preflight_call["id"], cap_tool_result(result)))
             except (ValueError, KeyError) as exc:
                 messages.append(self.provider.tool_result_message(preflight_call["id"], str(exc), is_error=True))
             except Exception:
@@ -710,7 +894,7 @@ class CopilotService:
                         messages.append(self.provider.tool_result_message(call["id"], "Arguments did not match this repository tool's schema.", is_error=True))
                         continue
                     try:
-                        result = execute_repo_read_tool(name, call["args"])
+                        result = execute_repo_read_tool(name, call["args"], tools.user.organization_id, tools.db)
                         tool_audit(tools, "local_repository", name, outcome="succeeded")
                         used_read_tools.append(name)
                         messages.append(self.provider.tool_result_message(call["id"], result))
@@ -756,7 +940,7 @@ class CopilotService:
                         messages.append(self.provider.tool_result_message(call["id"], "Only one proposed action is allowed per turn.", is_error=True))
                         continue
                     try:
-                        confirmed_action = _repo_patch_action(tools.user, call["args"])
+                        confirmed_action = _repo_patch_action(tools.user, call["args"], tools.db)
                         tool_audit(tools, "local_repository", "patch_proposed", outcome="succeeded")
                     except ValueError as exc:
                         tool_audit(tools, "local_repository", "patch_proposed", outcome="failed")
@@ -781,7 +965,9 @@ class CopilotService:
                     continue
                 if name in WRITE_TOOL_NAMES:
                     args = _ground_write_args(tools.db, tools.user, name, call["args"])
-                    if name not in allowed_write_tools(role):
+                    if not _worker_write_in_scope(tools, args):
+                        messages.append(self.provider.tool_result_message(call["id"], "This action is outside your assigned work.", is_error=True))
+                    elif name not in allowed_write_tools(role):
                         messages.append(self.provider.tool_result_message(call["id"], "Your role is not permitted to perform this action.", is_error=True))
                     elif confirmed_action is not None:
                         messages.append(self.provider.tool_result_message(call["id"], "Only one proposed action is allowed per turn.", is_error=True))
@@ -817,7 +1003,7 @@ class CopilotService:
                 try:
                     result = execute_read_tool(name, call["args"], tools)
                     used_read_tools.append(name)
-                    messages.append(self.provider.tool_result_message(call["id"], result))
+                    messages.append(self.provider.tool_result_message(call["id"], cap_tool_result(result)))
                 except (ValueError, KeyError) as exc:
                     messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
             if confirmed_action:
@@ -890,7 +1076,7 @@ class CopilotService:
             except CopilotProviderError:
                 if applied_repo_changes:
                     files = sorted({path for change in applied_repo_changes for path in change["files"]})
-                    return {"outcome": "narrated", "text": f"I edited {', '.join(files)} for this task, but the provider stopped responding before I could finish validation.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+                    return {"outcome": "narrated", "text": f"I edited {', '.join(files)} for this task, but the provider stopped responding before I could finish validation.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None, "progress_made": True}
                 raise
             require_execution(db, agent)
             if not turn.tool_calls:
@@ -898,7 +1084,7 @@ class CopilotService:
                 if applied_repo_changes:
                     files = sorted({path for change in applied_repo_changes for path in change["files"]})
                     text = (text + "\n\n" if text else "") + f"Changed files: {', '.join(files)}."
-                return {"outcome": "narrated", "text": text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+                return {"outcome": "narrated", "text": text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None, "progress_made": bool(applied_repo_changes or progress_notes)}
             messages.append(self.provider.assistant_message(turn))
             for call in turn.tool_calls:
                 name = call["name"]
@@ -911,17 +1097,68 @@ class CopilotService:
                     progress_notes.append(note)
                     messages.append(self.provider.tool_result_message(call["id"], "Logged."))
                     continue
+                if name == "delegate_subtask":
+                    schema = next(spec["input_schema"] for spec in EXECUTION_TOOL_SPECS if spec["name"] == name)
+                    if validate_tool_args(call["args"], schema) is None:
+                        messages.append(self.provider.tool_result_message(call["id"], "Subtask details did not match the required schema.", is_error=True))
+                        continue
+                    try:
+                        result = _create_delegated_subtask(tools, task, call["args"])
+                        progress_notes.append(f"Delegated {result['title']} to {result['assigned_to']}.")
+                        messages.append(self.provider.tool_result_message(call["id"], result))
+                    except CopilotProviderError as error:
+                        messages.append(self.provider.tool_result_message(call["id"], str(error), is_error=True))
+                    continue
                 if name == "mark_task_complete":
+                    schema = next(spec["input_schema"] for spec in EXECUTION_TOOL_SPECS if spec["name"] == name)
+                    if validate_tool_args(call["args"], schema) is None or len(str(call["args"].get("result", "")).strip()) < 40:
+                        messages.append(self.provider.tool_result_message(call["id"], "Provide the actual deliverable or concrete evidence of the completed work before completing the task.", is_error=True))
+                        continue
+                    unmet = unmet_dependency_ids(db, task.id)
+                    if unmet:
+                        messages.append(self.provider.tool_result_message(
+                            call["id"], "This task has unfinished prerequisites. Wait for them to complete before closing this task.", is_error=True,
+                        ))
+                        continue
+                    open_subtasks = db.scalar(select(Task.id).where(
+                        Task.parent_id == task.id, Task.status != "done",
+                    ).limit(1))
+                    if open_subtasks:
+                        messages.append(self.provider.tool_result_message(
+                            call["id"], "This task has unfinished subtasks. Review their status and progress before completing the parent task.", is_error=True,
+                        ))
+                        continue
                     before_status = task.status
+                    db.add(Comment(task_id=task.id, author_id=agent.id, body="Completed work:\n" + call["args"]["result"].strip()))
                     task.status = "done"
                     task.completed_at = datetime.utcnow()
                     sync_agent_task_pointers(db, task, task.assignee_id)
                     log(db, agent.organization_id, agent.id, "task", task.id, "agent_completed", from_status=before_status)
+                    project = db.get(Project, task.project_id)
+                    if project:
+                        advance_project_to_completion_review(db, project, agent.id)
+                    if task.parent_id:
+                        parent = db.get(Task, task.parent_id)
+                        if parent:
+                            db.add(Comment(task_id=parent.id, author_id=agent.id,
+                                           body=f"{agent.name} completed subtask: {task.title}"))
+                            log(db, agent.organization_id, agent.id, "task", parent.id, "subtask_completed", subtask_id=task.id)
                     text = turn.text
                     if applied_repo_changes:
                         files = sorted({path for change in applied_repo_changes for path in change["files"]})
                         text = (text + "\n\n" if text else "") + f"Changed files: {', '.join(files)}."
                     return {"outcome": "completed", "text": text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+                if name == "raise_blocker":
+                    schema = next(spec["input_schema"] for spec in EXECUTION_TOOL_SPECS if spec["name"] == name)
+                    if validate_tool_args(call["args"], schema) is None:
+                        messages.append(self.provider.tool_result_message(call["id"], "Describe the blocker and what needs to happen next.", is_error=True))
+                        continue
+                    try:
+                        reason = _raise_task_blocker(tools, task, call["args"]["reason"])
+                    except CopilotProviderError as error:
+                        messages.append(self.provider.tool_result_message(call["id"], str(error), is_error=True))
+                        continue
+                    return {"outcome": "blocked", "text": reason, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
                 if name == "enter_ai_cli":
                     if not is_ceo:
                         messages.append(self.provider.tool_result_message(call["id"], "The UI CLI is available only to the CEO agent.", is_error=True))
@@ -944,7 +1181,7 @@ class CopilotService:
                         messages.append(self.provider.tool_result_message(call["id"], "Local repository tool arguments were invalid or repository access is unavailable.", is_error=True))
                         continue
                     try:
-                        result = execute_repo_read_tool(name, call["args"])
+                        result = execute_repo_read_tool(name, call["args"], tools.user.organization_id, tools.db)
                         tool_audit(tools, "local_repository", name, outcome="succeeded")
                         used_read_tools.append(name)
                         messages.append(self.provider.tool_result_message(call["id"], result))
@@ -980,6 +1217,9 @@ class CopilotService:
                     continue
                 if name in WRITE_TOOL_NAMES:
                     args = _ground_write_args(db, agent, name, call["args"])
+                    if not _worker_write_in_scope(tools, args):
+                        messages.append(self.provider.tool_result_message(call["id"], "This action is outside your assigned work.", is_error=True))
+                        continue
                     if name not in allowed_write_tools(agent.role):
                         messages.append(self.provider.tool_result_message(call["id"], "Your role is not permitted to perform this action.", is_error=True))
                         continue
@@ -1013,8 +1253,8 @@ class CopilotService:
                     messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
         if applied_repo_changes:
             files = sorted({path for change in applied_repo_changes for path in change["files"]})
-            return {"outcome": "narrated", "text": f"I edited {', '.join(files)} for this task, but reached the tool-call limit before I could finish validation.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
-        return {"outcome": "inconclusive", "text": None, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+            return {"outcome": "narrated", "text": f"I edited {', '.join(files)} for this task, but reached the tool-call limit before I could finish validation.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None, "progress_made": True}
+        return {"outcome": "inconclusive", "text": None, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None, "progress_made": bool(progress_notes)}
 
 
 def _provider_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -1052,7 +1292,7 @@ def create_agent_confirmation(agent: User, tool: str, args: dict[str, Any]) -> s
     the human chatting -- a distinct `kind` so the two token families can never be
     confused, since an agent can't click "confirm" for itself; a human in its org must."""
     return jwt.encode(
-        {"kind": "agent_copilot_confirmation", "jti": uuid4().hex, "sub": agent.id, "org": agent.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(minutes=10)},
+        {"kind": "agent_copilot_confirmation", "jti": uuid4().hex, "sub": agent.id, "org": agent.organization_id, "tool": tool, "args": args, "exp": datetime.now(timezone.utc) + timedelta(days=7)},
         CONFIRMATION_SECRET,
         algorithm="HS256",
     )

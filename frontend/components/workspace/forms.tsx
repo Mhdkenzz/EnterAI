@@ -33,6 +33,54 @@ function useSubmit() {
   return { saving, run, failure };
 }
 
+const statusLabels: Record<string, string> = {
+  backlog: "Backlog", todo: "To do", in_progress: "In progress", blocked: "Blocked", review: "In review", done: "Done",
+};
+
+/** Keep a selection visible while its save is in flight, and restore it on failure. */
+function TaskSelect({ label, value, tone, options, onSave }: {
+  label: string;
+  value: string;
+  tone?: string;
+  options: { value: string; label: string; disabled?: boolean }[];
+  onSave: (value: string) => Promise<string | null>;
+}) {
+  const [selected, setSelected] = useState(value);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { setSelected(value); }, [value]);
+  return (
+    <label className="text-xs text-zinc-500">
+      {label}
+      <select
+        className={cn(field, "task-select")}
+        data-tone={tone ? `${tone}-${selected}` : undefined}
+        value={selected}
+        disabled={saving}
+        onChange={async (event) => {
+          const next = event.target.value;
+          setSelected(next);
+          setSaving(true);
+          setError("");
+          try {
+            const failure = await onSave(next);
+            if (failure) { setSelected(value); setError(failure); }
+          } catch {
+            setSelected(value);
+            setError("Could not save this change. Please try again.");
+          } finally {
+            setSaving(false);
+          }
+        }}
+      >
+        {options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
+      </select>
+      {saving && <span className="mt-1 block">Saving…</span>}
+      {error && <span role="alert" className="task-select-error mt-1 block">{error}</span>}
+    </label>
+  );
+}
+
 export function ProjectForm({ teams, close, create }: any) {
   const [name, setName] = useState(""),
     [code, setCode] = useState(""),
@@ -149,7 +197,7 @@ export function ProjectForm({ teams, close, create }: any) {
           </label>
           <label className="text-xs text-zinc-400">
             Health
-            <select className={field} value={health} onChange={(e) => setHealth(e.target.value)}>
+            <select className={cn(field, "task-select")} data-tone={`health-${health}`} value={health} onChange={(e) => setHealth(e.target.value)}>
               <option value="on_track">On track</option>
               <option value="at_risk">At risk</option>
               <option value="off_track">Off track</option>
@@ -230,7 +278,7 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
           </label>
           <label className="text-xs text-zinc-400">
             Health
-            <select className={field} value={health} onChange={(e) => setHealth(e.target.value)}>
+            <select className={cn(field, "task-select")} data-tone={`health-${health}`} value={health} onChange={(e) => setHealth(e.target.value)}>
               <option value="on_track">On track</option>
               <option value="at_risk">At risk</option>
               <option value="off_track">Off track</option>
@@ -254,7 +302,8 @@ export function TaskForm({ project, users, close, create }: any) {
   const [title, setTitle] = useState(""),
     [description, setDescription] = useState(""),
     [priority, setPriority] = useState("medium"),
-    [assignee, setAssignee] = useState("");
+    [assignee, setAssignee] = useState(""),
+    [dueDate, setDueDate] = useState("");
   const { saving, run, failure } = useSubmit();
   return (
     <Modal title={"New task in " + project.name} close={close}>
@@ -263,7 +312,7 @@ export function TaskForm({ project, users, close, create }: any) {
         onSubmit={(e) => {
           e.preventDefault();
           if (title.trim())
-            run(() => create({ title: title.trim(), description, priority, assignee_id: assignee || null }));
+            run(() => create({ title: title.trim(), description, priority, assignee_id: assignee || null, due_date: dueDate ? dueDate + "T00:00:00" : null }));
         }}
       >
         <label className="block text-xs text-zinc-400">
@@ -281,10 +330,10 @@ export function TaskForm({ project, users, close, create }: any) {
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-xs text-zinc-400">
             Priority
-            <select className={field} value={priority} onChange={(e) => setPriority(e.target.value)}>
-              <option>low</option>
-              <option>medium</option>
-              <option>high</option>
+            <select className={cn(field, "task-select")} data-tone={`priority-${priority}`} value={priority} onChange={(e) => setPriority(e.target.value)}>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
             </select>
           </label>
           <label className="text-xs text-zinc-400">
@@ -299,6 +348,10 @@ export function TaskForm({ project, users, close, create }: any) {
             </select>
           </label>
         </div>
+        <label className="block text-xs text-zinc-400">
+          Due date
+          <input type="date" className={field} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+        </label>
         {failure}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={close}>
@@ -420,13 +473,14 @@ export function Drawer({
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="mb-6 flex justify-between">
-          <Badge tone={task.status === "done" ? "green" : "blue"}>
-            {task.status === "done" ? "Completed" : "Task"}
+          <Badge tone={task.status === "done" ? "green" : task.status === "blocked" ? "red" : "blue"}>
+            {task.status === "done" ? "Completed" : task.status === "blocked" ? "Blocked" : "Task"}
           </Badge>
           <button aria-label="Close task" className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-ink" onClick={close}>
             <X className="text-zinc-500" />
           </button>
         </div>
+        {task.status === "blocked" && task.blocked_reason && <p className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-sm text-rose-800">{task.blocked_reason}</p>}
         <input
           aria-label="Task title"
           defaultValue={task.title}
@@ -445,47 +499,15 @@ export function Drawer({
           placeholder="Add a description"
         />
         <div className="mt-5 grid grid-cols-2 gap-3">
-          <label className="text-xs text-zinc-500">
-            Status
-            <select
-              className={field}
-              value={task.status}
-              onChange={(e) => update(task, { status: e.target.value })}
-            >
-              {states.map((s) => (
-                <option key={s} value={s}>
-                  {s.replace("_", " ")}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-xs text-zinc-500">
-            Priority
-            <select
-              className={field}
-              value={task.priority}
-              onChange={(e) => update(task, { priority: e.target.value })}
-            >
-              <option>low</option>
-              <option>medium</option>
-              <option>high</option>
-            </select>
-          </label>
-          <label className="text-xs text-zinc-500">
-            Assignee
-            <select
-              className={field}
-              value={task.assignee?.id || ""}
-              onChange={(e) => update(task, { assignee_id: e.target.value || null })}
-            >
-              <option value="">Unassigned</option>
-              {(users || []).map((u: User) => (
-                <option key={u.id} value={u.id}>
-                  {u.name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <TaskSelect label="Status" value={task.status} tone="status"
+            options={states.map((s) => ({ value: s, label: statusLabels[s], disabled: task.status === "blocked" && s === "done" }))}
+            onSave={(status) => update(task, { status })} />
+          <TaskSelect label="Priority" value={task.priority} tone="priority"
+            options={[{ value: "low", label: "Low" }, { value: "medium", label: "Medium" }, { value: "high", label: "High" }]}
+            onSave={(priority) => update(task, { priority })} />
+          <TaskSelect label="Assignee" value={task.assignee?.id || ""}
+            options={[{ value: "", label: "Unassigned" }, ...(task.assignee && !(users || []).some((u: User) => u.id === task.assignee?.id) ? [{ value: task.assignee.id, label: task.assignee.name }] : []), ...(users || []).map((u: User) => ({ value: u.id, label: u.name }))]}
+            onSave={(assignee) => update(task, { assignee_id: assignee || null })} />
           <label className="text-xs text-zinc-500">
             Due date
             <input
@@ -498,6 +520,7 @@ export function Drawer({
             />
           </label>
         </div>
+        {task.status === "blocked" && <p className="mt-2 text-xs text-zinc-500">Reopen the task to clear its blocker before marking it done.</p>}
         <label className="mt-3 block text-xs text-zinc-500">
           Labels
           <input
@@ -518,6 +541,28 @@ export function Drawer({
               if (labels.join(",") !== (task.labels || []).join(",")) update(task, { labels });
             }}
           />
+        </label>
+        <label className="mt-4 block text-xs text-zinc-500">
+          Prerequisites
+          <select
+            multiple
+            className={cn(field, "mt-1 min-h-24")}
+            value={(task.depends_on || []).map((dependency: any) => dependency.id)}
+            onChange={(event) => {
+              const depends_on = Array.from(event.currentTarget.selectedOptions, (option) => option.value);
+              update(task, { depends_on });
+            }}
+          >
+            {siblings.filter((candidate) => candidate.id !== task.id).map((candidate) => (
+              <option key={candidate.id} value={candidate.id}>
+                {candidate.title} · {candidate.status.replace("_", " ")}
+              </option>
+            ))}
+          </select>
+          <span className="mt-1 block text-[11px] text-zinc-400">Select tasks that must finish first. Agents will wait for these tasks.</span>
+          {(task.depends_on || []).some((dependency: any) => dependency.status !== "done") && (
+            <span className="mt-1 block text-[11px] font-medium text-amber-700">Blocked until all prerequisites are complete.</span>
+          )}
         </label>
         {parent && (
           <p className="mt-4 text-xs text-zinc-400">

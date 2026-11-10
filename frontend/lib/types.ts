@@ -19,6 +19,7 @@ export type Project = {
   color: string;
   progress: number;
   task_count: number;
+  owner?: User;
   team?: string;
   due_date?: string;
   documents?: Doc[];
@@ -30,12 +31,52 @@ export type Task = {
   title: string;
   description?: string;
   status: string;
+  blocked_reason?: string | null;
   priority: string;
   labels: string[];
+  depends_on?: { id: string; title: string; status: string }[];
   due_date?: string;
   assignee?: User;
 };
 export type InboxNotice = { id: string; title: string; body?: string; href?: string; read: boolean };
+export type InboundMessage = {
+  id: string;
+  source: "gmail" | "slack" | "notion" | "manual";
+  external_id?: string | null;
+  thread_id?: string | null;
+  sender?: string | null;
+  subject?: string | null;
+  body: string;
+  source_url?: string | null;
+  received_at: string;
+  status: "new" | "ignored" | "planned";
+  triage_status?: "not_started" | "pending" | "processing" | "actionable" | "not_actionable" | "retry" | "failed" | "needs_human";
+  triage_category?: string | null;
+  triage_reason?: string | null;
+  triage_summary?: string | null;
+  triage_concerns?: string[];
+  triage_attempts?: number;
+  created_at: string;
+};
+export type InboundPlan = {
+  id: string;
+  inbound_message_id: string;
+  status: "pending" | "approved" | "rejected";
+  summary: string;
+  proposal: {
+    project: {
+      name: string;
+      code: string;
+      description: string;
+      health: "on_track" | "at_risk" | "off_track";
+      tasks: { title: string; description: string; priority: "low" | "medium" | "high"; depends_on?: number[] }[];
+    };
+  };
+  planner_provider: string;
+  project_id?: string | null;
+  created_at: string;
+  reviewed_at?: string | null;
+};
 export type ActionDetail = { label: string; value: string };
 export type Action = {
   details?: ActionDetail[];
@@ -43,6 +84,14 @@ export type Action = {
   confirmation_token: string;
   requires_confirmation: boolean;
   preview?: string;
+};
+export type AgentProposal = Action & {
+  id: string;
+  task_id: string;
+  task_title: string;
+  project_id: string;
+  agent_name: string;
+  expires_at: string;
 };
 export type Agent = {
   id: string;
@@ -55,6 +104,9 @@ export type Agent = {
   last_completed_task?: Task | null;
   is_working?: boolean;
   is_blocked?: boolean;
+  is_awaiting_approval?: boolean;
+  is_rate_limited?: boolean;
+  daily_limit_reached_at?: string | null;
 };
 export type HierarchyConfigT = {
   vp_count: number;

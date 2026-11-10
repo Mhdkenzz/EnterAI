@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import threading
 from collections import defaultdict
 from uuid import uuid4
 from .deployment_config import is_deployment_environment
@@ -23,6 +24,16 @@ from .deployment_config import is_deployment_environment
 logger = logging.getLogger("enterai.ratelimit")
 
 _client = None
+_ai_provider_limiters: dict[str, object] = {}
+_ai_provider_limiters_lock = threading.Lock()
+
+
+class AIProviderRateLimitExceeded(RuntimeError):
+    """The organization has used its hosted AI request allowance for this minute."""
+
+
+# Kept as an alias so existing exception handlers and integrations continue to work.
+OpenRouterRateLimitExceeded = AIProviderRateLimitExceeded
 
 
 class SlidingWindowRateLimiter:
@@ -101,6 +112,21 @@ def reset_redis_client() -> None:
     """Tests swap REDIS_URL between cases; drop the memoized client with it."""
     global _client
     _client = None
+
+
+def enforce_ai_provider_rpm(organization_id: str, requests_per_minute: int) -> None:
+    """Count every outbound hosted AI call, including intermediate tool turns."""
+    with _ai_provider_limiters_lock:
+        limiter = _ai_provider_limiters.get(organization_id)
+        if limiter is None:
+            limiter = build_rate_limiter(requests_per_minute, 60, "ai-provider-org")
+            _ai_provider_limiters[organization_id] = limiter
+        limiter.max_calls = requests_per_minute
+    if not limiter.allow(organization_id):
+        raise AIProviderRateLimitExceeded("AI provider is limited to the configured requests per minute for this workspace.")
+
+
+enforce_openrouter_rpm = enforce_ai_provider_rpm
 
 
 def build_rate_limiter(max_calls: int, window_seconds: float, namespace: str):

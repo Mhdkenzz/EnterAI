@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from typing import Any
+from typing import Any, Callable
 from urllib import error, request
 
 from .config import AISettings
@@ -127,7 +127,7 @@ class AnthropicCopilotProvider:
 class OpenAICompatibleCopilotProvider:
     """Structured tool-calling adapter for LM Studio or any OpenAI-compatible endpoint."""
 
-    def __init__(self, settings: AISettings | None = None):
+    def __init__(self, settings: AISettings | None = None, before_request: Callable[[], None] | None = None):
         settings = settings or AISettings.from_env()
         self.provider = settings.provider
         self.base_url = settings.base_url
@@ -136,6 +136,7 @@ class OpenAICompatibleCopilotProvider:
         self.profile = resolve_profile(settings.provider, settings.model)
         self.timeout = settings.timeout_seconds if settings.timeout_seconds is not None else self.profile.timeout_seconds
         self._ollama_tool_names: dict[str, str] = {}
+        self._before_request = before_request
 
     def respond(self, system: str, messages: list[dict[str, Any]], role: str | None = None, extra_tools: list[dict[str, Any]] | None = None) -> ProviderTurn:
         from ..copilot import CopilotProviderError, openai_tool_specs
@@ -188,7 +189,8 @@ class OpenAICompatibleCopilotProvider:
                 "messages": [{"role": "system", "content": system}, *messages],
                 "tools": rendered_tools,
                 "tool_choice": "auto",
-                "temperature": 0.2,
+                "temperature": 1.0 if self.provider == "ifm" else 0.2,
+                **({"top_p": 0.95} if self.provider == "ifm" else {}),
             }).encode()
             endpoint = f"{self.base_url}/chat/completions"
         headers = {"Content-Type": "application/json"}
@@ -196,12 +198,15 @@ class OpenAICompatibleCopilotProvider:
             headers["Authorization"] = f"Bearer {self.api_key}"
         outgoing = request.Request(endpoint, data=body, headers=headers, method="POST")
         try:
+            if self._before_request:
+                self._before_request()
             with request.urlopen(outgoing, timeout=self.timeout) as response:  # nosec B310 -- URL is explicit operator configuration
                 payload = json.loads(response.read().decode())
             choice = payload["message"] if ollama else payload["choices"][0]["message"]
         except (error.URLError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise CopilotProviderError("The configured AI provider is unavailable. Check AI_PROVIDER settings and try again.") from exc
         text = (choice.get("content") or "").strip() or None
+        reasoning_text = choice.get("reasoning_content") if self.provider == "ifm" else None
         tool_calls: list[dict[str, Any]] = []
         for call in choice.get("tool_calls") or []:
             fn = call.get("function", {})
@@ -231,7 +236,8 @@ class OpenAICompatibleCopilotProvider:
                 text = cleaned_text
                 adapter_used = "textual_v1"
 
-        turn_result = ProviderTurn(text=text, tool_calls=tool_calls, adapter_used=adapter_used, provider_metadata={"provider":"openai_compatible","model":self.model,"profile_name":getattr(self.profile,"name",None)})
+        turn_result = ProviderTurn(text=text, tool_calls=tool_calls, reasoning_text=reasoning_text,
+                                   adapter_used=adapter_used, provider_metadata={"provider":self.provider,"model":self.model,"profile_name":getattr(self.profile,"name",None)})
         try:
             from .telemetry import sanitize_metrics
             sanitize_metrics({"provider":"openai_compatible","model":self.model,"adapter_used":adapter_used,"profile_name":getattr(self.profile,"name",None)})
@@ -249,7 +255,9 @@ class OpenAICompatibleCopilotProvider:
             if calls:
                 message["tool_calls"] = calls
             return message
-        message: dict[str, Any] = {"role": "assistant", "content": turn.text}
+        message: dict[str, Any] = {"role": "assistant", "content": turn.text or ""}
+        if self.provider == "ifm" and turn.reasoning_text is not None:
+            message["reasoning_content"] = turn.reasoning_text
         if turn.tool_calls:
             message["tool_calls"] = [
                 {"id": call["id"], "type": "function", "function": {"name": call["name"], "arguments": json.dumps(call["args"])}}

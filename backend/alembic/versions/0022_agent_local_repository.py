@@ -9,11 +9,15 @@ depends_on = None
 
 
 def upgrade():
-    op.add_column(
-        "organizations",
-        sa.Column("agent_workspace_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
-    )
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("organizations")}
+    if "agent_workspace_enabled" not in columns:
+        op.add_column(
+            "organizations",
+            sa.Column("agent_workspace_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
+        )
 
 
 def downgrade():
-    op.drop_column("organizations", "agent_workspace_enabled")
+    columns = {column["name"] for column in sa.inspect(op.get_bind()).get_columns("organizations")}
+    if "agent_workspace_enabled" in columns:
+        op.drop_column("organizations", "agent_workspace_enabled")

@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 
 DEPLOYMENT_ENVIRONMENTS = {"staging", "production"}
 
@@ -27,12 +29,22 @@ def _is_public_url(value: str) -> bool:
 
 def deployment_configuration_errors(environ: dict[str, str] | None = None) -> list[str]:
     env = os.environ if environ is None else environ
-    if not is_deployment_environment(env.get("ENVIRONMENT", "development")):
+    environment = env.get("ENVIRONMENT", "development").strip().lower()
+    if environment not in {"development", "test", "staging", "production"}:
+        return ["ENVIRONMENT must be development, test, staging, or production"]
+    if not is_deployment_environment(environment):
         return []
     errors: list[str] = []
     required = ("DATABASE_URL", "JWT_SECRET", "REDIS_URL", "APP_BASE_URL", "API_BASE_URL",
                 "CORS_ALLOWED_ORIGINS", "TRUSTED_HOSTS", "SEED_ADMIN_EMAIL", "SEED_ADMIN_PASSWORD")
     errors.extend(name for name in required if not env.get(name, "").strip())
+    database_url = env.get("DATABASE_URL", "").strip()
+    if database_url:
+        try:
+            if make_url(database_url).get_backend_name() != "postgresql":
+                errors.append("DATABASE_URL must use PostgreSQL in hosted environments")
+        except (ArgumentError, ValueError):
+            errors.append("DATABASE_URL must use PostgreSQL in hosted environments")
     for name in ("APP_BASE_URL", "API_BASE_URL"):
         value = env.get(name, "").strip()
         if value and not _is_public_url(value):
@@ -56,6 +68,27 @@ def deployment_configuration_errors(environ: dict[str, str] | None = None) -> li
                 errors.append(name)
     if env.get("OIDC_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"} and not env.get("SECRETS_ENCRYPTION_KEY", "").strip():
         errors.append("SECRETS_ENCRYPTION_KEY is required when OIDC_ENABLED=true")
+    gmail_client_id = env.get("GMAIL_OAUTH_CLIENT_ID", "").strip()
+    gmail_client_secret = env.get("GMAIL_OAUTH_CLIENT_SECRET", "").strip()
+    if bool(gmail_client_id) != bool(gmail_client_secret):
+        errors.append("GMAIL_OAUTH_CLIENT_ID and GMAIL_OAUTH_CLIENT_SECRET must be set together")
+    if (gmail_client_id or gmail_client_secret) and not env.get("SECRETS_ENCRYPTION_KEY", "").strip():
+        errors.append("SECRETS_ENCRYPTION_KEY is required when Gmail OAuth is configured")
+    slack_client_id = env.get("SLACK_CLIENT_ID", "").strip()
+    slack_client_secret = env.get("SLACK_CLIENT_SECRET", "").strip()
+    slack_signing_secret = env.get("SLACK_SIGNING_SECRET", "").strip()
+    if bool(slack_client_id) != bool(slack_client_secret):
+        errors.append("SLACK_CLIENT_ID and SLACK_CLIENT_SECRET must be set together")
+    if (slack_client_id or slack_client_secret) and not slack_signing_secret:
+        errors.append("SLACK_SIGNING_SECRET is required when Slack OAuth is configured")
+    if (slack_client_id or slack_client_secret or slack_signing_secret) and not env.get("SECRETS_ENCRYPTION_KEY", "").strip():
+        errors.append("SECRETS_ENCRYPTION_KEY is required when Slack integration is configured")
+    notion_client_id = env.get("NOTION_CLIENT_ID", "").strip()
+    notion_client_secret = env.get("NOTION_CLIENT_SECRET", "").strip()
+    if bool(notion_client_id) != bool(notion_client_secret):
+        errors.append("NOTION_CLIENT_ID and NOTION_CLIENT_SECRET must be set together")
+    if (notion_client_id or notion_client_secret) and not env.get("SECRETS_ENCRYPTION_KEY", "").strip():
+        errors.append("SECRETS_ENCRYPTION_KEY is required when Notion OAuth is configured")
     return errors
 
 

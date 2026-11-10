@@ -29,20 +29,19 @@ def test_a_new_workspace_gets_a_time_boxed_trial(db_session, org):
     assert timedelta(days=billing_service.TRIAL_DAYS - 1) < sub.trial_ends_at - utc_naive() <= timedelta(days=billing_service.TRIAL_DAYS)
 
 
-def test_the_trial_is_capped_and_then_ends(db_session, org, monkeypatch):
-    monkeypatch.setattr(billing_service, "TRIAL_AI_CALL_LIMIT", 3)
+def test_trial_ai_usage_is_unlimited_until_the_trial_ends(db_session, org):
     sub = ensure_trial_subscription(db_session, org.id)
     service = BillingService(db_session)
     _use(db_session, org.id, 2)
     assert service.enforce_plan_limit(org.id, "ai_calls", 1)
     _use(db_session, org.id, 1)
-    assert "used its 3 AI requests for this trial" in service.entitlement_problem(org.id, "ai_calls", 1)
+    assert service.entitlement_problem(org.id, "ai_calls", 1) is None
 
     sub.trial_ends_at = utc_naive() - timedelta(minutes=1)
     assert "free trial has ended" in service.entitlement_problem(org.id, "ai_calls", 1)
 
 
-def test_paid_usage_is_counted_per_billing_period_not_forever(db_session, org):
+def test_paid_usage_is_metered_per_period_but_not_capped(db_session, org):
     plan = BillingPlan(name="Team", stripe_plan_id="price_team", ai_usage_limit=5)
     db_session.add(plan); db_session.flush()
     db_session.add(OrganizationSubscription(organization_id=org.id, plan_id=plan.id, status="active",
@@ -51,7 +50,8 @@ def test_paid_usage_is_counted_per_billing_period_not_forever(db_session, org):
     _use(db_session, org.id, 4)
     service = BillingService(db_session)
     assert service.enforce_plan_limit(org.id, "ai_calls", 1)
-    assert not service.enforce_plan_limit(org.id, "ai_calls", 2)
+    assert service.usage_since(org.id, "ai_calls", service.period_start(service.subscription(org.id))) == 4
+    assert service.enforce_plan_limit(org.id, "ai_calls", 2)
 
 
 @pytest.mark.parametrize("status,allowed", [("past_due", True), ("canceled", False), ("incomplete", False)])
@@ -98,7 +98,7 @@ def test_admins_see_their_plan_trial_and_usage():
         overview = c.get("/api/billing", headers=headers).json()
         assert overview["status"] == "trial"
         assert overview["trial_days_left"] == billing_service.TRIAL_DAYS
-        assert overview["usage"]["ai_calls"] == 0 and overview["usage"]["ai_limit"] == billing_service.TRIAL_AI_CALL_LIMIT
+        assert overview["usage"]["ai_calls"] == 0 and overview["usage"]["ai_limit"] is None
         assert any(p["name"] == "Team" for p in overview["plans"])
         assert overview["blocked_reason"] is None
 

@@ -6,14 +6,14 @@ import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import type { Task } from "@/lib/types";
 
-export const states = ["backlog", "todo", "in_progress", "review", "done"],
+export const states = ["backlog", "todo", "in_progress", "blocked", "review", "done"],
   field =
-    "mt-1.5 w-full rounded-lg border border-line bg-canvas px-3 py-2.5 text-sm outline-none focus:border-accent";
+    "mt-1.5 w-full rounded-lg border border-line bg-canvas px-3 py-2.5 text-sm text-ink outline-none focus:border-accent";
 export const when = (v?: string) =>
   v ? new Date(v).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "No date";
 export function Avatar({ user }: { user?: { name?: string; avatar?: string } }) {
   return (
-    <span className="inline-grid h-8 w-8 shrink-0 place-items-center rounded-full border border-blue-100 bg-blue-50 text-[10px] font-bold tracking-wide text-blue-800 ring-2 ring-white">
+    <span role="img" aria-label={user?.name ? `Assigned to ${user.name}` : "Unassigned"} title={user?.name || "Unassigned"} className="inline-grid h-8 w-8 shrink-0 place-items-center rounded-full border border-blue-100 bg-blue-50 text-[10px] font-bold tracking-wide text-blue-800 ring-2 ring-white">
       {user?.avatar ||
         user?.name
           ?.split(" ")
@@ -25,7 +25,7 @@ export function Avatar({ user }: { user?: { name?: string; avatar?: string } }) 
 }
 export function Health({ health }: { health: string }) {
   return (
-    <Badge tone={health === "at_risk" ? "red" : health === "on_track" ? "green" : "amber"}>
+    <Badge tone={health === "off_track" ? "red" : health === "on_track" ? "green" : "amber"}>
       {health.replace("_", " ")}
     </Badge>
   );
@@ -40,7 +40,7 @@ export function Row({ task, open, toggle }: { task: Task; open: () => void; togg
       )}
     >
       <button
-        aria-label={(done ? "Reopen " : "Complete ") + task.title}
+        aria-label={(done ? "Reopen " : task.status === "blocked" ? "Unblock " : "Complete ") + task.title}
         onClick={toggle}
         className={cn(
           "grid h-5 w-5 shrink-0 place-items-center rounded-full border transition-colors",
@@ -55,17 +55,24 @@ export function Row({ task, open, toggle }: { task: Task; open: () => void; togg
           <Badge tone={task.priority === "high" ? "red" : task.priority === "medium" ? "amber" : "default"}>
             {task.priority}
           </Badge>
+          {task.status === "blocked" ? <Badge tone="red">Blocked</Badge> : task.depends_on?.some((dependency) => dependency.status !== "done") && <Badge tone="amber">Waiting</Badge>}
           {task.labels?.slice(0, 1).map((x) => (
             <Badge key={x} tone="blue">
               {x}
             </Badge>
           ))}
         </div>
+        {task.status === "blocked" && task.blocked_reason && <p className="mt-1 line-clamp-2 text-xs text-rose-700">{task.blocked_reason}</p>}
       </button>
       <span className="hidden min-w-[92px] text-right text-xs text-zinc-500 sm:block">
         {done ? "Completed" : when(task.due_date)}
       </span>
-      <Avatar user={task.assignee} />
+      <span className="flex shrink-0 items-center gap-2">
+        <span className="max-w-24 truncate text-right text-[11px] text-zinc-500" title={task.assignee?.name || "Unassigned"}>
+          {task.assignee?.name || "Unassigned"}
+        </span>
+        <Avatar user={task.assignee} />
+      </span>
     </div>
   );
 }
@@ -141,9 +148,10 @@ const ACTIVITY_TEXT: Record<string, string> = {
   "user sso_provisioned": "joined through SSO",
 };
 export function describeActivity(a: { action: string; entity_type: string; detail?: any }): string {
-  const text =
-    ACTIVITY_TEXT[`${a.entity_type} ${a.action}`] ??
-    `${a.action.replace(/_/g, " ")} (${a.entity_type.replace(/_/g, " ")})`;
+  const text = a.entity_type === "task" && a.action === "updated" && a.detail?.dependencies_changed
+    ? "changed task prerequisites"
+    : ACTIVITY_TEXT[`${a.entity_type} ${a.action}`] ??
+      `${a.action.replace(/_/g, " ")} (${a.entity_type.replace(/_/g, " ")})`;
   const title = a.detail?.title || a.detail?.name;
   return title ? `${text}: “${title}”` : text;
 }

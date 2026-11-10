@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import {
   Archive,
   ArrowUpRight,
@@ -13,6 +13,7 @@ import {
   Layers3,
   LayoutList,
   ListTodo,
+  MessageSquareText,
   Plus,
   Search,
   Sparkles,
@@ -24,8 +25,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { states, when, Avatar, Health, Row, describeActivity } from "@/components/workspace/shared";
-import type { Doc, Project, Task, InboxNotice } from "@/lib/types";
+import { states, when, Avatar, Health, Row, describeActivity, field, Modal } from "@/components/workspace/shared";
+import type { Doc, Project, Task, InboxNotice, InboundMessage, InboundPlan } from "@/lib/types";
 
 export function Home({ data, activity, project, task, toggle, all, ai }: any) {
   const tasks: Task[] = data?.my_tasks || [];
@@ -34,6 +35,10 @@ export function Home({ data, activity, project, task, toggle, all, ai }: any) {
     { label: "At risk", value: data?.stats?.at_risk, icon: CircleAlert, tone: "rose" },
     { label: "Open tasks", value: data?.stats?.my_open_tasks, icon: ListTodo, tone: "amber" },
     { label: "Completed this week", value: data?.stats?.completed_this_week, icon: CheckCircle2, tone: "green" },
+    { label: "New requests", value: data?.stats?.new_requests, icon: MessageSquareText, tone: "blue" },
+    { label: "Plans awaiting approval", value: data?.stats?.plans_awaiting_approval, icon: CheckCircle2, tone: "amber" },
+    { label: "Blocked tasks", value: data?.stats?.blocked_tasks, icon: CircleAlert, tone: "rose" },
+    { label: "Projects awaiting review", value: data?.stats?.projects_awaiting_review, icon: CheckCircle2, tone: "amber" },
   ];
   return (
     <>
@@ -208,7 +213,7 @@ export function Portfolio({ projects: all, open, create }: any) {
                 <i className="grid h-9 w-9 shrink-0 place-items-center rounded-lg text-xs font-bold text-white shadow-sm" style={{ background: p.color }}>{p.code.slice(0, 1)}</i>
                 <span className="min-w-0">
                   <span className="block truncate text-sm font-semibold text-ink">{p.name}</span>
-                  <span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{p.code} {p.status === "archived" && "· Archived"}</span>
+                  <span className="mt-0.5 block text-[10px] font-semibold uppercase tracking-wide text-slate-400">{p.code}{p.status === "archived" ? " · Archived" : p.status === "review" ? " · Review needed" : p.status === "completed" ? " · Complete" : ""}</span>
                 </span>
               </span>
               <span className="text-sm text-zinc-400">{p.team || "-"}</span>
@@ -281,6 +286,179 @@ export function InboxView({ notices, open }: any) {
     </>
   );
 }
+
+type RequestPlanCallbacks = {
+  draftPlan: (message: InboundMessage) => Promise<void>;
+  savePlan: (plan: InboundPlan, summary: string, proposal: InboundPlan["proposal"]) => Promise<void>;
+  approvePlan: (plan: InboundPlan) => Promise<void>;
+  rejectPlan: (plan: InboundPlan) => Promise<void>;
+};
+
+export function RequestsView({ messages, plans, create, updateStatus, draftPlan, savePlan, approvePlan, rejectPlan }: {
+  messages: InboundMessage[];
+  plans: InboundPlan[];
+  create: (value: { source: "manual"; sender?: string; subject?: string; body: string; source_url?: string }) => Promise<void>;
+  updateStatus: (message: InboundMessage, status: "new" | "ignored") => Promise<void>;
+} & RequestPlanCallbacks) {
+  const [capture, setCapture] = useState(false);
+  const [sender, setSender] = useState("");
+  const [subject, setSubject] = useState("");
+  const [body, setBody] = useState("");
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [planError, setPlanError] = useState("");
+  const active = messages.filter((message) => message.status === "new");
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!body.trim() || busy) return;
+    setBusy(true);
+    setError("");
+    try {
+      await create({ source: "manual", sender: sender.trim() || undefined,
+        subject: subject.trim() || undefined, body: body.trim(), source_url: sourceUrl.trim() || undefined });
+      setCapture(false);
+      setSender(""); setSubject(""); setBody(""); setSourceUrl("");
+    } catch (cause: any) {
+      setError(cause?.message || "Could not save this request.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <>
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <p className="page-kicker mb-2">Incoming work</p>
+          <h1 className="page-title">Requests</h1>
+          <p className="page-description mt-2">Review requests captured from your team’s work tools.</p>
+        </div>
+        <Button onClick={() => setCapture(true)}><Plus size={15} /> Capture request</Button>
+      </div>
+      <div className="mb-3 flex items-center gap-2 text-sm text-slate-500">
+        <MessageSquareText size={15} /> {active.length} awaiting review
+      </div>
+      <Card>
+        {messages.length ? messages.map((message) => {
+          const plan = plans.find((item) => item.inbound_message_id === message.id);
+          return (
+          <article key={message.id} className="border-b border-line/70 px-5 py-4 last:border-0">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-sm font-semibold text-ink">{message.subject || "Incoming request"}</h2>
+                  <Badge tone={message.status === "new" ? "blue" : message.status === "planned" ? "green" : "default"}>{message.status === "new" ? "Needs review" : message.status === "planned" ? "Plan approved" : "Ignored"}</Badge>
+                  <Badge>{message.source}</Badge>
+                  {message.triage_status === "pending" || message.triage_status === "processing" ? <Badge tone="amber">CEO reviewing</Badge> : null}
+                  {message.triage_status === "actionable" ? <Badge tone="green">Action requested</Badge> : null}
+                  {message.triage_status === "not_actionable" ? <Badge>Informational</Badge> : null}
+                  {message.triage_category && <Badge>{message.triage_category.replaceAll("_", " ")}</Badge>}
+                  {message.triage_status === "retry" || message.triage_status === "failed" || message.triage_status === "needs_human" ? <Badge tone="amber">Human review needed</Badge> : null}
+                </div>
+                <p className="mt-1 text-xs text-slate-500">
+                  {message.sender || "No sender provided"} · {new Date(message.received_at).toLocaleString()}
+                  {message.source_url && <> · <a href={message.source_url} target="_blank" rel="noreferrer" className="font-medium text-blue-700 hover:underline">Open source</a></>}
+                </p>
+                {message.triage_reason && <p className="mt-2 text-xs text-slate-600">CEO note: {message.triage_reason}</p>}
+                {message.triage_summary && <p className="mt-2 text-sm font-medium text-ink">CEO summary: {message.triage_summary}</p>}
+                {!!message.triage_concerns?.length && <p className="mt-1 text-xs text-slate-600">Concerns: {message.triage_concerns.join(", ")}</p>}
+                <p className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{message.body}</p>
+              </div>
+              {message.status !== "planned" && <div className="flex shrink-0 gap-2">
+                {message.status === "new" && !plan?.project_id && <Button size="sm" onClick={() => { setPlanError(""); draftPlan(message).catch((cause: any) => setPlanError(cause?.message || "Could not draft a plan.")); }}>{plan?.status === "rejected" ? "Draft new plan" : plan ? "Open draft plan" : "Draft a plan"}</Button>}
+                <Button variant="outline" size="sm" onClick={() => updateStatus(message, message.status === "new" ? "ignored" : "new")}>
+                  {message.status === "new" ? "Ignore" : "Reopen"}
+                </Button>
+              </div>}
+            </div>
+            {plan?.status === "pending" && <RequestPlanReview plan={plan} save={savePlan} approve={approvePlan} reject={rejectPlan} />}
+            {planError && <p role="alert" className="mt-3 text-sm text-red-700">{planError}</p>}
+            {plan?.status === "rejected" && <p className="mt-3 text-xs text-slate-500">The last draft was rejected. You can create a fresh plan if the request is still relevant.</p>}
+            {plan?.status === "approved" && plan.project_id && <p className="mt-3 text-sm text-emerald-800">Work was created from this approved plan. <a className="font-semibold underline" href={`/projects/${encodeURIComponent(plan.project_id)}`}>Open project</a></p>}
+          </article>
+          );
+        }) : (
+          <div className="p-8 text-center">
+            <MessageSquareText className="mx-auto text-slate-300" size={22} />
+            <p className="mt-3 text-sm font-medium text-ink">No requests yet</p>
+            <p className="mt-1 text-sm text-slate-500">Requests from connected services will appear here. You can capture one manually while integrations are being set up.</p>
+          </div>
+        )}
+      </Card>
+      {capture && <Modal title="Capture a request" close={() => setCapture(false)}>
+        <form className="space-y-4" onSubmit={submit}>
+          <p className="text-sm text-slate-500">Save a request with its source details so the team can review it here.</p>
+          {error && <p role="alert" className="text-sm text-red-700">{error}</p>}
+          <label className="block text-xs text-slate-500">Sender<input className={field} maxLength={500} value={sender} onChange={(event) => setSender(event.target.value)} /></label>
+          <label className="block text-xs text-slate-500">Subject<input className={field} maxLength={500} value={subject} onChange={(event) => setSubject(event.target.value)} /></label>
+          <label className="block text-xs text-slate-500">Source link<input className={field} type="url" placeholder="https://…" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} /></label>
+          <label className="block text-xs text-slate-500">Request<textarea required className={`${field} min-h-32`} maxLength={50000} value={body} onChange={(event) => setBody(event.target.value)} /></label>
+          <div className="flex justify-end gap-2"><Button type="button" variant="ghost" onClick={() => setCapture(false)}>Cancel</Button><Button type="submit" disabled={busy || !body.trim()}>{busy ? "Saving…" : "Save request"}</Button></div>
+        </form>
+      </Modal>}
+    </>
+  );
+}
+
+function RequestPlanReview({ plan, save, approve, reject }: {
+  plan: InboundPlan;
+  save: RequestPlanCallbacks["savePlan"];
+  approve: RequestPlanCallbacks["approvePlan"];
+  reject: RequestPlanCallbacks["rejectPlan"];
+}) {
+  const [summary, setSummary] = useState(plan.summary);
+  const [proposal, setProposal] = useState(plan.proposal);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setSummary(plan.summary);
+    setProposal(plan.proposal);
+  }, [plan.id, plan.summary, plan.proposal]);
+  async function run(action: () => Promise<void>) {
+    if (busy) return;
+    setBusy(true); setError("");
+    try { await action(); }
+    catch (cause: any) { setError(cause?.message || "Could not update the plan."); }
+    finally { setBusy(false); }
+  }
+  const project = proposal.project;
+  return (
+    <form className="mt-5 rounded-xl border border-blue-200 bg-blue-50/40 p-4" onSubmit={(event) => { event.preventDefault(); run(() => save(plan, summary, proposal)); }}>
+      <div className="mb-3 flex flex-wrap items-start justify-between gap-2">
+        <div><h3 className="text-sm font-semibold text-ink">Project plan for review</h3><p className="mt-1 text-xs text-slate-500">{plan.planner_provider === "deterministic" ? "Auto drafted" : "AI drafted"} · Review before creating the project; eligible agents may start after approval</p></div>
+        <Badge tone="amber">Pending approval</Badge>
+      </div>
+      <label className="block text-xs text-slate-500">Request summary<textarea className={`${field} min-h-20`} maxLength={2000} value={summary} onChange={(event) => setSummary(event.target.value)} /></label>
+      <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_150px]">
+        <label className="block text-xs text-slate-500">Project name<input required className={field} maxLength={180} value={project.name} onChange={(event) => setProposal({ project: { ...project, name: event.target.value } })} /></label>
+        <label className="block text-xs text-slate-500">Project code<input required className={field} maxLength={16} value={project.code} onChange={(event) => setProposal({ project: { ...project, code: event.target.value.toUpperCase() } })} /></label>
+      </div>
+      <label className="mt-3 block text-xs text-slate-500">Description<textarea className={`${field} min-h-20`} maxLength={6000} value={project.description} onChange={(event) => setProposal({ project: { ...project, description: event.target.value } })} /></label>
+      <label className="mt-3 block text-xs text-slate-500">Health<select className={field} value={project.health} onChange={(event) => setProposal({ project: { ...project, health: event.target.value as typeof project.health } })}><option value="on_track">On track</option><option value="at_risk">At risk</option><option value="off_track">Off track</option></select></label>
+      <div className="mt-4 space-y-3">
+        <div className="flex items-center justify-between"><h4 className="text-xs font-semibold text-ink">Tasks ({project.tasks.length})</h4><Button type="button" size="sm" variant="outline" disabled={project.tasks.length >= 20} onClick={() => setProposal({ project: { ...project, tasks: [...project.tasks, { title: "", description: "", priority: "medium", depends_on: [] }] } })}><Plus size={13} /> Add task</Button></div>
+        {project.tasks.map((task, index) => <div key={index} className="grid gap-2 rounded-lg border border-line bg-white p-3 sm:grid-cols-[1fr_120px_auto]">
+          <div className="space-y-2"><input required className={field} placeholder="Task title" maxLength={240} value={task.title} onChange={(event) => { const tasks = [...project.tasks]; tasks[index] = { ...task, title: event.target.value }; setProposal({ project: { ...project, tasks } }); }} /><input className={field} placeholder="Description (optional)" maxLength={3000} value={task.description} onChange={(event) => { const tasks = [...project.tasks]; tasks[index] = { ...task, description: event.target.value }; setProposal({ project: { ...project, tasks } }); }} /></div>
+          <select className={field} aria-label={`Priority for ${task.title || `task ${index + 1}`}`} value={task.priority} onChange={(event) => { const tasks = [...project.tasks]; tasks[index] = { ...task, priority: event.target.value as typeof task.priority }; setProposal({ project: { ...project, tasks } }); }}><option value="high">High priority</option><option value="medium">Medium</option><option value="low">Low</option></select>
+          <Button type="button" size="sm" variant="ghost" disabled={project.tasks.length <= 1} onClick={() => { const tasks = project.tasks.filter((_, itemIndex) => itemIndex !== index).map((item) => ({ ...item, depends_on: (item.depends_on || []).filter((dependency) => dependency !== index).map((dependency) => dependency > index ? dependency - 1 : dependency) })); setProposal({ project: { ...project, tasks } }); }}>Remove</Button>
+          <label className="block text-xs text-slate-500 sm:col-span-3">Must finish first
+            <select multiple className={`${field} mt-1 min-h-16`} aria-label={`Prerequisites for ${task.title || `task ${index + 1}`}`} value={(task.depends_on || []).map(String)} onChange={(event) => { const tasks = [...project.tasks]; tasks[index] = { ...task, depends_on: Array.from(event.currentTarget.selectedOptions, (option) => Number(option.value)) }; setProposal({ project: { ...project, tasks } }); }}>
+              {project.tasks.map((candidate, dependencyIndex) => dependencyIndex !== index && <option key={dependencyIndex} value={dependencyIndex}>{candidate.title || `Task ${dependencyIndex + 1}`}</option>)}
+            </select>
+            <span className="mt-1 block text-[11px] text-slate-400">Agents wait for these tasks to finish before starting this one.</span>
+          </label>
+        </div>)}
+      </div>
+      {error && <p role="alert" className="mt-3 text-sm text-red-700">{error}</p>}
+      <div className="mt-4 flex flex-wrap justify-end gap-2">
+        <Button type="button" variant="ghost" disabled={busy} onClick={() => run(() => reject(plan))}>Reject</Button>
+        <Button type="submit" variant="outline" disabled={busy}>{busy ? "Saving…" : "Save edits"}</Button>
+        <Button type="button" disabled={busy} onClick={() => run(() => save(plan, summary, proposal).then(() => approve(plan)))}>{busy ? "Processing…" : "Save and approve"}</Button>
+      </div>
+    </form>
+  );
+}
+
 export function Teams({ teams, selected, projects, open, create, select }: any) {
   return (
     <>
@@ -362,6 +540,9 @@ export function ProjectView({
   ai,
   upload: put,
   canManage,
+  canApproveCompletion,
+  approveCompletion,
+  reopen,
   archive,
   remove,
 }: any) {
@@ -374,6 +555,21 @@ export function ProjectView({
   const archived = project.status === "archived";
   return (
     <>
+      {project.status === "review" && (
+        <div role="status" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+          <span>All tasks are complete. Review the results before approving this project as complete.</span>
+          <div className="flex gap-2">
+            {canManage && <Button size="sm" variant="outline" onClick={reopen}>Reopen work</Button>}
+            {canApproveCompletion && <Button size="sm" onClick={approveCompletion}>Approve completion</Button>}
+          </div>
+        </div>
+      )}
+      {project.status === "completed" && (
+        <div role="status" className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-950">
+          <span>Project completion approved.</span>
+          {canManage && <Button size="sm" variant="outline" onClick={reopen}>Reopen project</Button>}
+        </div>
+      )}
       {archived && (
         <div
           role="status"
@@ -482,7 +678,7 @@ export function ProjectView({
               key={t.id}
               task={t}
               open={() => open(t)}
-              toggle={() => update(t, { status: t.status === "done" ? "todo" : "done" })}
+              toggle={() => update(t, { status: t.status === "done" || t.status === "blocked" ? "todo" : "done" })}
             />
           ))}
         </Card>
@@ -494,14 +690,15 @@ export function ProjectView({
 }
 export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
   const [over, setOver] = useState<string | null>(null);
+  const flow = states.filter((status) => status !== "blocked");
   const move = (t: Task, step: number) => {
-    const i = states.indexOf(t.status) + step;
-    if (i >= 0 && i < states.length) update(t, { status: states[i] });
+    const i = flow.indexOf(t.status) + step;
+    if (t.status !== "blocked" && i >= 0 && i < flow.length) update(t, { status: flow[i] });
   };
   return (
-    // Tracks never shrink below a readable card width; when five don't fit beside the
+    // Tracks never shrink below a readable card width; when six don't fit beside the
     // sidebar the board scrolls sideways instead of overlapping its columns.
-    <div className="grid gap-3 overflow-x-auto pb-3 lg:grid-cols-[repeat(5,minmax(14rem,1fr))]">
+    <div className="grid gap-3 overflow-x-auto pb-3 lg:grid-cols-[repeat(6,minmax(14rem,1fr))]">
       {states.map((s) => (
         <section
           aria-label={s.replace("_", " ")}
@@ -516,7 +713,7 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
             e.preventDefault();
             setOver(null);
             const task = tasks.find((t: Task) => t.id === e.dataTransfer.getData("text/task-id"));
-            if (task && task.status !== s) update(task, { status: s });
+            if (task && task.status !== s && !(task.status === "blocked" && s === "done")) update(task, { status: s });
           }}
         >
           <div className="mb-2 flex items-center justify-between rounded-t-lg border-b-2 border-slate-200 px-2 pb-2 text-[11px] font-bold uppercase tracking-[.1em] text-slate-500">
@@ -547,15 +744,16 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                     )}
                   >
                     <div className="mb-3 flex items-center justify-between gap-2">
-                      <Badge
-                        tone={t.priority === "high" ? "red" : t.priority === "medium" ? "amber" : "default"}
-                      >
-                        {t.priority}
-                      </Badge>
+                      <span className="flex items-center gap-1.5">
+                        <Badge tone={t.priority === "high" ? "red" : t.priority === "medium" ? "amber" : "default"}>
+                          {t.priority}
+                        </Badge>
+                        {t.status === "blocked" ? <Badge tone="red">Blocked</Badge> : t.depends_on?.some((dependency) => dependency.status !== "done") && <Badge tone="amber">Waiting</Badge>}
+                      </span>
                       <span className="flex">
                         <button
                           aria-label={"Move back " + t.title}
-                          disabled={t.status === states[0]}
+                          disabled={t.status === "blocked" || t.status === flow[0]}
                           className="rounded p-1 text-slate-400 transition hover:bg-blue-50 hover:text-blue-700 disabled:opacity-30"
                           onClick={() => move(t, -1)}
                         >
@@ -563,7 +761,7 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                         </button>
                         <button
                           aria-label={"Advance " + t.title}
-                          disabled={t.status === states[states.length - 1]}
+                          disabled={t.status === "blocked" || t.status === flow[flow.length - 1]}
                           className="rounded p-1 text-slate-400 transition hover:bg-blue-50 hover:text-blue-700 disabled:opacity-30"
                           onClick={() => move(t, 1)}
                         >
@@ -580,6 +778,7 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                     >
                       {t.title}
                     </button>
+                    {t.status === "blocked" && t.blocked_reason && <p className="mt-1 line-clamp-2 text-xs text-rose-700">{t.blocked_reason}</p>}
                     {(!!t.labels?.length || subtasks > 0) && (
                       <div className="mt-2 flex flex-wrap gap-1">
                         {t.labels?.slice(0, 3).map((l: string) => (
@@ -596,7 +795,10 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                     )}
                     <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-2.5">
                       <span className="text-[10px] font-medium text-slate-500">{when(t.due_date)}</span>
-                      <Avatar user={t.assignee} />
+                      <span className="flex min-w-0 items-center gap-1.5" title={t.assignee?.name || "Unassigned"}>
+                        <span className="max-w-28 truncate text-[11px] text-slate-500">{t.assignee?.name || "Unassigned"}</span>
+                        <Avatar user={t.assignee} />
+                      </span>
                     </div>
                   </article>
                 );

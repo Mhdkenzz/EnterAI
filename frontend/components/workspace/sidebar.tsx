@@ -8,9 +8,11 @@ import {
   Grid2X2,
   Inbox,
   LogOut,
+  PlugZap,
   Settings2,
   Shield,
   Sparkles,
+  MessageSquareText,
   Users,
   X,
 } from "lucide-react";
@@ -18,12 +20,14 @@ import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/components/workspace/shared";
 
-export function Sidebar({ collapsed, mobile, view, user, notices, toggle, close, nav, ai }: any) {
+export function Sidebar({ collapsed, mobile, view, user, notices, newRequests = 0, plansAwaitingApproval = 0, unreadNotifications = 0, ceoUnreadMessages = 0, toggle, close, nav, ai }: any) {
   const items = [
     [Grid2X2, "Home"],
     [FolderKanban, "Portfolio"],
     [Circle, "My work"],
     [Inbox, "Inbox"],
+    [MessageSquareText, "Requests"],
+    ...(user?.kind === "human" ? [[PlugZap, "Integrations"] as const] : []),
     [Users, "Teams"],
     [GitBranch, "Agents"],
     ...(user?.kind === "human" ? [[Shield, "Settings"] as const] : []),
@@ -82,13 +86,18 @@ export function Sidebar({ collapsed, mobile, view, user, notices, toggle, close,
         {!collapsed && <p className="mb-2 px-3 text-[10px] font-bold uppercase tracking-[.16em] text-slate-500">Workspace</p>}
         {items.map(([Icon, label]) => {
           const active = view === label;
-          const unread = label === "Inbox" && notices.some((x: any) => !x.read);
+          const unreadCount = Number(unreadNotifications) || notices.filter((x: any) => !x.read).length;
+          const unread = label === "Inbox" && unreadCount > 0;
+          const requestCount = label === "Requests" ? Number(newRequests) + Number(plansAwaitingApproval) : 0;
+          const accessibleLabel = label === "Requests" && requestCount
+            ? `Requests, ${newRequests} new requests and ${plansAwaitingApproval} plans awaiting approval`
+            : label === "Inbox" && unreadCount ? `Inbox, ${unreadCount} unread notifications` : label;
           return (
             <button
               key={label}
-              aria-label={label}
+              aria-label={accessibleLabel}
               aria-current={active ? "page" : undefined}
-              title={collapsed ? label : undefined}
+              title={collapsed ? accessibleLabel : undefined}
               onClick={() => nav(label)}
               className={cn(
                 "group relative mb-1 flex min-h-11 w-full items-center gap-3 rounded-lg px-3 text-[13px] font-medium text-slate-300 transition-colors hover:bg-white/[.07] hover:text-white",
@@ -99,23 +108,39 @@ export function Sidebar({ collapsed, mobile, view, user, notices, toggle, close,
               {active && <i className="absolute bottom-2 left-0 top-2 w-[3px] rounded-r bg-blue-300" />}
               <Icon size={17} strokeWidth={active ? 2.2 : 1.8} className={cn(active ? "text-blue-200" : "text-slate-400 group-hover:text-slate-200")} />
               {!collapsed && <span className="flex-1 text-left">{label}</span>}
-              {unread && (
-                <i aria-label="Unread notifications" className={cn("h-2 w-2 rounded-full bg-cyan-300", collapsed && "absolute right-3 top-3")} />
+              {label === "Requests" && requestCount > 0 && !collapsed && (
+                <span aria-hidden="true" className="min-w-5 rounded-full bg-blue-400/20 px-1.5 py-0.5 text-center text-[10px] font-semibold text-blue-100">
+                  {requestCount > 99 ? "99+" : requestCount}
+                </span>
+              )}
+              {label === "Requests" && requestCount > 0 && collapsed && (
+                <i aria-hidden="true" className="absolute right-3 top-3 h-2 w-2 rounded-full bg-cyan-300" />
+              )}
+              {unread && !collapsed && (
+                <span aria-hidden="true" className="min-w-5 rounded-full bg-cyan-400/20 px-1.5 py-0.5 text-center text-[10px] font-semibold text-cyan-100">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
+              {unread && collapsed && (
+                <i aria-hidden="true" className="absolute right-3 top-3 h-2 w-2 rounded-full bg-cyan-300" />
               )}
             </button>
           );
         })}
         <div className="my-5 h-px bg-white/[.08]" />
         <button
+          aria-label={ceoUnreadMessages > 0 ? `Ask Enter AI, ${ceoUnreadMessages} unread messages` : "Ask Enter AI"}
           onClick={ai}
           title={collapsed ? "Ask Enter AI" : undefined}
           className={cn(
-            "flex min-h-11 w-full items-center gap-3 rounded-lg bg-blue-500 px-3 text-[13px] font-semibold text-white shadow-[0_6px_18px_rgba(37,99,235,.22)] transition hover:bg-blue-400 focus-visible:outline-white",
+            "relative flex min-h-11 w-full items-center gap-3 rounded-lg bg-blue-500 px-3 text-[13px] font-semibold text-white shadow-[0_6px_18px_rgba(37,99,235,.22)] transition hover:bg-blue-400 focus-visible:outline-white",
             collapsed && "lg:justify-center lg:px-0",
           )}
         >
           <Sparkles size={17} />
-          {!collapsed && <span>Ask Enter AI</span>}
+          {!collapsed && <span className="flex-1 text-left">Ask Enter AI</span>}
+          {ceoUnreadMessages > 0 && !collapsed && <span aria-hidden="true" className="min-w-5 rounded-full bg-red-600 px-1.5 py-0.5 text-center text-[10px] font-bold text-white">{ceoUnreadMessages > 99 ? "99+" : ceoUnreadMessages}</span>}
+          {ceoUnreadMessages > 0 && collapsed && <i aria-hidden="true" className="absolute right-3 top-3 h-2.5 w-2.5 rounded-full bg-red-500 ring-2 ring-blue-500" />}
         </button>
         {!collapsed && <p className="mt-2 px-1 text-center text-[10px] text-slate-500">Workspace intelligence, on demand</p>}
       </nav>

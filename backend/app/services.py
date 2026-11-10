@@ -44,6 +44,37 @@ def log(db: Session, org_id: str, actor_id: str | None, entity_type: str, entity
     audit(db, org_id, actor_id, entity_type, entity_id, action, **detail)
     db.add(Activity(organization_id=org_id, actor_id=actor_id, entity_type=entity_type, entity_id=entity_id, action=action, detail=legacy_detail(detail)))
 
+def advance_project_to_completion_review(db: Session, project: Project, actor_id: str | None = None) -> bool:
+    """Move a project to human review once every task, including subtasks, is done."""
+    locked_project = db.scalar(
+        select(Project).where(Project.id == project.id).with_for_update().execution_options(populate_existing=True)
+    )
+    if locked_project is None:
+        return False
+    project = locked_project
+    if project.status in {"archived", "completed", "review"}:
+        return False
+    tasks = db.scalars(select(Task).where(Task.project_id == project.id)).all()
+    if not tasks or any(task.status != "done" for task in tasks):
+        return False
+    project.status = "review"
+    log(db, project.organization_id, actor_id, "project", project.id, "completion_ready_for_review", task_count=len(tasks))
+    recipients = db.scalars(select(User).where(
+        User.organization_id == project.organization_id, User.kind == "human",
+        User.role == "admin", User.active.is_(True),
+    )).all()
+    if project.owner_id:
+        owner = db.get(User, project.owner_id)
+        if owner and owner.kind == "human" and owner.active and owner.organization_id == project.organization_id:
+            recipients = list(recipients) + [owner]
+    for recipient in {person.id: person for person in recipients}.values():
+        db.add(Notification(
+            user_id=recipient.id, title=f"Project ready for review: {project.name}"[:220],
+            body=f"All {len(tasks)} tasks are complete. Review the project and approve completion or reopen the work.",
+            href=f"project:{project.id}",
+        ))
+    return True
+
 def ensure_hierarchy_config(db: Session, organization_id: str) -> HierarchyConfig:
     """Every organization gets exactly one HierarchyConfig row (all-zero until an
     admin sets counts in Phase 4). Idempotent so it's safe to call from seed() and
@@ -69,10 +100,11 @@ def sync_agent_task_pointers(db: Session, task: Task, before_assignee_id: str | 
             new_assignee = db.get(User, task.assignee_id)
             if new_assignee and new_assignee.kind == "agent":
                 new_assignee.current_task_id = task.id
-    if task.status == "done" and task.assignee_id:
+    if task.status in {"done", "blocked"} and task.assignee_id:
         assignee = db.get(User, task.assignee_id)
         if assignee and assignee.kind == "agent" and assignee.current_task_id == task.id:
-            assignee.last_completed_task_id = task.id
+            if task.status == "done":
+                assignee.last_completed_task_id = task.id
             assignee.current_task_id = None
 
 def seed(db: Session, *, demo_content: bool = True):

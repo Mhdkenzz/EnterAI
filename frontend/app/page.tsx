@@ -4,12 +4,13 @@ import { Bell, LoaderCircle, Menu, MessageCircle, Plus, Search, X } from "lucide
 import { api, ApiError, SESSION_EXPIRED_EVENT, upload } from "@/lib/api";
 import { AdminConsole } from "@/components/admin-console";
 import { PrivacySettings } from "@/components/privacy-settings";
+import { Integrations } from "@/components/integrations";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AuthScreens } from "@/components/workspace/auth-screens";
 import { Sidebar } from "@/components/workspace/sidebar";
 import { Onboarding, VerifyBanner } from "@/components/workspace/onboarding";
-import { Home, Portfolio, Work, InboxView, Teams, ProjectView } from "@/components/workspace/views";
+import { Home, Portfolio, Work, InboxView, RequestsView, Teams, ProjectView } from "@/components/workspace/views";
 import { AI, AI_GREETING, Command } from "@/components/workspace/assistant";
 import { routeToUrl, urlToRoute, type Route } from "@/lib/routes";
 import { ProjectForm, ProjectEditForm, TaskForm, TeamForm, Drawer } from "@/components/workspace/forms";
@@ -22,8 +23,11 @@ import type {
   InboxNotice,
   Action,
   Agent,
+  AgentProposal,
   HierarchyConfigT,
   AgentMsg,
+  InboundMessage,
+  InboundPlan,
 } from "@/lib/types";
 
 export default function EnterAI() {
@@ -34,10 +38,13 @@ export default function EnterAI() {
     [collapsed, setCollapsed] = useState(false),
     [mobile, setMobile] = useState(false),
     [dashboard, setDashboard] = useState<any>(null),
+    [queueSummary, setQueueSummary] = useState<any>({ new_requests: 0, plans_awaiting_approval: 0, projects_awaiting_review: 0, unread_notifications: 0 }),
     [projects, setProjects] = useState<Project[]>([]),
     [users, setUsers] = useState<User[]>([]),
     [teams, setTeams] = useState<any[]>([]),
     [notices, setNotices] = useState<InboxNotice[]>([]),
+    [inboundMessages, setInboundMessages] = useState<InboundMessage[]>([]),
+    [inboundPlans, setInboundPlans] = useState<InboundPlan[]>([]),
     [activity, setActivity] = useState<any[]>([]),
     [project, setProject] = useState<Project | null>(null),
     [tasks, setTasks] = useState<Task[]>([]),
@@ -56,16 +63,19 @@ export default function EnterAI() {
   const [onboarding, setOnboarding] = useState<any>(null);
   const [aiMessages, setAiMessages] = useState<any[]>([AI_GREETING]);
   const [agents, setAgents] = useState<Agent[]>([]),
+    [agentProposals, setAgentProposals] = useState<AgentProposal[]>([]),
     [hierarchyConfig, setHierarchyConfig] = useState<HierarchyConfigT | null>(null),
     [agentInspect, setAgentInspect] = useState<Agent | null>(null),
     [agentMessages, setAgentMessages] = useState<AgentMsg[]>([]),
     [agentChatBusy, setAgentChatBusy] = useState(false),
     [agentChatError, setAgentChatError] = useState(""),
     [ceoChatLoading, setCeoChatLoading] = useState(false),
-    [ceoUnavailable, setCeoUnavailable] = useState(false);
+    [ceoUnavailable, setCeoUnavailable] = useState(false),
+    [ceoUnreadMessages, setCeoUnreadMessages] = useState(0);
+  const ceoWelcomeTriggered = useRef(false);
   async function refresh() {
     try {
-      const [me, d, p, u, t, n, a] = await Promise.all([
+      const [me, d, p, u, t, n, a, incoming, plans, summary] = await Promise.all([
         api<any>("/me"),
         api<any>("/dashboard"),
         api<Project[]>("/projects"),
@@ -73,6 +83,9 @@ export default function EnterAI() {
         api<any[]>("/teams"),
         api<InboxNotice[]>("/notifications"),
         api<any[]>("/activity"),
+        api<InboundMessage[]>("/inbound-messages"),
+        api<InboundPlan[]>("/inbound-plans"),
+        api<any>("/work-queue-summary"),
       ]);
       setUser(me.user);
       setDashboard(d);
@@ -80,6 +93,9 @@ export default function EnterAI() {
       setUsers(u);
       setTeams(t);
       setNotices(n);
+      setInboundMessages(incoming);
+      setInboundPlans(plans);
+      setQueueSummary(summary);
       setActivity(a);
       setSession("in");
       loadOnboarding();
@@ -118,6 +134,77 @@ export default function EnterAI() {
     window.addEventListener(SESSION_EXPIRED_EVENT, expired);
     return () => window.removeEventListener(SESSION_EXPIRED_EVENT, expired);
   }, []);
+  useEffect(() => {
+    if (session !== "in") return;
+    const refreshSummary = () => api<any>("/work-queue-summary").then(setQueueSummary).catch(() => {});
+    const timer = window.setInterval(refreshSummary, 30000);
+    return () => window.clearInterval(timer);
+  }, [session]);
+  useEffect(() => {
+    if (session !== "in" || !user?.id) return;
+    const readKey = `enterai:ceo-chat-read:${user.id}`;
+    if (!window.localStorage.getItem(readKey)) window.localStorage.setItem(readKey, new Date().toISOString());
+    const refreshCeoUnread = () => {
+      if (agentInspect?.hierarchy_level === "ceo") {
+        const now = new Date().toISOString();
+        window.localStorage.setItem(readKey, now);
+        setCeoUnreadMessages(0);
+        return;
+      }
+      const since = encodeURIComponent(window.localStorage.getItem(readKey) || "");
+      api<{ unread_count: number }>(`/ceo-chat/unread?since=${since}`)
+        .then((result) => setCeoUnreadMessages(result.unread_count || 0))
+        .catch(() => {});
+    };
+    refreshCeoUnread();
+    const timer = window.setInterval(refreshCeoUnread, 20000);
+    return () => window.clearInterval(timer);
+  }, [session, user?.id, agentInspect?.hierarchy_level]);
+  useEffect(() => {
+    if (session !== "in" || !user?.id || ceoWelcomeTriggered.current) return;
+    const welcomeKey = `enterai:ceo-chat-welcomed:${user.id}`;
+    if (window.localStorage.getItem(welcomeKey)) return;
+    ceoWelcomeTriggered.current = true;
+    void openCeoChat().then((opened) => {
+      if (opened) window.localStorage.setItem(welcomeKey, "1");
+      else ceoWelcomeTriggered.current = false;
+    });
+  }, [session, user?.id]);
+  useEffect(() => {
+    if (session !== "in" || view !== "Requests") return;
+    const timer = window.setInterval(() => {
+      Promise.all([
+        api<InboundMessage[]>("/inbound-messages"),
+        api<InboundPlan[]>("/inbound-plans"),
+        api<InboxNotice[]>("/notifications"),
+      ]).then(([messages, plans, notificationData]) => {
+        setInboundMessages(messages);
+        setInboundPlans(plans);
+        setNotices(notificationData);
+      }).catch((cause: any) => setError(cause?.message || "Could not refresh incoming requests."));
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [session, view]);
+  useEffect(() => {
+    if (session !== "in" || view !== "Inbox") return;
+    const loadNotices = () => api<InboxNotice[]>("/notifications").then(setNotices).catch(() => {});
+    void loadNotices();
+    const timer = window.setInterval(loadNotices, 30000);
+    return () => window.clearInterval(timer);
+  }, [session, view]);
+  useEffect(() => {
+    if (session !== "in" || !["Home", "Portfolio", "Work", "Agents", "Project"].includes(view)) return;
+    const timer = window.setInterval(() => {
+      if (view === "Agents") {
+        void loadAgents();
+      } else if (view === "Project" && project?.id) {
+        api<Task[]>(`/projects/${project.id}/tasks`).then(setTasks).catch((cause: any) => setError(cause?.message || "Could not refresh project tasks."));
+      } else {
+        void refresh();
+      }
+    }, 30000);
+    return () => window.clearInterval(timer);
+  }, [session, view, project?.id]);
   // --- URLs -----------------------------------------------------------------
   // The address bar mirrors (view, project, open task). `routed` stays false until
   // the URL the person arrived on has been applied, so that first render cannot
@@ -238,14 +325,21 @@ export default function EnterAI() {
   async function changeTask(t: Task, values: Record<string, unknown>) {
     try {
       const next = await api<Task>("/tasks/" + t.id, { method: "PATCH", body: JSON.stringify(values) });
+      setError("");
       setTasks((all) => all.map((x) => (x.id === t.id ? next : x)));
       setDashboard((d: any) =>
         d ? { ...d, my_tasks: (d.my_tasks || []).map((x: Task) => (x.id === t.id ? next : x)) } : d,
       );
       setTask((x) => (x?.id === t.id ? next : x));
       await refresh();
+      if (project?.id === next.project_id) {
+        try { setProject(await api<Project>("/projects/" + project.id)); }
+        catch { setError("Task saved, but the project could not be refreshed."); }
+      }
+      return null;
     } catch (e: any) {
       setError(e.message);
+      return e.message || "Could not save this change. Please try again.";
     }
   }
   async function openNotice(n: InboxNotice) {
@@ -254,7 +348,8 @@ export default function EnterAI() {
       setNotices((all) => all.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
       const id = n.href?.startsWith("project:") ? n.href.slice(8) : n.href?.match(/projects\/([^/]+)/)?.[1];
       const p = projects.find((x) => x.id === id);
-      if (p) await openProject(p);
+      if (n.href === "requests") nav("Requests");
+      else if (p) await openProject(p);
       else if (n.href) nav("Portfolio");
     } catch (e: any) {
       setError(e.message);
@@ -264,7 +359,50 @@ export default function EnterAI() {
     setView(next);
     setMobile(false);
     if (next === "Agents") loadAgents();
+    if (next === "Requests") loadInboundMessages();
   };
+  async function loadInboundMessages() {
+    try {
+      const [messages, plans] = await Promise.all([
+        api<InboundMessage[]>("/inbound-messages"),
+        api<InboundPlan[]>("/inbound-plans"),
+      ]);
+      setInboundMessages(messages);
+      setInboundPlans(plans);
+    } catch (e: any) {
+      setError(e.message || "Could not load incoming requests.");
+    }
+  }
+  async function captureRequest(value: { source: "manual"; sender?: string; subject?: string; body: string; source_url?: string }) {
+    await api("/inbound-messages", { method: "POST", body: JSON.stringify(value) });
+    await loadInboundMessages();
+  }
+  async function setInboundStatus(message: InboundMessage, status: "new" | "ignored") {
+    try {
+      await api("/inbound-messages/" + message.id, { method: "PATCH", body: JSON.stringify({ status }) });
+      setInboundMessages((items) => items.map((item) => item.id === message.id ? { ...item, status } : item));
+    } catch (e: any) {
+      setError(e.message || "Could not update this request.");
+    }
+  }
+  async function draftInboundPlan(message: InboundMessage) {
+    const plan = await api<InboundPlan>("/inbound-messages/" + message.id + "/plans", { method: "POST" });
+    setInboundPlans((items) => [plan, ...items.filter((item) => item.id !== plan.id && item.inbound_message_id !== message.id)]);
+  }
+  async function saveInboundPlan(plan: InboundPlan, summary: string, proposal: InboundPlan["proposal"]) {
+    const saved = await api<InboundPlan>("/inbound-plans/" + plan.id, {
+      method: "PATCH", body: JSON.stringify({ summary, proposal }),
+    });
+    setInboundPlans((items) => items.map((item) => item.id === saved.id ? saved : item));
+  }
+  async function approveInboundPlan(plan: InboundPlan) {
+    await api("/inbound-plans/" + plan.id + "/approve", { method: "POST" });
+    await refresh();
+  }
+  async function rejectInboundPlan(plan: InboundPlan) {
+    const saved = await api<InboundPlan>("/inbound-plans/" + plan.id + "/reject", { method: "POST" });
+    setInboundPlans((items) => items.map((item) => item.id === saved.id ? saved : item));
+  }
   const openAI = (scope?: Project | null) => {
     setScopedProject(scope || null);
     setView("AI");
@@ -272,31 +410,40 @@ export default function EnterAI() {
   };
   async function loadAgents() {
     try {
-      const [a, cfg] = await Promise.all([
+      const [a, cfg, proposals] = await Promise.all([
         api<Agent[]>("/agents"),
         api<HierarchyConfigT>("/hierarchy-config"),
+        api<AgentProposal[]>("/agent-proposals"),
       ]);
       setAgents(a);
       setHierarchyConfig(cfg);
+      setAgentProposals(proposals);
     } catch (e: any) {
       setError(e.message);
     }
   }
-  async function openCeoChat() {
-    if (ceoChatLoading) return;
+  async function openCeoChat(): Promise<boolean> {
+    if (ceoChatLoading) return false;
     setCeoChatLoading(true);
     try {
+      await api("/ceo-chat", { method: "POST" });
       const fresh = await api<Agent[]>("/agents");
       setAgents(fresh);
       const ceo = fresh.find((agent) => agent.hierarchy_level === "ceo");
       if (!ceo) {
         setCeoUnavailable(true);
-        return;
+        return false;
       }
       setCeoUnavailable(false);
       await inspectAgent(ceo);
+      if (user?.id) {
+        window.localStorage.setItem(`enterai:ceo-chat-read:${user.id}`, new Date().toISOString());
+        setCeoUnreadMessages(0);
+      }
+      return true;
     } catch (e: any) {
       setError(e.message || "Could not check the agent hierarchy.");
+      return false;
     } finally {
       setCeoChatLoading(false);
     }
@@ -359,6 +506,18 @@ export default function EnterAI() {
       setAgentChatError(e.message || "Confirmation failed. Please ask for a fresh proposal.");
     }
   }
+  async function approveAgentProposal(proposal: AgentProposal) {
+    try {
+      await api("/ai/confirm", { method: "POST", body: JSON.stringify({ confirmation_token: proposal.confirmation_token }) });
+      await Promise.all([loadAgents(), refresh()]);
+    } catch (e: any) { setError(e.message || "Could not approve this agent action."); }
+  }
+  async function rejectAgentProposal(proposal: AgentProposal) {
+    try {
+      await api(`/agent-proposals/${proposal.id}/reject`, { method: "POST" });
+      await Promise.all([loadAgents(), refresh()]);
+    } catch (e: any) { setError(e.message || "Could not reject this agent action."); }
+  }
   if (session === "checking") return <div className="min-h-screen bg-canvas" />;
   if (session === "unreachable")
     return (
@@ -387,16 +546,19 @@ export default function EnterAI() {
         <p role="alert">Human administrator access required.</p>
       )
     ) : view === "Settings" ? (
-      <PrivacySettings userId={user?.id || ""} />
+      <PrivacySettings userId={user?.id || ""} isAdmin={user?.kind === "human" && user?.role === "admin"} />
+    ) : view === "Integrations" ? (
+      user?.kind === "human" ? <Integrations isAdmin={user.role === "admin"} /> : <p role="alert">Human workspace access is required.</p>
     ) : view === "Home" ? (
       <Home
         data={dashboard}
         activity={activity}
         project={openProject}
         task={openTask}
-        toggle={(t: Task) => changeTask(t, { status: t.status === "done" ? "todo" : "done" })}
+        toggle={(t: Task) => changeTask(t, { status: t.status === "done" || t.status === "blocked" ? "todo" : "done" })}
         all={() => nav("My work")}
-        ai={() => openAI()}
+        ceoUnreadMessages={ceoUnreadMessages}
+        ai={() => { void openCeoChat(); }}
       />
     ) : view === "Portfolio" ? (
       <Portfolio projects={projects} open={openProject} create={() => setProjectForm(true)} />
@@ -404,10 +566,14 @@ export default function EnterAI() {
       <Work
         tasks={dashboard?.my_tasks || []}
         open={openTask}
-        toggle={(t: Task) => changeTask(t, { status: t.status === "done" ? "todo" : "done" })}
+        toggle={(t: Task) => changeTask(t, { status: t.status === "done" || t.status === "blocked" ? "todo" : "done" })}
       />
     ) : view === "Inbox" ? (
       <InboxView notices={notices} open={openNotice} />
+    ) : view === "Requests" ? (
+      <RequestsView messages={inboundMessages} plans={inboundPlans} create={captureRequest}
+        updateStatus={setInboundStatus} draftPlan={draftInboundPlan} savePlan={saveInboundPlan}
+        approvePlan={approveInboundPlan} rejectPlan={rejectInboundPlan} />
     ) : view === "Teams" ? (
       <Teams
         teams={teams}
@@ -427,6 +593,9 @@ export default function EnterAI() {
         save={saveHierarchyConfig}
         isAdmin={user?.role === "admin"}
         inspect={inspectAgent}
+        proposals={agentProposals}
+        approveProposal={approveAgentProposal}
+        rejectProposal={rejectAgentProposal}
       />
     ) : view === "AI" ? (
       <AI
@@ -452,6 +621,25 @@ export default function EnterAI() {
         create={() => setTaskForm(true)}
         ai={() => openAI(project)}
         canManage={user?.kind === "human" && (user?.role === "admin" || user?.role === "manager")}
+        canApproveCompletion={user?.kind === "human" && (user?.role === "admin" || user?.role === "manager" || project?.owner?.id === user.id)}
+        approveCompletion={async () => {
+          if (!project) return;
+          try {
+            const next = await api<Project>("/projects/" + project.id + "/approve-completion", { method: "POST" });
+            setProject(next);
+            setProjects((all) => all.map((x) => (x.id === next.id ? next : x)));
+            await refresh();
+          } catch (e: any) { setError(e.message); }
+        }}
+        reopen={async () => {
+          if (!project) return;
+          try {
+            const next = await api<Project>("/projects/" + project.id + "/reopen", { method: "POST" });
+            setProject(next);
+            setProjects((all) => all.map((x) => (x.id === next.id ? next : x)));
+            await refresh();
+          } catch (e: any) { setError(e.message); }
+        }}
         archive={async (on: boolean) => {
           if (!project) return;
           try {
@@ -498,6 +686,9 @@ export default function EnterAI() {
         view={view}
         user={user}
         notices={notices}
+        newRequests={queueSummary.new_requests}
+        plansAwaitingApproval={queueSummary.plans_awaiting_approval}
+        unreadNotifications={queueSummary.unread_notifications}
         toggle={() => setCollapsed(!collapsed)}
         close={() => setMobile(false)}
         nav={nav}
@@ -592,7 +783,7 @@ export default function EnterAI() {
         className="fixed bottom-5 right-5 z-20 inline-flex min-h-12 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white shadow-[0_10px_28px_rgba(49,95,206,.28)] transition hover:-translate-y-0.5 hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-wait disabled:opacity-80 sm:bottom-6 sm:right-6"
       >
         {ceoChatLoading ? <LoaderCircle size={17} className="animate-spin" /> : <MessageCircle size={17} />}
-        <span>{ceoChatLoading ? "Opening CEO chat…" : "Chat with CEO"}</span>
+        <span>{ceoChatLoading ? "Opening Ask Enter AI…" : "Ask Enter AI"}</span>
       </button>
       {command && (
         <Command
@@ -604,7 +795,7 @@ export default function EnterAI() {
           }}
           ai={() => {
             setCommand(false);
-            openAI();
+            void openCeoChat();
           }}
         />
       )}
@@ -701,6 +892,7 @@ export default function EnterAI() {
           close={() => setAgentInspect(null)}
           send={(t: string) => sendAgentMessage(agentInspect.id, t)}
           confirm={confirmAgentAction}
+          connect={() => { setAgentInspect(null); nav("Integrations"); }}
         />
       )}
     </div>

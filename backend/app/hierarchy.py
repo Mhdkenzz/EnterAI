@@ -32,6 +32,9 @@ LEVEL_TITLES = {
     "senior_manager": "Senior Manager",
     "worker": "Worker",
 }
+# Bound the number of active agent rows a single hierarchy update can create.
+# This keeps a configuration mistake from expanding into thousands of agents.
+MAX_HIERARCHY_AGENTS = 250
 # Levels senior enough to act with admin-equivalent tool permissions (see TOOL_ROLES
 # in copilot.py); everyone else gets the same permissions as a human team member.
 SENIOR_LEVELS = {"ceo", "vp"}
@@ -40,7 +43,9 @@ def desired_counts(vp_count: int, directors_per_vp: int, managers_per_director: 
     director = vp * max(directors_per_vp, 0)
     manager = director * max(managers_per_director, 0)
     worker = manager * max(workers_per_manager, 0)
-    return {"ceo": 1 if vp > 0 else 0, "vp": vp, "director": director, "senior_manager": manager, "worker": worker}
+    # The CEO is the workspace's conversational entry point, even before an
+    # organization chooses to configure any reports beneath them.
+    return {"ceo": 1, "vp": vp, "director": director, "senior_manager": manager, "worker": worker}
 
 
 def _create_agent(db: Session, org_id: str, level: str, parent_id: str | None, name: str) -> User:
@@ -114,7 +119,7 @@ def reconcile_agents(db: Session, org_id: str) -> None:
         return
     vp_count, directors_per_vp = max(config.vp_count, 0), max(config.directors_per_vp, 0)
     managers_per_director, workers_per_manager = max(config.managers_per_director, 0), max(config.workers_per_manager, 0)
-    ceo_list = _sync_level(db, org_id, "ceo", [None], 1 if vp_count > 0 else 0)
+    ceo_list = _sync_level(db, org_id, "ceo", [None], 1)
     vp_list = _sync_level(db, org_id, "vp", ceo_list, vp_count)
     director_list = _sync_level(db, org_id, "director", vp_list, directors_per_vp)
     manager_list = _sync_level(db, org_id, "senior_manager", director_list, managers_per_director)

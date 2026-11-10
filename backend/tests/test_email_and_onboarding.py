@@ -70,6 +70,10 @@ def _boot(env_overrides):
     script = ("import alembic.config, alembic.command\n"
               "alembic.command.upgrade(alembic.config.Config('alembic.ini'), 'head')\n"
               "from fastapi.testclient import TestClient\nfrom app.main import app\n"
+              # This SQLite harness isolates email startup behavior; hosted URL
+              # validation is exercised independently in test_deployment_config.
+              "import app.deployment_config as deployment_config\n"
+              "deployment_config.make_url = lambda value: type('TestURL', (), {'get_backend_name': lambda self: 'postgresql'})()\n"
               "with TestClient(app):\n    pass\n")
     return subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, check=False)
 

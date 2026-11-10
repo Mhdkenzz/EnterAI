@@ -96,10 +96,21 @@ services:
       API_BASE_URL: ${API_BASE_URL:?set API_BASE_URL}
       ENTER_AI_BROWSER_APP_URL: ${ENTER_AI_BROWSER_APP_URL:-${APP_BASE_URL}}
       ENTER_AI_BROWSER_API_URL: ${ENTER_AI_BROWSER_API_URL:-${API_BASE_URL}/api}
-      # Only required once an OIDC identity provider's client_secret is stored
-      # (app/secrets_store.py fails closed in production if unset and one is).
+      AGENT_EXECUTION_DAILY_STEP_LIMIT: ${AGENT_EXECUTION_DAILY_STEP_LIMIT:-500}
+      AGENT_WORKSPACE_ROOT: /var/lib/enterai/workspaces
+      # Required whenever OIDC or a mailbox/workspace OAuth integration is enabled.
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:-}
       SECRETS_ENCRYPTION_KEY_PREVIOUS: ${SECRETS_ENCRYPTION_KEY_PREVIOUS:-}
+      # Optional provider app credentials. Configure the redirect URLs against
+      # API_BASE_URL; the integrations UI reports which connectors are available.
+      GMAIL_OAUTH_CLIENT_ID: ${GMAIL_OAUTH_CLIENT_ID:-}
+      GMAIL_OAUTH_CLIENT_SECRET: ${GMAIL_OAUTH_CLIENT_SECRET:-}
+      GMAIL_SYNC_INTERVAL_SECONDS: ${GMAIL_SYNC_INTERVAL_SECONDS:-30}
+      SLACK_CLIENT_ID: ${SLACK_CLIENT_ID:-}
+      SLACK_CLIENT_SECRET: ${SLACK_CLIENT_SECRET:-}
+      SLACK_SIGNING_SECRET: ${SLACK_SIGNING_SECRET:-}
+      NOTION_CLIENT_ID: ${NOTION_CLIENT_ID:-}
+      NOTION_CLIENT_SECRET: ${NOTION_CLIENT_SECRET:-}
       # The API only ever sees the load balancer's address, so rate limiting has to
       # read the client from the header nginx appends.
       TRUST_PROXY_HEADERS: "true"
@@ -129,15 +140,17 @@ services:
       migrate: {condition: service_completed_successfully}
       redis: {condition: service_healthy}
       objectstore-init: {condition: service_completed_successfully}
+    volumes:
+      - ${AGENT_WORKSPACE_HOST_PATH:-/srv/enterai/workspaces}:/var/lib/enterai/workspaces
 
-  # Runs scripts/backup.sh on a loop rather than only documenting it -- a runbook
-  # nobody's cron actually calls is not a backup strategy. Not wired into `lb`'s
-  # dependency chain, so `docker compose up -d --build lb` (what CI's multi-replica
-  # job runs) never starts it; a real deployment brings it up with `docker compose
-  # up -d` (no target) to include everything.
+  # Runs scripts/backup.sh on a loop to create and verify PostgreSQL archives.
+  # The release workflow starts this and both remote backup workers explicitly.
   backup:
     image: postgres:16-alpine
     restart: unless-stopped
+    # A fresh named volume is root-owned. This isolated job needs write access to
+    # its archive volume; the off-site worker mounts that volume read-only.
+    user: "0:0"
     environment:
       DATABASE_URL: ${DATABASE_URL:?set DATABASE_URL}
       BACKUP_DIR: /var/backups/enterai
@@ -152,9 +165,8 @@ services:
     depends_on:
       db: {condition: service_healthy}
 
-  # Mirrors uploaded files to BACKUP_OBJECTS_BUCKET (ideally off-site, with
-  # versioning); backup.sh above covers only the database. Like `backup`, it is
-  # outside `lb`'s dependency chain and starts with a plain `docker compose up -d`.
+  # Mirrors uploaded files to a separate backup bucket. Configure destination
+  # versioning/lifecycle there for recoverability and retention.
   objectstore-backup:
     image: ${ENTERAI_BACKEND_IMAGE:?set ENTERAI_BACKEND_IMAGE to an immutable image digest}
     restart: unless-stopped
@@ -164,7 +176,8 @@ services:
       STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://objectstore:9000}
       AWS_ACCESS_KEY_ID: ${STORAGE_ACCESS_KEY:?set STORAGE_ACCESS_KEY}
       AWS_SECRET_ACCESS_KEY: ${STORAGE_SECRET_KEY:?set STORAGE_SECRET_KEY}
-      BACKUP_OBJECTS_BUCKET: ${BACKUP_OBJECTS_BUCKET:-}
+      BACKUP_OBJECTS_BUCKET: ${BACKUP_OBJECTS_BUCKET:?set BACKUP_OBJECTS_BUCKET}
+      DATABASE_BACKUP_BUCKET: ${DATABASE_BACKUP_BUCKET:?set DATABASE_BACKUP_BUCKET}
       BACKUP_OBJECTS_ENDPOINT_URL: ${BACKUP_OBJECTS_ENDPOINT_URL:-}
       BACKUP_OBJECTS_REGION: ${BACKUP_OBJECTS_REGION:-us-east-1}
       BACKUP_OBJECTS_ACCESS_KEY: ${BACKUP_OBJECTS_ACCESS_KEY:-}
@@ -172,6 +185,28 @@ services:
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
     depends_on:
       objectstore-init: {condition: service_completed_successfully}
+
+  # Copies verified pg_dump archives to a dedicated off-host bucket. Keep this
+  # bucket separate from BACKUP_OBJECTS_BUCKET because the upload mirror prunes
+  # keys deleted from the primary uploads bucket.
+  database-backup-offsite:
+    image: ${ENTERAI_BACKEND_IMAGE:?set ENTERAI_BACKEND_IMAGE to an immutable image digest}
+    restart: unless-stopped
+    command: ["python", "-m", "app.backup_database", "--loop"]
+    environment:
+      STORAGE_BUCKET: ${STORAGE_BUCKET:?set STORAGE_BUCKET}
+      DATABASE_BACKUP_BUCKET: ${DATABASE_BACKUP_BUCKET:?set DATABASE_BACKUP_BUCKET}
+      BACKUP_OBJECTS_BUCKET: ${BACKUP_OBJECTS_BUCKET:?set BACKUP_OBJECTS_BUCKET}
+      DATABASE_BACKUP_ENDPOINT_URL: ${DATABASE_BACKUP_ENDPOINT_URL:-}
+      DATABASE_BACKUP_REGION: ${DATABASE_BACKUP_REGION:-us-east-1}
+      DATABASE_BACKUP_ACCESS_KEY: ${DATABASE_BACKUP_ACCESS_KEY:-}
+      DATABASE_BACKUP_SECRET_KEY: ${DATABASE_BACKUP_SECRET_KEY:-}
+      BACKUP_DIR: /var/backups/enterai
+      DATABASE_BACKUP_SYNC_INTERVAL_SECONDS: ${DATABASE_BACKUP_SYNC_INTERVAL_SECONDS:-300}
+    volumes:
+      - backup_data:/var/backups/enterai:ro
+    depends_on:
+      backup: {condition: service_started}
 
   lb:
     image: nginx:1.27-alpine

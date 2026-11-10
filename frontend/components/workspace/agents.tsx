@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { Avatar } from "@/components/workspace/shared";
-import type { Action, Agent, HierarchyConfigT, AgentMsg } from "@/lib/types";
+import type { Action, Agent, AgentProposal, HierarchyConfigT, AgentMsg } from "@/lib/types";
 
 export function Agents({
   agents,
@@ -13,18 +13,26 @@ export function Agents({
   save,
   isAdmin,
   inspect,
+  proposals,
+  approveProposal,
+  rejectProposal,
 }: {
   agents: Agent[];
   config: HierarchyConfigT | null;
   save: (v: Partial<HierarchyConfigT>) => Promise<void>;
   isAdmin: boolean;
   inspect: (a: Agent) => void;
+  proposals: AgentProposal[];
+  approveProposal: (proposal: AgentProposal) => Promise<void>;
+  rejectProposal: (proposal: AgentProposal) => Promise<void>;
 }) {
   const roots = agents.filter((a) => !a.parent_agent_id);
   const childrenOf = (id: string) => agents.filter((a) => a.parent_agent_id === id);
   const mapViewport = useRef<HTMLDivElement>(null);
   const working = agents.filter((a) => a.is_working).length;
   const blocked = agents.filter((a) => a.is_blocked).length;
+  const limited = agents.filter((a) => a.is_rate_limited).length;
+  const awaitingApproval = agents.filter((a) => a.is_awaiting_approval).length;
   useLayoutEffect(() => {
     const viewport = mapViewport.current;
     if (viewport) viewport.scrollLeft = Math.max(0, (viewport.scrollWidth - viewport.clientWidth) / 2);
@@ -41,8 +49,31 @@ export function Agents({
           <span className="agent-summary"><Bot size={14} /> {agents.length} agents</span>
           <span className="agent-summary"><i className="agent-status-dot is-working" /> {working} working</span>
           <span className="agent-summary"><i className={cn("agent-status-dot", blocked ? "is-blocked" : "is-idle")} /> {blocked} blocked</span>
+          {awaitingApproval > 0 && <span className="agent-summary"><i className="agent-status-dot is-review" /> {awaitingApproval} awaiting approval</span>}
+          {limited > 0 && <span className="agent-summary"><i className="agent-status-dot is-limited" /> {limited} at daily limit</span>}
         </div>
       </header>
+      {proposals.length > 0 && <section aria-labelledby="pending-agent-actions" className="space-y-3">
+        <div>
+          <h2 id="pending-agent-actions" className="text-sm font-semibold text-ink">Agent actions awaiting approval</h2>
+          <p className="mt-1 text-xs text-slate-500">Tasks pause until a human approves or rejects the proposed action.</p>
+        </div>
+        <div className="grid gap-3 lg:grid-cols-2">
+          {proposals.map((proposal) => <Card key={proposal.id} className="space-y-3 p-4">
+            <div>
+              <p className="text-sm font-semibold text-ink">{proposal.label}</p>
+              <p className="mt-1 text-xs text-slate-500">{proposal.agent_name} · {proposal.task_title}</p>
+            </div>
+            {proposal.details?.length ? <dl className="space-y-1 text-xs text-slate-600">
+              {proposal.details.map((detail, index) => <div key={index} className="flex gap-2"><dt className="font-medium">{detail.label}:</dt><dd className="break-all">{detail.value}</dd></div>)}
+            </dl> : null}
+            <div className="flex justify-end gap-2">
+              <Button size="sm" variant="outline" onClick={() => void rejectProposal(proposal)}><X size={14} /> Reject</Button>
+              <Button size="sm" onClick={() => void approveProposal(proposal)}><Check size={14} /> Approve</Button>
+            </div>
+          </Card>)}
+        </div>
+      </section>}
       {isAdmin && <HierarchyConfigForm config={config} save={save} />}
       <section aria-labelledby="reporting-structure-title" className="space-y-3">
         <div className="flex flex-wrap items-end justify-between gap-2 px-1">
@@ -58,6 +89,8 @@ export function Agents({
               <span><i className="agent-status-dot is-working" /> Working</span>
               <span><i className="agent-status-dot is-idle" /> Available</span>
               <span><i className="agent-status-dot is-blocked" /> Blocked</span>
+              <span><i className="agent-status-dot is-review" /> Awaiting approval</span>
+              <span><i className="agent-status-dot is-limited" /> Daily limit</span>
             </div>
             <div ref={mapViewport} className="agent-map-scroll" role="region" aria-label="Scrollable agent reporting map" tabIndex={0}>
               <div className="agent-map">
@@ -165,7 +198,7 @@ export function AgentNode({
   // can be expanded as needed instead of rendering every worker at once.
   const [open, setOpen] = useState(() => agent.hierarchy_level === "ceo");
   const kids = childrenOf(agent.id);
-  const status = agent.is_blocked ? "blocked" : agent.is_working ? "working" : "idle";
+  const status = agent.is_awaiting_approval ? "review" : agent.is_blocked ? "blocked" : agent.is_rate_limited ? "limited" : agent.is_working ? "working" : "idle";
   return (
     <li className={cn("agent-tree-item", root && "is-root")}>
       <div className="agent-tree-branch">
@@ -220,6 +253,7 @@ export function AgentInspector({
   close,
   send,
   confirm,
+  connect,
 }: {
   agent: Agent;
   reports: Agent[];
@@ -229,6 +263,7 @@ export function AgentInspector({
   close: () => void;
   send: (t: string) => void;
   confirm: (a: Action) => void;
+  connect: () => void;
 }) {
   const [text, setText] = useState("");
   return (
@@ -257,7 +292,12 @@ export function AgentInspector({
             </p>
             {agent.is_blocked && (
               <p className="mt-1 text-xs text-red-700">
-                Blocked -- repeated attempts failed. Send a message or reassign the task to reset it.
+                Blocked -- review the task and use Unblock to resume it.
+              </p>
+            )}
+            {agent.is_rate_limited && (
+              <p className="mt-1 text-xs text-amber-700">
+                Paused at the daily execution limit. Work resumes automatically when capacity renews.
               </p>
             )}
             {agent.is_working && (
@@ -299,6 +339,16 @@ export function AgentInspector({
             aria-label={"Conversation with " + agent.name}
             className="flex-1 space-y-4 overflow-y-auto px-5 pb-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
           >
+            {messages.length === 0 && agent.hierarchy_level === "ceo" && (
+              <div className="mx-auto mt-8 max-w-sm rounded-2xl border border-blue-100 bg-blue-50/70 p-5 text-center">
+                <div className="mx-auto grid h-10 w-10 place-items-center rounded-xl bg-white text-blue-700 shadow-sm"><Bot size={19} /></div>
+                <h3 className="mt-3 text-sm font-semibold text-ink">What should we connect first?</h3>
+                <p className="mt-1 text-xs leading-5 text-slate-600">Connect a work tool or tell me to start a project. I’ll ask if I need a key detail.</p>
+                <div className="mt-4 flex flex-wrap justify-center gap-2">
+                  {["Gmail", "Slack", "Notion"].map((name) => <Button key={name} variant="outline" size="sm" onClick={connect}>{name}</Button>)}
+                </div>
+              </div>
+            )}
             {messages.map((m) => (
               <div key={m.id} className={cn("flex gap-3", m.role === "user" && "justify-end")}>
                 {m.role === "agent" && (

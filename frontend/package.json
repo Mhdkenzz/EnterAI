@@ -1,6 +1,7 @@
 {
   "name": "enter-ai-web",
   "private": true,
+  "engines": { "node": ">=20" },
   "overrides": {
     "postcss": "$postcss"
   },

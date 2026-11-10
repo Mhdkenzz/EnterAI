@@ -45,6 +45,9 @@ class StructuredFormatter(logging.Formatter):
                   if isinstance(value := getattr(record, key, None), str) and value in allowed}
         if isinstance(getattr(record, 'failed', None), bool):
             fields['failed'] = record.failed
+        error_kind = getattr(record, 'error_kind', None)
+        if isinstance(error_kind, str) and re.fullmatch(r'[A-Z][A-Za-z0-9]{1,60}', error_kind):
+            fields['error_kind'] = error_kind
         for key in ('run_id', 'correlation_id'):
             value = getattr(record, key, None)
             if isinstance(value, str) and re.fullmatch(r'[0-9a-f-]{36}', value):
@@ -143,7 +146,17 @@ def safe_detail(detail):
     # Keys and values are both allowlisted; arbitrary strings cannot sneak into logs.
     result = {}
     for key, value in detail.items():
-        if key in {'execution_enabled', 'ceo_full_access_enabled', 'agent_workspace_enabled', 'calls', 'failures', 'duration_ms', 'executions', 'execution_failures'} and isinstance(value, (bool, int)):
+        if key in {'execution_enabled', 'ceo_full_access_enabled', 'agent_workspace_enabled', 'calls', 'failures', 'duration_ms', 'executions', 'execution_failures', 'consecutive_failures', 'requests_per_minute'} and isinstance(value, (bool, int)):
+            result[key] = value
+        elif key in {'dependencies_added', 'dependencies_removed'} and isinstance(value, int) and not isinstance(value, bool):
+            result[key] = value
+        elif key == 'dependencies_changed' and isinstance(value, bool):
+            result[key] = value
+        elif key == 'api_key_changed' and isinstance(value, bool):
+            result[key] = value
+        elif key == 'provider' and value in {'openrouter', 'ifm'}:
+            result[key] = value
+        elif key == 'model' and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9._:/-]{1,200}', value):
             result[key] = value
         elif key == 'outcome' and value in ('succeeded', 'failed', 'narrated', 'proposed', 'completed', 'inconclusive', 'started'):
             result[key] = value
@@ -213,10 +226,13 @@ def execution_run(tools):
         _run_id.reset(token)
 
 
-def scheduler_failure(bind, org_id='__system__', actor_id=None):
+def scheduler_failure(bind, org_id='__system__', actor_id=None, error=None):
     correlation_id = uid()
-    logger.error('scheduler_error', extra={'event': 'scheduler_error', 'source': 'scheduler',
-        'outcome': 'failed', 'failed': True, 'correlation_id': correlation_id})
+    fields = {'event': 'scheduler_error', 'source': 'scheduler', 'outcome': 'failed',
+              'failed': True, 'correlation_id': correlation_id}
+    if error is not None:
+        fields['error_kind'] = type(error).__name__
+    logger.error('scheduler_error', extra=fields)
     try:
         with Session(bind=bind) as ledger, audit_context('scheduler', actor_id):
             audit(ledger, org_id, actor_id, 'scheduler', correlation_id, 'scheduler_failed', outcome='failed')

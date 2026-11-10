@@ -3,14 +3,17 @@ from typing import Literal
 from datetime import datetime, timezone
 from sqlalchemy import select, func, or_
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, StrictBool, model_validator
+from pydantic import BaseModel, Field, StrictBool, model_validator
 from sqlalchemy.orm import Session
 from .auth import current_user
 from .database import get_db
 from .hierarchy import retire_agent
-from .models import AuditEvent, Organization, ProviderCall, ExecutionRun, User
+from .models import AuditEvent, Organization, OrganizationAISettings, ProviderCall, ExecutionRun, User
 from .services import log
+from .observability import audit
 from .agent_workspace import repository_root
+from . import secrets_store
+from .ai.config import AISettings
 
 router = APIRouter(prefix='/api/admin', tags=['admin'])
 
@@ -103,7 +106,7 @@ def usage(agent_id: str | None = None, start: datetime | None = None, end: datet
         bucket['prompt_tokens'] += c.prompt_tokens or 0
         bucket['completion_tokens'] += c.completion_tokens or 0
         bucket['reasoning_tokens'] += c.reasoning_tokens or 0
-    return {'totals': totals, 'agents': agents, 'provider_mode': CopilotService().mode, 'by_model': list(by_model.values())}
+    return {'totals': totals, 'agents': agents, 'provider_mode': CopilotService(db, user.organization_id).mode, 'by_model': list(by_model.values())}
 
 
 @router.get('/users')
@@ -234,7 +237,8 @@ def retire_agent_route(agent_id: str, user: User = Depends(human_admin), db: Ses
 def settings(user: User = Depends(human_admin), db: Session = Depends(get_db)):
     org = db.get(Organization, user.organization_id)
     return {'execution_enabled': org.execution_enabled, 'ceo_full_access_enabled': org.ceo_full_access_enabled,
-            'agent_workspace_enabled': org.agent_workspace_enabled, 'agent_workspace_available': repository_root() is not None}
+            'agent_workspace_enabled': org.agent_workspace_enabled, 'agent_workspace_available': repository_root(org.id, db) is not None,
+            'agent_workspace_id': org.id}
 
 
 @router.patch('/settings')
@@ -247,10 +251,88 @@ def update_settings(data: OrganizationSettingsUpdate, user: User = Depends(human
         org.ceo_full_access_enabled = data.ceo_full_access_enabled
         log(db, org.id, user.id, 'organization', org.id, 'ceo_full_access_updated', ceo_full_access_enabled=data.ceo_full_access_enabled)
     if data.agent_workspace_enabled is not None:
-        if data.agent_workspace_enabled and repository_root() is None:
-            raise HTTPException(409, 'Configure AGENT_WORKSPACE_ROOT to a Git checkout on the API host before enabling agent repository tools.')
+        if data.agent_workspace_enabled and repository_root(org.id, db) is None:
+            raise HTTPException(409, 'Configure this organization\'s isolated Git checkout under AGENT_WORKSPACE_ROOT before enabling agent repository tools.')
         org.agent_workspace_enabled = data.agent_workspace_enabled
         log(db, org.id, user.id, 'organization', org.id, 'agent_workspace_updated', agent_workspace_enabled=data.agent_workspace_enabled)
     db.commit()
     return {'execution_enabled': org.execution_enabled, 'ceo_full_access_enabled': org.ceo_full_access_enabled,
-            'agent_workspace_enabled': org.agent_workspace_enabled, 'agent_workspace_available': repository_root() is not None}
+            'agent_workspace_enabled': org.agent_workspace_enabled, 'agent_workspace_available': repository_root(org.id, db) is not None,
+            'agent_workspace_id': org.id}
+
+
+class AIProviderSettingsUpdate(BaseModel):
+    provider: Literal["ifm", "openrouter"] | None = None
+    api_key: str | None = Field(default=None, min_length=1, max_length=512)
+    clear_api_key: StrictBool = False
+    model: str | None = Field(default=None, min_length=1, max_length=200)
+    requests_per_minute: int | None = Field(default=None, ge=1, le=120)
+
+    @model_validator(mode="after")
+    def validate_update(self):
+        if self.api_key is not None and not self.api_key.strip():
+            raise ValueError("API key cannot be blank")
+        if self.api_key is not None and self.clear_api_key:
+            raise ValueError("Set a new API key or clear the saved key, not both")
+        if self.provider is None and self.api_key is None and self.requests_per_minute is None and self.model is None and not self.clear_api_key:
+            raise ValueError("Provide an AI provider setting to update")
+        return self
+
+
+def ai_provider_settings_out(db: Session, organization_id: str) -> dict:
+    saved = db.scalar(select(OrganizationAISettings).where(
+        OrganizationAISettings.organization_id == organization_id,
+    ))
+    env = AISettings.from_env()
+    configured_provider = saved.provider if saved else env.provider
+    has_key = bool(saved and saved.api_key_encrypted)
+    return {
+        "provider": configured_provider if has_key else env.provider,
+        "configured_provider": configured_provider,
+        "model": saved.model if saved else env.model,
+        "api_key_configured": has_key,
+        "requests_per_minute": saved.requests_per_minute if saved else 20,
+        "maximum_requests_per_minute": 120,
+    }
+
+
+@router.get('/ai-provider')
+def get_ai_provider_settings(user: User = Depends(human_admin), db: Session = Depends(get_db)):
+    return ai_provider_settings_out(db, user.organization_id)
+
+
+@router.patch('/ai-provider')
+async def update_ai_provider_settings(
+    data: AIProviderSettingsUpdate, user: User = Depends(human_admin), db: Session = Depends(get_db),
+):
+    saved = db.scalar(select(OrganizationAISettings).where(
+        OrganizationAISettings.organization_id == user.organization_id,
+    ))
+    if not saved:
+        saved = OrganizationAISettings(organization_id=user.organization_id, provider="ifm", model="IFM/K2-Horizon-375B-A23B")
+        db.add(saved)
+    if data.provider is not None and data.provider != saved.provider and data.api_key is None and not data.clear_api_key:
+        raise HTTPException(422, "Enter a new API key when changing providers")
+    if data.provider is not None:
+        saved.provider = data.provider
+    if data.model is not None:
+        saved.model = "IFM/K2-Horizon-375B-A23B" if saved.provider == "ifm" else data.model.strip()
+    elif data.provider == "ifm":
+        saved.model = "IFM/K2-Horizon-375B-A23B"
+    if data.requests_per_minute is not None:
+        saved.requests_per_minute = data.requests_per_minute
+    if data.clear_api_key:
+        saved.api_key_encrypted = None
+    elif data.api_key is not None:
+        try:
+            saved.api_key_encrypted = secrets_store.encrypt(data.api_key.strip())
+        except RuntimeError as error:
+            raise HTTPException(503, "Configure SECRETS_ENCRYPTION_KEY on the hosted server before saving provider credentials") from error
+    db.flush()  # Materialize the new settings ID before it is recorded in the audit event.
+    audit(db, user.organization_id, user.id, 'ai_provider_settings', saved.id, 'updated',
+          provider=saved.provider, model=saved.model, requests_per_minute=saved.requests_per_minute,
+          api_key_changed=data.api_key is not None or data.clear_api_key)
+    db.commit()
+    from . import execution
+    execution.start_background_loop()
+    return ai_provider_settings_out(db, user.organization_id)

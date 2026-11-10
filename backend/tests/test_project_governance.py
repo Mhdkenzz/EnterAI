@@ -54,6 +54,29 @@ def test_archiving_is_reversible_by_a_manager():
         assert c.post("/api/teams", headers=manager, json={"name": "Ops"}).status_code == 201
 
 
+def test_project_completion_waits_for_human_approval_after_every_task_is_done():
+    with TestClient(app) as c:
+        admin, account = workspace(c)
+        _id, member = identity(account["organization"]["id"], "member")
+        project = c.post("/api/projects", headers=admin, json={"name": "Review gate", "code": "REVIEW"}).json()
+        first = c.post("/api/tasks", headers=admin, json={"project_id": project["id"], "title": "First"}).json()
+        second = c.post("/api/tasks", headers=admin, json={"project_id": project["id"], "title": "Second"}).json()
+
+        assert c.patch(f"/api/tasks/{first['id']}", headers=admin, json={"status": "done"}).status_code == 200
+        assert c.get(f"/api/projects/{project['id']}", headers=admin).json()["status"] == "active"
+        assert c.patch(f"/api/tasks/{second['id']}", headers=admin, json={"status": "done"}).status_code == 200
+        assert c.get(f"/api/projects/{project['id']}", headers=admin).json()["status"] == "review"
+        assert c.post(f"/api/projects/{project['id']}/approve-completion", headers=member).status_code == 403
+        assert c.patch(f"/api/tasks/{first['id']}", headers=admin, json={"status": "todo"}).status_code == 200
+        assert c.get(f"/api/projects/{project['id']}", headers=admin).json()["status"] == "active"
+        assert c.patch(f"/api/tasks/{first['id']}", headers=admin, json={"status": "done"}).status_code == 200
+        assert c.get(f"/api/projects/{project['id']}", headers=admin).json()["status"] == "review"
+        assert c.patch(f"/api/projects/{project['id']}", headers=admin, json={"status": "completed"}).status_code == 409
+        approved = c.post(f"/api/projects/{project['id']}/approve-completion", headers=admin)
+        assert approved.status_code == 200 and approved.json()["status"] == "completed"
+        assert c.post(f"/api/projects/{project['id']}/reopen", headers=admin).json()["status"] == "active"
+
+
 def test_an_admin_removes_a_member_who_is_signed_out_everywhere():
     with TestClient(app) as c:
         admin, account = workspace(c)

@@ -76,6 +76,10 @@ def run_once() -> dict | None:
     if not destination_bucket:
         logger.warning("BACKUP_OBJECTS_BUCKET is not set; uploaded files are not being backed up")
         return None
+    if destination_bucket == os.environ.get("STORAGE_BUCKET", "").strip():
+        raise RuntimeError("Upload backups require a destination bucket separate from primary storage")
+    if destination_bucket == os.getenv("DATABASE_BACKUP_BUCKET", "").strip():
+        raise RuntimeError("Upload and database backup buckets must be different")
     result = mirror(_s3_client(), os.environ["STORAGE_BUCKET"], _destination(), destination_bucket)
     print(f"object backup: {result['copied']} copied, {result['removed']} removed, {result['total']} in source", flush=True)
     return result

@@ -12,7 +12,7 @@ class BillingPlan(Base):
     price_cents: Mapped[int] = mapped_column(Integer, default=0)
     currency: Mapped[str] = mapped_column(String(3), default="USD")
     seat_limit: Mapped[int] = mapped_column(Integer, nullable=True)
-    ai_usage_limit: Mapped[int] = mapped_column(Integer, nullable=True)  # monthly AI calls
+    ai_usage_limit: Mapped[int] = mapped_column(Integer, nullable=True)  # Legacy value; AI usage is unlimited.
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 class OrganizationSubscription(Base):

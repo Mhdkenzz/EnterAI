@@ -6,8 +6,8 @@
    manual procedure today: deploy the new value, restart services, verify `/health`,
    revoke the old value at its source. Nothing in this repo automates that rotation.
 2. **Application-stored secrets that must later be recovered**, not just verified
-   (currently: an OIDC identity provider's `client_secret`, which the backend must
-   resend to the IdP's token endpoint on every login) -- these cannot be a one-way
+   (currently: OIDC client secrets, Gmail/Slack/Notion OAuth tokens, and organization-specific
+   IFM or OpenRouter API keys, which the backend must resend for provider calls) -- these cannot be a one-way
    hash. `backend/app/secrets_store.py` encrypts them at rest (Fernet,
    AES-128-CBC+HMAC-SHA256) under `SECRETS_ENCRYPTION_KEY`, and this rotation IS
    real and tested (`rotate_stored_secrets`, exercised in
@@ -16,7 +16,7 @@
      to the old one (decrypt tries the current key first, then falls back to the
      previous one, so nothing becomes unreadable mid-rotation).
    - Call `POST /api/admin/sso/rotate-secrets` (human admin, org-scoped) to
-     re-encrypt every stored secret under the new key.
+     re-encrypt every stored OIDC secret, integration access/refresh token, and organization hosted AI key under the new key.
    - Remove `SECRETS_ENCRYPTION_KEY_PREVIOUS` once done.
    - Production refuses to boot -- fails closed -- with no `SECRETS_ENCRYPTION_KEY`
      set (see `secrets_store._cipher`), the same pattern as JWT_SECRET.

@@ -10,22 +10,25 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import BaseModel, EmailStr, Field, ValidationError
+from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, ValidationError
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .auth import CONFIRMATION_SECRET, CSRF_HEADER, SESSION_COOKIE, clear_session_cookie, revoke_session_token, create_token, current_user, hash_password, set_session_cookie, verify_password
 from .database import Base, engine, get_db
-from .models import Activity, AgentMessage, Attachment, Comment, CopilotConfirmation, HierarchyConfig, Notification, Organization, Project, ProjectDocument, Task, Team, User
+from .models import Activity, AgentMessage, Attachment, Comment, CopilotConfirmation, HierarchyConfig, InboundMessage, InboundPlan, Notification, Organization, Project, ProjectDocument, Task, TaskDependency, Team, User
 from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
 from .agent_workspace import REPO_PATCH_NAME, apply_confirmed_repo_patch
 from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging, configure_error_reporting
-from . import execution
-from .hierarchy import reconcile_agents
-from .services import ProjectDraftProvider, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
+from . import execution, gmail_sync
+from .hierarchy import MAX_HIERARCHY_AGENTS, desired_counts, reconcile_agents
+from .services import ProjectDraftProvider, advance_project_to_completion_review, ensure_hierarchy_config, extract_document_text, log, seed, sync_agent_task_pointers
+from .request_planning import InboundPlanProposal, create_inbound_plan
 from .storage import get_storage
 from .indexing import index_document
+from .task_dependencies import list_dependencies, replace_dependencies, unmet_dependency_ids
 from .deployment_config import is_deployment_environment, migration_revision_status, validate_deployment_configuration
+from .ratelimit import OpenRouterRateLimitExceeded
 
 environment = os.getenv("ENVIRONMENT", "development").strip().lower()
 demo_seed_enabled = os.getenv("ENABLE_DEMO_SEED", "false" if is_deployment_environment(environment) else "true").strip().lower() in {"1", "true", "yes", "on"}
@@ -109,8 +112,10 @@ from . import accounts, email as mailer
 from .accounts import router as accounts_router, enforce, _LOGIN_LIMITER, _SIGNUP_LIMITER
 from .billing_webhook import router as billing_webhook_router
 from .billing_routes import router as billing_router
+from .integrations import router as integrations_router
 from .privacy import router as privacy_router, admin_router as admin_privacy_router
 from . import privacy_service
+from . import secrets_store
 from .sso_routes import router_admin as sso_admin_router, router_login as sso_login_router, router_scim as scim_router
 from .enterprise_routes import router as enterprise_router
 app.include_router(admin_router)
@@ -121,6 +126,7 @@ app.include_router(enterprise_router)
 app.include_router(accounts_router)
 app.include_router(billing_webhook_router)
 app.include_router(billing_router)
+app.include_router(integrations_router)
 app.include_router(privacy_router)
 app.include_router(admin_privacy_router)
 app.openapi = custom_openapi
@@ -151,6 +157,7 @@ def startup():
     from .billing_service import sync_plans_from_env
     with next(get_db()) as db: sync_plans_from_env(db)
     execution.start_background_loop()
+    gmail_sync.start_gmail_sync_loop()
     privacy_service.start_background_loop()
     from . import observability as _observability
     _observability.start_aggregation_background_loop()
@@ -159,6 +166,7 @@ def startup():
 @app.on_event("shutdown")
 def shutdown():
     execution.stop_background_loop()
+    gmail_sync.stop_gmail_sync_loop()
     privacy_service.stop_background_loop()
     from . import observability as _observability
     _observability.stop_aggregation_background_loop()
@@ -170,14 +178,28 @@ class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); passw
 class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200); accept_terms: bool = False
 class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
 class ProjectUpdate(BaseModel): name: str | None = None; code: str | None = None; description: str | None = None; status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: str | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
-class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; status: str = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []
-class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: str | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None
+class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "done"] = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []; depends_on: list[str] = Field(default_factory=list)
+class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "blocked", "done"] | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None; depends_on: list[str] | None = None
 class CommentIn(BaseModel): body: str = Field(min_length=1)
 class TeamIn(BaseModel): name: str; description: str | None = None
 class AIRequest(BaseModel): message: str = Field(min_length=1, max_length=4000); project_id: str | None = None
 class ConfirmAction(BaseModel): confirmation_token: str = Field(min_length=20, max_length=10000)
 class AssignAgent(BaseModel): agent_id: str
 class AgentMessageIn(BaseModel): message: str = Field(min_length=1, max_length=4000)
+class InboundMessageCreate(BaseModel):
+    source: Literal["gmail", "slack", "notion", "manual"] = "manual"
+    external_id: str | None = Field(default=None, min_length=1, max_length=500)
+    thread_id: str | None = Field(default=None, max_length=500)
+    sender: str | None = Field(default=None, max_length=500)
+    subject: str | None = Field(default=None, max_length=500)
+    body: str = Field(min_length=1, max_length=50000)
+    source_url: AnyHttpUrl | None = Field(default=None, max_length=2000)
+    received_at: datetime | None = None
+class InboundMessageStatus(BaseModel):
+    status: Literal["new", "ignored"]
+class InboundPlanEdit(BaseModel):
+    summary: str = Field(min_length=1, max_length=2000)
+    proposal: InboundPlanProposal
 class HierarchyConfigUpdate(BaseModel):
     vp_count: int | None = Field(default=None, ge=0)
     directors_per_vp: int | None = Field(default=None, ge=0)
@@ -192,7 +214,8 @@ def project_out(p: Project, db: Session):
     return {"id":p.id,"name":p.name,"code":p.code,"description":p.description,"status":p.status,"health":p.health,"color":p.color,"due_date":p.due_date,"owner":user_out(owner) if owner else None,"team":team.name if team else None,"progress":round(done/total*100) if total else 0,"task_count":total,"documents":[{"id":d.id,"file_name":d.file_name,"created_at":d.created_at} for d in documents]}
 def task_out(t: Task, db: Session):
     assignee = db.get(User,t.assignee_id) if t.assignee_id else None
-    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"title":t.title,"description":t.description,"status":t.status,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"due_date":t.due_date,"labels":t.labels,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
+    dependencies = list_dependencies(db, t.id)
+    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"title":t.title,"description":t.description,"status":t.status,"blocked_reason":t.blocked_reason,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"depends_on":[{"id":dependency.id,"title":dependency.title,"status":dependency.status} for dependency in dependencies],"due_date":t.due_date,"labels":t.labels,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
 def notify(db, recipient_id: str | None, actor: User, title: str, body: str | None = None, href: str | None = None) -> None:
     """Tell a person about something someone else did to their work. Never the actor
     themselves, and never an agent (agents have no inbox to read)."""
@@ -387,10 +410,23 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)): retur
 @app.get("/api/dashboard")
 def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db)):
     projects=db.scalars(select(Project).where(Project.organization_id==user.organization_id).order_by(Project.created_at.desc())).all()
-    assigned=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id, Task.assignee_id==user.id).order_by(Task.due_date)).all()
-    tasks=sorted(assigned,key=lambda task: (task.status=="done", task.due_date or datetime.max))
+    assigned=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id, Task.assignee_id==user.id)).all()
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    tasks=sorted(assigned,key=lambda task: (task.status=="done", priority_order.get(task.priority, 1), task.due_date or datetime.max, task.position, task.created_at))
+    new_requests = db.scalar(select(func.count(InboundMessage.id)).where(
+        InboundMessage.organization_id == user.organization_id, InboundMessage.status == "new",
+    )) or 0
+    plans_awaiting_approval = db.scalar(select(func.count(InboundPlan.id)).where(
+        InboundPlan.organization_id == user.organization_id, InboundPlan.status == "pending",
+    )) or 0
+    blocked_tasks = db.scalar(select(func.count(Task.id)).join(Project).where(
+        Project.organization_id == user.organization_id, Task.status == "blocked",
+    )) or 0
+    projects_awaiting_review = db.scalar(select(func.count(Project.id)).where(
+        Project.organization_id == user.organization_id, Project.status == "review",
+    )) or 0
     now = datetime.now(timezone.utc); week_start = datetime(now.year, now.month, now.day) - timedelta(days=now.weekday())
-    return {"projects":[project_out(p,db) for p in projects],"my_tasks":[task_out(t,db) for t in tasks],"stats":{"active_projects":len([p for p in projects if p.status=="active"]),"at_risk":len([p for p in projects if p.health=="at_risk"]),"my_open_tasks":len([task for task in assigned if task.status!="done"]),"completed_this_week":len([task for task in assigned if task.completed_at and task.completed_at >= week_start])}}
+    return {"projects":[project_out(p,db) for p in projects],"my_tasks":[task_out(t,db) for t in tasks],"stats":{"active_projects":len([p for p in projects if p.status=="active"]),"at_risk":len([p for p in projects if p.health=="at_risk"]),"my_open_tasks":len([task for task in assigned if task.status!="done"]),"completed_this_week":len([task for task in assigned if task.completed_at and task.completed_at >= week_start]),"new_requests":new_requests,"plans_awaiting_approval":plans_awaiting_approval,"blocked_tasks":blocked_tasks,"projects_awaiting_review":projects_awaiting_review}}
 
 @app.get("/api/projects")
 def projects(user: User = Depends(current_user), db: Session = Depends(get_db)): return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id)).all()]
@@ -413,6 +449,10 @@ def project(project_id: str,user: User=Depends(current_user),db:Session=Depends(
 def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     p = ensure_project(db, user, project_id)
     values = data.model_dump(exclude_unset=True)
+    if values.get("status") == "completed":
+        raise HTTPException(409, "Approve completion after reviewing all finished tasks")
+    if p.status == "completed" and values.get("status") not in {None, "archived"}:
+        raise HTTPException(409, "Reopen the completed project before changing its status")
     if "name" in values: values["name"] = values["name"].strip()
     if "code" in values: values["code"] = values["code"].strip().upper()
     if values.get("name") == "" or values.get("code") == "": raise HTTPException(422, "Project name and code cannot be empty")
@@ -423,6 +463,34 @@ def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(cu
     if duplicate: raise HTTPException(409, "A project with this name or code already exists")
     for key, value in values.items(): setattr(p, key, value)
     log(db, user.organization_id, user.id, "project", p.id, "updated", fields=list(values)); db.commit(); return project_out(p, db)
+
+@app.post("/api/projects/{project_id}/approve-completion")
+def approve_project_completion(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must approve project completion")
+    p = ensure_project(db, user, project_id)
+    if user.role not in {"admin", "manager"} and p.owner_id != user.id:
+        raise HTTPException(403, "Only the project owner or a manager can approve completion")
+    if p.status != "review":
+        raise HTTPException(409, "This project is not awaiting completion review")
+    tasks = db.scalars(select(Task).where(Task.project_id == p.id)).all()
+    if not tasks or any(task.status != "done" for task in tasks):
+        raise HTTPException(409, "Every project task must be complete before approval")
+    p.status = "completed"
+    log(db, user.organization_id, user.id, "project", p.id, "completion_approved", task_count=len(tasks))
+    db.commit()
+    return project_out(p, db)
+
+@app.post("/api/projects/{project_id}/reopen")
+def reopen_project(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    require_manager(user)
+    p = ensure_project(db, user, project_id)
+    if p.status not in {"review", "completed"}:
+        raise HTTPException(409, "Only a project awaiting review or marked complete can be reopened")
+    p.status = "active"
+    log(db, user.organization_id, user.id, "project", p.id, "reopened")
+    db.commit()
+    return project_out(p, db)
 @app.get("/api/projects/{project_id}/tasks")
 def project_tasks(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)):
     ensure_project(db,user,project_id); return [task_out(t,db) for t in db.scalars(select(Task).where(Task.project_id==project_id).order_by(Task.position)).all()]
@@ -477,8 +545,17 @@ async def add_project_document(project_id:str,file:UploadFile=File(...),user:Use
 @app.post("/api/tasks",status_code=201)
 def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
     p=ensure_project(db,user,data.project_id)
+    if p.status == "completed": raise HTTPException(409, "Reopen the completed project before adding work")
+    if p.status == "review":
+        p.status = "active"
+        log(db, user.organization_id, user.id, "project", p.id, "completion_review_reopened", reason="task_added")
     ensure_org_assignee(db,user,data.assignee_id); ensure_task_parent(db,p,data.parent_id)
-    t=Task(**data.model_dump(),reporter_id=user.id); db.add(t); db.flush(); log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title)
+    values=data.model_dump(); dependency_ids=values.pop("depends_on")
+    t=Task(**values,reporter_id=user.id); db.add(t); db.flush()
+    try: replace_dependencies(db,t,dependency_ids)
+    except ValueError as error: raise HTTPException(422,str(error)) from error
+    if t.status == "done" and unmet_dependency_ids(db,t.id): raise HTTPException(409,"Complete prerequisite tasks before marking this task done")
+    log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title)
     notify(db, t.assignee_id, user, f"{user.name} assigned you “{t.title}”", p.name, f"project:{p.id}")
     db.commit(); return task_out(t,db)
 @app.get("/api/tasks/{task_id}")
@@ -493,6 +570,8 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
     t=db.get(Task,task_id)
     if not t: raise HTTPException(404,"Task not found")
     p=ensure_project(db,user,t.project_id)
+    if p.status == "completed" and data.model_fields_set:
+        raise HTTPException(409, "Reopen the completed project before changing its tasks")
     if "assignee_id" in data.model_fields_set:
         ensure_org_assignee(db, user, data.assignee_id)
         if t.assignee_id and t.assignee_id != data.assignee_id:
@@ -500,13 +579,56 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
             if previous_assignee and previous_assignee.kind == "agent":
                 human_admin(user)
     before, before_assignee_id = t.status, t.assignee_id
-    for key,value in data.model_dump(exclude_unset=True).items(): setattr(t,key,value)
+    changes = data.model_dump(exclude_unset=True)
+    if data.status == "done" and before == "blocked":
+        raise HTTPException(409, "Resolve the blocker and reopen this task before completing it")
+    dependency_ids = changes.pop("depends_on", None)
+    dependency_detail = {}
+    for key,value in changes.items(): setattr(t,key,value)
+    if data.status == "blocked" and before != "blocked":
+        t.blocked_reason = f"Marked blocked by {user.name}."
+        db.add(Comment(task_id=t.id, author_id=user.id, body=f"Blocked: {t.blocked_reason}"))
+        recipients = db.scalars(select(User).where(
+            User.organization_id == user.organization_id, User.kind == "human",
+            User.role == "admin", User.active.is_(True),
+        )).all()
+        for recipient in recipients:
+            notify(db, recipient.id, user, f"Task blocked: {t.title}", t.blocked_reason, f"project:{p.id}")
+    elif before == "blocked" and data.status is not None and data.status != "blocked":
+        previous_blocker = t.blocked_reason
+        t.blocked_reason = None
+        if t.assignee_id:
+            previous_assignee = db.get(User, t.assignee_id)
+            if previous_assignee and previous_assignee.kind == "agent":
+                previous_assignee.consecutive_task_failures = 0
+        db.add(Comment(task_id=t.id, author_id=user.id, body=f"Blocker cleared by {user.name}. {previous_blocker or ''}".strip()))
+    elif data.status is not None and data.status != "blocked":
+        t.blocked_reason = None
+    if dependency_ids is not None:
+        previous_dependency_ids = {dependency.id for dependency in list_dependencies(db, t.id)}
+        next_dependency_ids = set(dependency_ids)
+        try: replace_dependencies(db,t,dependency_ids)
+        except ValueError as error: raise HTTPException(422,str(error)) from error
+        if previous_dependency_ids != next_dependency_ids:
+            dependency_detail = {
+                "dependencies_changed": True,
+                "dependencies_added": len(next_dependency_ids - previous_dependency_ids),
+                "dependencies_removed": len(previous_dependency_ids - next_dependency_ids),
+            }
+    if data.status == "done" and unmet_dependency_ids(db,t.id): raise HTTPException(409,"Complete prerequisite tasks before marking this task done")
+    if p.status == "completed" and data.status is not None and data.status != "done":
+        raise HTTPException(409, "Reopen the completed project before reopening a task")
     if "status" in data.model_fields_set and data.status != before:
         t.completed_at = datetime.now(timezone.utc) if data.status == "done" else None
     sync_agent_task_pointers(db, t, before_assignee_id)
+    if before != t.status and t.status != "done" and p.status == "review":
+        p.status = "active"
+        log(db, user.organization_id, user.id, "project", p.id, "completion_review_reopened", reason="task_reopened", task_id=t.id)
+    if before != t.status and t.status == "done":
+        advance_project_to_completion_review(db, p, user.id)
     if t.assignee_id != before_assignee_id:
         notify(db, t.assignee_id, user, f"{user.name} assigned you “{t.title}”", p.name, f"project:{p.id}")
-    log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status); db.commit(); return task_out(t,db)
+    log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status,**dependency_detail); db.commit(); return task_out(t,db)
 def detach_task_references(db, task):
     """PostgreSQL enforces the foreign keys SQLite ignores, so every row pointing at
     this task has to be resolved before the DELETE or the request fails outright.
@@ -515,6 +637,7 @@ def detach_task_references(db, task):
     agent pointers are cleared so the agent outlives its task."""
     db.execute(delete(Comment).where(Comment.task_id == task.id))
     db.execute(delete(Attachment).where(Attachment.task_id == task.id))
+    db.execute(delete(TaskDependency).where(or_(TaskDependency.task_id == task.id, TaskDependency.depends_on_task_id == task.id)))
     db.execute(update(Task).where(Task.parent_id == task.id).values(parent_id=None))
     db.execute(update(User).where(User.current_task_id == task.id).values(current_task_id=None))
     db.execute(update(User).where(User.last_completed_task_id == task.id).values(last_completed_task_id=None))
@@ -523,7 +646,8 @@ def detach_task_references(db, task):
 def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     t=db.get(Task,task_id)
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id)
+    project = ensure_project(db,user,t.project_id)
+    if project.status == "completed": raise HTTPException(409, "Reopen the completed project before deleting its tasks")
     if t.reporter_id != user.id: require_manager(user)  # members may delete only what they created
     log(db,user.organization_id,user.id,"task",t.id,"deleted",title=t.title)
     for a in db.scalars(select(Attachment).where(Attachment.task_id == t.id)).all():
@@ -657,13 +781,17 @@ def agent_out(a: User, db: Session) -> dict:
     current = db.get(Task, a.current_task_id) if a.current_task_id else None
     last_completed = db.get(Task, a.last_completed_task_id) if a.last_completed_task_id else None
     blocked = a.current_task_id is not None and a.consecutive_task_failures >= execution.MAX_CONSECUTIVE_FAILURES
+    rate_limited = a.daily_limit_reached_at is not None and a.daily_limit_reached_at >= datetime.utcnow() - timedelta(hours=24)
     return {
         "id": a.id, "name": a.name, "title": a.title, "avatar": a.avatar,
         "hierarchy_level": a.hierarchy_level, "parent_agent_id": a.parent_agent_id,
         "current_task": task_out(current, db) if current else None,
         "last_completed_task": task_out(last_completed, db) if last_completed else None,
-        "is_working": a.current_task_id is not None and not blocked,
+        "is_working": a.current_task_id is not None and not blocked and not rate_limited and current is not None and current.status != "review",
+        "is_awaiting_approval": current is not None and current.status == "review",
         "is_blocked": blocked,
+        "is_rate_limited": rate_limited,
+        "daily_limit_reached_at": a.daily_limit_reached_at if rate_limited else None,
         "last_execution_at": a.last_execution_at,
         "retired": a.retired_at is not None,
         "retired_at": a.retired_at,
@@ -675,6 +803,41 @@ def agents(include_retired: bool = False, user:User=Depends(current_user),db:Ses
     if not include_retired: stmt = stmt.where(User.retired_at.is_(None))
     rows = db.scalars(stmt).all()
     return [agent_out(a, db) for a in rows]
+
+@app.post("/api/ceo-chat")
+def bootstrap_ceo_chat(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Ensure every workspace has its single CEO chat entry point, even with no reports configured."""
+    ensure_hierarchy_config(db, user.organization_id)
+    reconcile_agents(db, user.organization_id)
+    ceo = db.scalar(select(User).where(
+        User.organization_id == user.organization_id, User.kind == "agent",
+        User.hierarchy_level == "ceo", User.retired_at.is_(None),
+    ).order_by(User.created_at))
+    if not ceo:
+        raise HTTPException(503, "CEO chat is not available right now")
+    return agent_out(ceo, db)
+
+@app.get("/api/ceo-chat/unread")
+def ceo_chat_unread(since: str | None = Query(default=None), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    ceo_id = db.scalar(select(User.id).where(
+        User.organization_id == user.organization_id, User.kind == "agent",
+        User.hierarchy_level == "ceo", User.retired_at.is_(None),
+    ).order_by(User.created_at))
+    if not ceo_id:
+        return {"unread_count": 0}
+    stmt = select(func.count(AgentMessage.id)).where(
+        AgentMessage.agent_id == ceo_id, AgentMessage.role == "agent",
+        AgentMessage.author_id.is_(None),
+    )
+    if since:
+        try:
+            read_at = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            if read_at.tzinfo:
+                read_at = read_at.astimezone(timezone.utc).replace(tzinfo=None)
+        except ValueError as error:
+            raise HTTPException(422, "Invalid unread timestamp") from error
+        stmt = stmt.where(AgentMessage.created_at > read_at)
+    return {"unread_count": db.scalar(stmt) or 0}
 
 def _hierarchy_config_out(cfg: HierarchyConfig) -> dict:
     return {"vp_count":cfg.vp_count,"directors_per_vp":cfg.directors_per_vp,"managers_per_director":cfg.managers_per_director,"workers_per_manager":cfg.workers_per_manager}
@@ -688,6 +851,11 @@ def hierarchy_config(user:User=Depends(current_user),db:Session=Depends(get_db))
 def update_hierarchy_config(data: HierarchyConfigUpdate, user:User=Depends(human_admin), db:Session=Depends(get_db)):
     cfg = ensure_hierarchy_config(db, user.organization_id)
     values = data.model_dump(exclude_unset=True)
+    proposed = {key: values.get(key, getattr(cfg, key)) for key in (
+        "vp_count", "directors_per_vp", "managers_per_director", "workers_per_manager",
+    )}
+    if sum(desired_counts(**proposed).values()) > MAX_HIERARCHY_AGENTS:
+        raise HTTPException(422, f"An organization can have at most {MAX_HIERARCHY_AGENTS} active agents")
     for key, value in values.items(): setattr(cfg, key, value)
     db.commit()
     with audit_context(user.kind, user.id, user.id if user.kind == "human" else None):
@@ -749,8 +917,11 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
             scope_project_id = current_task.project_id
     try:
         with audit_context("agent", agent.id, user.id):
-            result = CopilotService().plan(data.message, WorkspaceTools(db, agent, scope_project_id=scope_project_id))
+            result = CopilotService(db, user.organization_id).plan(data.message, WorkspaceTools(db, agent, scope_project_id=scope_project_id))
         _issue_result_confirmations(result, agent, db)
+    except OpenRouterRateLimitExceeded as error:
+        db.rollback()
+        raise HTTPException(429, "AI provider request limit reached for this workspace. Try again in a minute.", headers={"Retry-After": "60"}) from error
     except CopilotProviderError as error:
         db.commit()
         raise HTTPException(503, "The configured AI provider is unavailable. Try again later.") from error
@@ -771,11 +942,330 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
 def notifications(user:User=Depends(current_user),db:Session=Depends(get_db)):
     # The newest 100: an inbox that returns every notification ever sent grows without bound.
     return [{"id":n.id,"title":n.title,"body":n.body,"href":n.href,"read":n.read,"created_at":n.created_at} for n in db.scalars(select(Notification).where(Notification.user_id==user.id).order_by(Notification.created_at.desc()).limit(100)).all()]
+
+@app.get("/api/work-queue-summary")
+def work_queue_summary(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Small tenant-scoped counters for live navigation badges across workspace views."""
+    new_requests = db.scalar(select(func.count(InboundMessage.id)).where(
+        InboundMessage.organization_id == user.organization_id, InboundMessage.status == "new",
+    )) or 0
+    plans_awaiting_approval = db.scalar(select(func.count(InboundPlan.id)).where(
+        InboundPlan.organization_id == user.organization_id, InboundPlan.status == "pending",
+    )) or 0
+    blocked_tasks = db.scalar(select(func.count(Task.id)).join(Project).where(
+        Project.organization_id == user.organization_id, Task.status == "blocked",
+    )) or 0
+    projects_awaiting_review = db.scalar(select(func.count(Project.id)).where(
+        Project.organization_id == user.organization_id, Project.status == "review",
+    )) or 0
+    unread_notifications = db.scalar(select(func.count(Notification.id)).where(
+        Notification.user_id == user.id, Notification.read.is_(False),
+    )) or 0
+    return {
+        "new_requests": new_requests,
+        "plans_awaiting_approval": plans_awaiting_approval,
+        "blocked_tasks": blocked_tasks,
+        "projects_awaiting_review": projects_awaiting_review,
+        "unread_notifications": unread_notifications,
+    }
+
 @app.patch("/api/notifications/{notification_id}/read")
 def read_notification(notification_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     n=db.get(Notification,notification_id)
     if not n or n.user_id!=user.id: raise HTTPException(404,"Notification not found")
     n.read=True; log(db,user.organization_id,user.id,"notification",n.id,"read"); db.commit(); return {"ok":True}
+
+def inbound_message_out(message: InboundMessage) -> dict:
+    return {
+        "id": message.id, "source": message.source, "external_id": message.external_id,
+        "thread_id": message.thread_id, "sender": message.sender, "subject": message.subject,
+        "body": message.body, "source_url": message.source_url,
+        "received_at": message.received_at, "status": message.status,
+        "triage_status": message.triage_status, "triage_category": message.triage_category,
+        "triage_reason": message.triage_reason, "triage_summary": message.triage_summary,
+        "triage_concerns": message.triage_concerns or [], "triage_attempts": message.triage_attempts,
+        "created_at": message.created_at,
+    }
+
+
+@app.get("/api/inbound-messages")
+def list_inbound_messages(
+    status: Literal["new", "ignored", "planned"] | None = None,
+    source: Literal["gmail", "slack", "notion", "manual"] | None = None,
+    offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    stmt = select(InboundMessage).where(InboundMessage.organization_id == user.organization_id)
+    if status:
+        stmt = stmt.where(InboundMessage.status == status)
+    if source:
+        stmt = stmt.where(InboundMessage.source == source)
+    rows = db.scalars(stmt.order_by(InboundMessage.received_at.desc(), InboundMessage.id.desc()).offset(offset).limit(limit)).all()
+    return [inbound_message_out(message) for message in rows]
+
+
+@app.post("/api/inbound-messages", status_code=201)
+def create_inbound_message(
+    data: InboundMessageCreate, user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must submit an incoming message")
+    if data.external_id:
+        existing = db.scalar(select(InboundMessage).where(
+            InboundMessage.organization_id == user.organization_id,
+            InboundMessage.source == data.source,
+            InboundMessage.external_id == data.external_id,
+        ))
+        if existing:
+            return {**inbound_message_out(existing), "duplicate": True}
+    received_at = data.received_at or datetime.now(timezone.utc)
+    if received_at.tzinfo:
+        received_at = received_at.astimezone(timezone.utc).replace(tzinfo=None)
+    message = InboundMessage(
+        organization_id=user.organization_id, created_by=user.id,
+        source=data.source, external_id=data.external_id, thread_id=data.thread_id,
+        sender=data.sender, subject=data.subject, body=data.body,
+        source_url=str(data.source_url) if data.source_url else None,
+        received_at=received_at.replace(tzinfo=None), status="new",
+    )
+    db.add(message)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        if data.external_id:
+            existing = db.scalar(select(InboundMessage).where(
+                InboundMessage.organization_id == user.organization_id,
+                InboundMessage.source == data.source,
+                InboundMessage.external_id == data.external_id,
+            ))
+            if existing:
+                return {**inbound_message_out(existing), "duplicate": True}
+        raise HTTPException(409, "This source message could not be stored")
+    audit(db, user.organization_id, user.id, "inbound_message", message.id, "received", source=data.source)
+    db.commit()
+    return {**inbound_message_out(message), "duplicate": False}
+
+
+@app.patch("/api/inbound-messages/{message_id}")
+def update_inbound_message(
+    message_id: str, data: InboundMessageStatus,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must review an incoming message")
+    message = db.scalar(select(InboundMessage).where(
+        InboundMessage.id == message_id, InboundMessage.organization_id == user.organization_id,
+    ).with_for_update())
+    if not message:
+        raise HTTPException(404, "Incoming message not found")
+    if message.status == "planned":
+        raise HTTPException(409, "An approved request cannot be reopened")
+    message.status = data.status
+    audit(db, user.organization_id, user.id, "inbound_message", message.id, data.status)
+    db.commit()
+    return inbound_message_out(message)
+
+
+def inbound_plan_out(plan: InboundPlan) -> dict:
+    return {
+        "id": plan.id, "inbound_message_id": plan.inbound_message_id,
+        "status": plan.status, "summary": plan.summary, "proposal": plan.proposal,
+        "planner_provider": plan.planner_provider, "project_id": plan.project_id,
+        "created_at": plan.created_at, "reviewed_at": plan.reviewed_at,
+    }
+
+
+@app.get("/api/inbound-plans")
+def list_inbound_plans(
+    status: Literal["pending", "approved", "rejected"] | None = None,
+    offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100),
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    stmt = select(InboundPlan).where(InboundPlan.organization_id == user.organization_id)
+    if status:
+        stmt = stmt.where(InboundPlan.status == status)
+    rows = db.scalars(stmt.order_by(InboundPlan.created_at.desc(), InboundPlan.id.desc()).offset(offset).limit(limit)).all()
+    return [inbound_plan_out(plan) for plan in rows]
+
+
+@app.post("/api/inbound-messages/{message_id}/plans", status_code=201)
+def draft_inbound_plan(
+    message_id: str, user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must start request planning")
+    message = db.scalar(select(InboundMessage).where(
+        InboundMessage.id == message_id, InboundMessage.organization_id == user.organization_id,
+    ))
+    if not message:
+        raise HTTPException(404, "Incoming message not found")
+    if message.status == "ignored":
+        raise HTTPException(409, "Reopen this request before planning it")
+    if message.status == "planned":
+        raise HTTPException(409, "This request already has an approved plan")
+    pending = db.scalar(select(InboundPlan).where(
+        InboundPlan.inbound_message_id == message.id,
+        InboundPlan.organization_id == user.organization_id,
+        InboundPlan.status == "pending",
+    ).order_by(InboundPlan.created_at.desc()))
+    if pending:
+        return inbound_plan_out(pending)
+    try:
+        proposal, planner_provider = create_inbound_plan(db, user, message)
+    except OpenRouterRateLimitExceeded as error:
+        raise HTTPException(429, "AI provider request limit reached for this workspace. Try again in a minute.", headers={"Retry-After": "60"}) from error
+    except CopilotProviderError as error:
+        raise HTTPException(503, str(error)) from error
+    plan = InboundPlan(
+        organization_id=user.organization_id, inbound_message_id=message.id,
+        status="pending", summary=proposal["summary"], proposal=proposal,
+        planner_provider=planner_provider, created_by=user.id,
+    )
+    db.add(plan)
+    db.flush()
+    log(db, user.organization_id, user.id, "inbound_plan", plan.id, "drafted", source_message_id=message.id)
+    _record_ai_usage(db, user.organization_id)
+    db.commit()
+    return inbound_plan_out(plan)
+
+
+@app.patch("/api/inbound-plans/{plan_id}")
+def edit_inbound_plan(
+    plan_id: str, data: InboundPlanEdit,
+    user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must edit a request plan")
+    plan = db.scalar(select(InboundPlan).where(
+        InboundPlan.id == plan_id, InboundPlan.organization_id == user.organization_id,
+    ).with_for_update())
+    if not plan:
+        raise HTTPException(404, "Request plan not found")
+    if plan.status != "pending":
+        raise HTTPException(409, "Only a pending plan can be edited")
+    proposal = InboundPlanProposal.model_validate(data.proposal).model_dump()
+    proposal["project"]["name"] = " ".join(proposal["project"]["name"].split())
+    proposal["project"]["code"] = re.sub(r"[^A-Z0-9_-]", "", proposal["project"]["code"].strip().upper())[:16]
+    if len(proposal["project"]["name"]) < 2:
+        raise HTTPException(422, "Project name must contain at least two characters")
+    if len(proposal["project"]["code"]) < 2:
+        raise HTTPException(422, "Project code must contain at least two letters or numbers")
+    for task_item in proposal["project"]["tasks"]:
+        task_item["title"] = " ".join(task_item["title"].split())
+        if not task_item["title"]:
+            raise HTTPException(422, "Task titles cannot be empty")
+    proposal = InboundPlanProposal.model_validate(proposal).model_dump()
+    if not data.summary.strip():
+        raise HTTPException(422, "Plan summary cannot be empty")
+    plan.summary = data.summary.strip()
+    plan.proposal = proposal
+    log(db, user.organization_id, user.id, "inbound_plan", plan.id, "edited")
+    db.commit()
+    return inbound_plan_out(plan)
+
+
+@app.post("/api/inbound-plans/{plan_id}/approve")
+def approve_inbound_plan(
+    plan_id: str, user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must approve a request plan")
+    plan = db.scalar(select(InboundPlan).where(
+        InboundPlan.id == plan_id, InboundPlan.organization_id == user.organization_id,
+    ).with_for_update())
+    if not plan:
+        raise HTTPException(404, "Request plan not found")
+    if plan.status == "approved" and plan.project_id:
+        project = db.get(Project, plan.project_id)
+        tasks = db.scalars(select(Task).where(Task.project_id == project.id).order_by(Task.position)).all() if project else []
+        return {"plan": inbound_plan_out(plan), "project": project_out(project, db) if project else None,
+                "tasks": [task_out(task, db) for task in tasks]}
+    if plan.status != "pending":
+        raise HTTPException(409, "Only a pending plan can be approved")
+    proposal = InboundPlanProposal.model_validate(plan.proposal).model_dump()["project"]
+    message = db.get(InboundMessage, plan.inbound_message_id)
+    if not message or message.status != "new":
+        raise HTTPException(409, "Reopen the source request before approving this plan")
+    name, code = proposal["name"].strip(), proposal["code"].strip().upper()
+    duplicate = db.scalar(select(Project).where(
+        Project.organization_id == user.organization_id,
+        or_(Project.name.ilike(name), Project.code.ilike(code)),
+    ))
+    if duplicate:
+        raise HTTPException(409, "A project with this name or code already exists. Edit the plan and try again.")
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    project = Project(
+        organization_id=user.organization_id, owner_id=user.id, name=name, code=code,
+        description=proposal["description"], status="planning", health=proposal["health"],
+    )
+    db.add(project)
+    db.flush()
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    ordered_tasks = sorted(enumerate(proposal["tasks"]), key=lambda item: (priority_order[item[1]["priority"]], item[0]))
+    ceo = db.scalar(select(User).where(
+        User.organization_id == user.organization_id, User.kind == "agent",
+        User.hierarchy_level == "ceo", User.retired_at.is_(None), User.execution_enabled.is_(True),
+    ).order_by(User.created_at).limit(1))
+    organization = db.get(Organization, user.organization_id)
+    tasks: list[Task] = []
+    autonomous_execution_ready = organization.execution_enabled and CopilotService(db, user.organization_id).mode == "tool_calling"
+    tasks_by_plan_index: dict[int, Task] = {}
+    for position, (plan_index, item) in enumerate(ordered_tasks):
+        # The CEO owns the approved task queue. The scheduler claims one task at a
+        # time; CEO/managers can then split work into directly assigned subtasks.
+        assignee_id = ceo.id if ceo and autonomous_execution_ready else None
+        task = Task(
+            project_id=project.id, title=item["title"].strip(), description=item["description"].strip(),
+            status="todo", priority=item["priority"], assignee_id=assignee_id,
+            reporter_id=user.id, position=position,
+        )
+        db.add(task)
+        tasks.append(task)
+        tasks_by_plan_index[plan_index] = task
+    db.flush()
+    for plan_index, item in enumerate(proposal["tasks"]):
+        task = tasks_by_plan_index[plan_index]
+        try:
+            replace_dependencies(db, task, [tasks_by_plan_index[index].id for index in item.get("depends_on", [])])
+        except ValueError as error:
+            raise HTTPException(422, f"Invalid plan task prerequisites: {error}") from error
+    if tasks and tasks[0].assignee_id:
+        sync_agent_task_pointers(db, tasks[0], None)
+    plan.status = "approved"
+    plan.reviewed_by = user.id
+    plan.reviewed_at = now_utc
+    plan.project_id = project.id
+    message.status = "planned"
+    log(db, user.organization_id, user.id, "project", project.id, "created_from_inbound_plan", plan_id=plan.id, source_message_id=message.id)
+    for task in tasks:
+        log(db, user.organization_id, user.id, "task", task.id, "created_from_inbound_plan", plan_id=plan.id, priority=task.priority)
+    log(db, user.organization_id, user.id, "inbound_plan", plan.id, "approved", project_id=project.id, source_message_id=message.id)
+    db.commit()
+    return {"plan": inbound_plan_out(plan), "project": project_out(project, db),
+            "tasks": [task_out(task, db) for task in tasks]}
+
+
+@app.post("/api/inbound-plans/{plan_id}/reject")
+def reject_inbound_plan(
+    plan_id: str, user: User = Depends(current_user), db: Session = Depends(get_db),
+):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must review a request plan")
+    plan = db.scalar(select(InboundPlan).where(
+        InboundPlan.id == plan_id, InboundPlan.organization_id == user.organization_id,
+    ).with_for_update())
+    if not plan:
+        raise HTTPException(404, "Request plan not found")
+    if plan.status != "pending":
+        raise HTTPException(409, "Only a pending plan can be rejected")
+    plan.status = "rejected"
+    plan.reviewed_by = user.id
+    plan.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    log(db, user.organization_id, user.id, "inbound_plan", plan.id, "rejected", source_message_id=plan.inbound_message_id)
+    db.commit()
+    return inbound_plan_out(plan)
+
 # Housekeeping that belongs in the audit log, not the team's activity feed.
 FEED_EXCLUDED_ACTIONS = ("logged_in", "read", "password_reset_requested")
 @app.get("/api/activity")
@@ -803,12 +1293,15 @@ def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(ge
         ensure_project(db, user, data.project_id)
     try:
         with audit_context("copilot", user.id, user.id):
-            result = CopilotService().plan(data.message, WorkspaceTools(db, user, scope_project_id=data.project_id))
+            result = CopilotService(db, user.organization_id).plan(data.message, WorkspaceTools(db, user, scope_project_id=data.project_id))
             _issue_result_confirmations(result, user, db)
             audit(db,user.organization_id,user.id,"copilot",user.id,"planned")
         _record_ai_usage(db, user.organization_id)
         db.commit()
         return result
+    except OpenRouterRateLimitExceeded as error:
+        db.rollback()
+        raise HTTPException(429, "AI provider request limit reached for this workspace. Try again in a minute.", headers={"Retry-After": "60"}) from error
     except CopilotProviderError as error:
         raise HTTPException(503, "The configured AI provider is unavailable. Try again later.") from error
     except (ValueError, IntegrityError) as error:
@@ -924,6 +1417,12 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
         raise HTTPException(400, "Unsupported action")
     if user.role not in TOOL_ROLES.get(tool, frozenset()):
         raise HTTPException(403, "Your role cannot perform this Copilot action.")
+    proposal_hash = hashlib.sha256(data.confirmation_token.encode()).hexdigest()
+    linked_proposal = db.scalar(select(CopilotConfirmation).where(
+        CopilotConfirmation.token_hash == proposal_hash,
+        CopilotConfirmation.organization_id == user.organization_id,
+        CopilotConfirmation.task_id.is_not(None),
+    ))
     confirmation_state = _consume_confirmation_once(
         data.confirmation_token, proposer_agent_id or user.id, user.organization_id, tool, db
     )
@@ -946,5 +1445,61 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
             tool=tool, args=jsonable_encoder(args), before=jsonable_encoder(before),
             after=jsonable_encoder(result) if isinstance(result, dict) else None,
             proposed_by_agent_id=proposer_agent_id)
+    if linked_proposal and linked_proposal.task_id:
+        linked_task = db.get(Task, linked_proposal.task_id)
+        if linked_task and linked_task.status == "review":
+            linked_task.status = "in_progress"
+            linked_task.blocked_reason = None
+            db.add(Comment(task_id=linked_task.id, author_id=user.id,
+                           body=f"Approved agent action: {linked_proposal.label or tool}. The agent can continue."))
     db.commit()
     return result
+
+
+@app.get("/api/agent-proposals")
+def list_agent_proposals(user:User=Depends(current_user), db:Session=Depends(get_db)):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must review agent proposals")
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    rows = db.scalars(select(CopilotConfirmation).where(
+        CopilotConfirmation.organization_id == user.organization_id,
+        CopilotConfirmation.task_id.is_not(None), CopilotConfirmation.token_ciphertext.is_not(None),
+        CopilotConfirmation.consumed_at.is_(None), CopilotConfirmation.rejected_at.is_(None),
+        CopilotConfirmation.expires_at >= now,
+    ).order_by(CopilotConfirmation.created_at.desc())).all()
+    result = []
+    for row in rows:
+        task = db.get(Task, row.task_id)
+        agent = db.get(User, row.subject_id)
+        if not task or not agent or task.project_id is None:
+            continue
+        result.append({
+            "id": row.id, "task_id": task.id, "task_title": task.title,
+            "project_id": task.project_id, "agent_name": agent.name,
+            "label": row.label or row.tool, "details": row.details or [],
+            "confirmation_token": secrets_store.decrypt(row.token_ciphertext),
+            "expires_at": row.expires_at,
+        })
+    return result
+
+
+@app.post("/api/agent-proposals/{proposal_id}/reject")
+def reject_agent_proposal(proposal_id:str, user:User=Depends(current_user), db:Session=Depends(get_db)):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must review agent proposals")
+    row = db.scalar(select(CopilotConfirmation).where(
+        CopilotConfirmation.id == proposal_id,
+        CopilotConfirmation.organization_id == user.organization_id,
+        CopilotConfirmation.task_id.is_not(None),
+        CopilotConfirmation.consumed_at.is_(None), CopilotConfirmation.rejected_at.is_(None),
+    ))
+    if not row:
+        raise HTTPException(404, "Pending agent proposal not found")
+    task = db.get(Task, row.task_id)
+    if task and task.status == "review":
+        task.status = "blocked"
+        task.blocked_reason = f"A human rejected the proposed action: {row.label or row.tool}. Review and unblock when ready."
+        db.add(Comment(task_id=task.id, author_id=user.id, body=f"Rejected agent action: {row.label or row.tool}. The task is paused for review."))
+    row.rejected_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    db.commit()
+    return {"ok": True}

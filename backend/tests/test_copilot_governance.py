@@ -55,8 +55,8 @@ def _issue(token: str, issuer: User, db) -> None:
 
 
 def test_tool_specs_hide_admin_only_write_tools_from_members():
-    assert allowed_write_tools("admin") == {"create_task", "update_task", "add_comment", "create_project", "update_project", "create_team", "delegate_task"}
-    assert allowed_write_tools("member") == {"create_task", "update_task", "add_comment", "create_project", "update_project"}
+    assert allowed_write_tools("admin") == {"create_task", "update_task", "add_comment", "create_project", "update_project", "create_team", "delegate_task", "repo_propose_patch"}
+    assert allowed_write_tools("member") == {"create_task", "update_task", "add_comment", "create_project", "update_project", "repo_propose_patch"}
     assert "create_team" not in {spec["name"] for spec in anthropic_tool_specs("member")}
     assert "create_team" in {spec["name"] for spec in anthropic_tool_specs("admin")}
     assert "create_team" not in {spec["function"]["name"] for spec in openai_tool_specs("member")}
@@ -298,7 +298,8 @@ def test_workspace_tools_scoped_to_a_project_only_see_that_projects_data():
         unscoped = WorkspaceTools(db, admin)
         all_projects = unscoped.get_projects()
         assert len(all_projects) > 1
-        target = all_projects[0]
+        all_tasks = unscoped.get_tasks()
+        target = next(project for project in all_projects if any(task["project_id"] == project["id"] for task in all_tasks))
 
         scoped = WorkspaceTools(db, admin, scope_project_id=target["id"])
         scoped_projects = scoped.get_projects()
@@ -307,7 +308,7 @@ def test_workspace_tools_scoped_to_a_project_only_see_that_projects_data():
         scoped_tasks = scoped.get_tasks()
         assert all(task["project_id"] == target["id"] for task in scoped_tasks)
         assert scoped_tasks
-        assert len(scoped_tasks) < len(unscoped.get_tasks())
+        assert len(scoped_tasks) < len(all_tasks)
     finally:
         db.close()
 

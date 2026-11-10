@@ -108,15 +108,19 @@ def test_only_one_of_many_concurrent_replicas_wins_the_lock():
 @pytest.fixture
 def throwaway_agent():
     with SessionLocal() as db:
-        org = db.scalar(select(Organization))
+        org = Organization(name="Cooldown test", slug=f"cooldown-{uuid4().hex}")
+        db.add(org)
+        db.flush()
         agent = User(organization_id=org.id, name="Cooldown Probe", email=f"{uuid4().hex}@agents.internal",
                      password_hash="unused", kind="agent", hierarchy_level="worker")
         db.add(agent)
         db.commit()
         agent_id = agent.id
+        org_id = org.id
     yield agent_id
     with SessionLocal() as db:
         db.delete(db.get(User, agent_id))
+        db.delete(db.get(Organization, org_id))
         db.commit()
 
 

@@ -59,7 +59,7 @@ def _cipher() -> MultiFernet:
         if environment == "production":
             raise RuntimeError(
                 "SECRETS_ENCRYPTION_KEY must be set in production -- it encrypts IdP"
-                " client secrets and other recoverable credentials at rest. Generate"
+                " client secrets, Gmail/Slack/Notion tokens, IFM/OpenRouter keys, and other recoverable credentials at rest. Generate"
                 " one with: python -c \"from cryptography.fernet import Fernet;"
                 " print(Fernet.generate_key().decode())\""
             )

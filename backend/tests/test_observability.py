@@ -166,7 +166,7 @@ def test_provider_reads_and_hierarchy_changes_are_audited_without_reenabling():
     with TestClient(app) as c:
         h, data = workspace(c)
         c.patch('/api/hierarchy-config', headers=h, json={'vp_count': 1})
-        agent = c.get('/api/agents', headers=h).json()[0]
+        agent = next(a for a in c.get('/api/agents', headers=h).json() if a['hierarchy_level'] == 'vp')
         c.patch(f"/api/admin/agents/{agent['id']}/execution", headers=h, json={'execution_enabled': False})
         c.patch('/api/hierarchy-config', headers=h, json={'vp_count': 2})
         with SessionLocal() as db:
@@ -282,15 +282,15 @@ def test_admin_settings_are_human_admin_only_and_tenant_scoped():
     with TestClient(app) as c:
         h, data = workspace(c)
         other, _ = workspace(c)
-        assert c.get('/api/admin/settings', headers=h).json() == {'execution_enabled': True}
+        assert c.get('/api/admin/settings', headers=h).json()['execution_enabled'] is True
         for role, kind in [('member', 'human'), ('manager', 'human'), ('admin', 'agent')]:
             _, denied = identity(data['organization']['id'], role, kind)
             assert c.get('/api/admin/settings', headers=denied).status_code == 403
             assert c.patch('/api/admin/settings', headers=denied, json={'execution_enabled': False}).status_code == 403
         assert c.get('/api/admin/settings').status_code == 401
-        assert c.patch('/api/admin/settings', headers=h, json={'execution_enabled': False}).json() == {'execution_enabled': False}
-        assert c.get('/api/admin/settings', headers=h).json() == {'execution_enabled': False}
-        assert c.get('/api/admin/settings', headers=other).json() == {'execution_enabled': True}
+        assert c.patch('/api/admin/settings', headers=h, json={'execution_enabled': False}).json()['execution_enabled'] is False
+        assert c.get('/api/admin/settings', headers=h).json()['execution_enabled'] is False
+        assert c.get('/api/admin/settings', headers=other).json()['execution_enabled'] is True
 
 
 def test_provider_call_records_model_and_token_usage_from_a_tool_calling_turn():
