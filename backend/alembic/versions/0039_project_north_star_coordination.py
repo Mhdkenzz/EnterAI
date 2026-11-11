@@ -113,7 +113,11 @@ def downgrade() -> None:
                     batch.drop_column(name)
         else:
             if "milestone_id" in drop_task_columns:
-                op.drop_constraint("fk_tasks_milestone_id_project_milestones", "tasks", type_="foreignkey")
+                milestone_fk = next((fk for fk in sa.inspect(op.get_bind()).get_foreign_keys("tasks")
+                                     if fk.get("referred_table") == "project_milestones"
+                                     and fk.get("constrained_columns") == ["milestone_id"]), None)
+                if milestone_fk and milestone_fk.get("name"):
+                    op.drop_constraint(milestone_fk["name"], "tasks", type_="foreignkey")
             for name in drop_task_columns:
                 op.drop_column("tasks", name)
 

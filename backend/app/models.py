@@ -157,7 +157,7 @@ class Task(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", name="fk_tasks_project_id_projects"), index=True)
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
-    milestone_id: Mapped[str | None] = mapped_column(ForeignKey("project_milestones.id", ondelete="SET NULL"), nullable=True, index=True)
+    milestone_id: Mapped[str | None] = mapped_column(ForeignKey("project_milestones.id", name="fk_tasks_milestone_id_project_milestones", ondelete="SET NULL"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(240))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="todo")
