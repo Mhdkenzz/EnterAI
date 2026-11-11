@@ -30,7 +30,7 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.orm import Session
 
 from .auth import hash_password
-from .models import (Activity, AgentMessage, Attachment, AuditEvent, AuthToken, Comment,
+from .models import (Activity, AgentMessage, Attachment, AuditEvent, AuthToken, Comment, Decision,
                      DocumentChunk, ExecutionRun, HierarchyConfig, Invite, Notification,
                      Organization, Project, ProjectDocument, ProviderCall, Task, Team, User)
 from .privacy_models import DeletionRequest, RetentionPolicy
@@ -68,6 +68,7 @@ def export_user_data(db: Session, user: User) -> dict:
     or were assigned. Never includes other users' data, even within the same org."""
     tasks = db.scalars(select(Task).where((Task.assignee_id == user.id) | (Task.reporter_id == user.id))).all()
     comments = db.scalars(select(Comment).where(Comment.author_id == user.id)).all()
+    decisions = db.scalars(select(Decision).where(Decision.created_by == user.id)).all()
     documents = db.scalars(select(ProjectDocument).where(ProjectDocument.uploaded_by == user.id)).all()
     messages = db.scalars(select(AgentMessage).where(AgentMessage.author_id == user.id)).all()
     audit_events = db.scalars(select(AuditEvent).where(AuditEvent.actor_id == user.id)).all()
@@ -79,6 +80,9 @@ def export_user_data(db: Session, user: User) -> dict:
                    "created_at": t.created_at.isoformat()} for t in tasks],
         "comments": [{"id": c.id, "task_id": c.task_id, "body": c.body,
                       "created_at": c.created_at.isoformat()} for c in comments],
+        "decisions": [{"id": d.id, "project_id": d.project_id, "task_id": d.task_id,
+                       "title": d.title, "body": d.body,
+                       "created_at": d.created_at.isoformat()} for d in decisions],
         "documents": [{"id": d.id, "file_name": d.file_name, "project_id": d.project_id,
                        "created_at": d.created_at.isoformat()} for d in documents],
         "agent_messages": [{"id": m.id, "agent_id": m.agent_id, "body": m.body,
@@ -100,6 +104,7 @@ def export_organization_data(db: Session, organization_id: str) -> dict:
     project_ids = [p.id for p in projects]
     tasks = db.scalars(select(Task).where(Task.project_id.in_(project_ids))).all() if project_ids else []
     documents = db.scalars(select(ProjectDocument).where(ProjectDocument.organization_id == organization_id)).all()
+    decisions = db.scalars(select(Decision).where(Decision.organization_id == organization_id)).all()
     audit_events = db.scalars(select(AuditEvent).where(AuditEvent.organization_id == organization_id)).all()
     return {
         "organization": {"id": org.id, "name": org.name, "slug": org.slug,
@@ -111,6 +116,8 @@ def export_organization_data(db: Session, organization_id: str) -> dict:
         "tasks": [{"id": t.id, "project_id": t.project_id, "title": t.title, "status": t.status,
                    "assignee_id": t.assignee_id} for t in tasks],
         "documents": [{"id": d.id, "file_name": d.file_name, "project_id": d.project_id} for d in documents],
+        "decisions": [{"id": d.id, "project_id": d.project_id, "task_id": d.task_id,
+                       "title": d.title, "body": d.body} for d in decisions],
         "audit_events": [{"id": a.id, "action": a.action, "entity_type": a.entity_type,
                           "entity_id": a.entity_id, "created_at": a.created_at.isoformat()} for a in audit_events],
     }
@@ -172,6 +179,7 @@ def delete_organization_data(db: Session, organization_id: str) -> None:
     db.flush()
 
     # Leaves first.
+    db.execute(delete(Decision).where(Decision.organization_id == organization_id))
     if task_ids:
         db.execute(delete(Comment).where(Comment.task_id.in_(task_ids)))
         db.execute(delete(Attachment).where(Attachment.task_id.in_(task_ids)))
@@ -389,8 +397,15 @@ def start_background_loop() -> None:
         _background_task = asyncio.ensure_future(_loop())
 
 
-def stop_background_loop() -> None:
+async def stop_background_loop() -> None:
     global _background_task
-    if _background_task is not None:
-        _background_task.cancel()
-        _background_task = None
+    task = _background_task
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        return
+    _background_task = None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

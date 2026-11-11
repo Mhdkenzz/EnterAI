@@ -38,20 +38,23 @@ OpenRouterRateLimitExceeded = AIProviderRateLimitExceeded
 
 class SlidingWindowRateLimiter:
     def __init__(self, max_calls: int, window_seconds: float):
+        from threading import Lock
         self.max_calls = max_calls
         self.window_seconds = window_seconds
         self._hits: dict[str, list[float]] = defaultdict(list)
+        self._lock = Lock()
 
     def allow(self, key: str, now: float | None = None) -> bool:
-        now = time.monotonic() if now is None else now
-        hits = self._hits[key]
-        cutoff = now - self.window_seconds
-        while hits and hits[0] < cutoff:
-            hits.pop(0)
-        if len(hits) >= self.max_calls:
-            return False
-        hits.append(now)
-        return True
+        with self._lock:
+            now = time.monotonic() if now is None else now
+            hits = self._hits[key]
+            cutoff = now - self.window_seconds
+            while hits and hits[0] < cutoff:
+                hits.pop(0)
+            if len(hits) >= self.max_calls:
+                return False
+            hits.append(now)
+            return True
 
 
 # One atomic round trip: trim the window, count what survives, and only then record

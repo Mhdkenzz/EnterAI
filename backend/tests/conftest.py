@@ -18,6 +18,7 @@ os.environ.setdefault("AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE", "100000")
 os.environ.setdefault("AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE", "100000")
 os.environ.setdefault("AUTH_TOKEN_RATE_LIMIT_PER_MINUTE", "100000")
 os.environ.setdefault("AUTH_ACCOUNT_FAILURES_PER_15_MIN", "100000")
+os.environ.setdefault("JWT_SECRET", "enterai-isolated-test-signing-key-2026")
 
 import re
 
@@ -61,3 +62,11 @@ def pytest_configure(config):
         alembic_cfg.set_main_option("script_location", script_location)
         alembic_cfg.set_main_option("sqlalchemy.url", DATABASE_URL)
         command.upgrade(alembic_cfg, "head")
+        # Initialize the same demo workspace a fresh development app gets at
+        # startup. Some legacy integration tests authenticate as that admin;
+        # if a custom-organization test runs first, the app's normal seed guard
+        # sees an organization and correctly declines to create the demo tenant.
+        from app.database import SessionLocal
+        from app.services import seed
+        with SessionLocal() as db:
+            seed(db)

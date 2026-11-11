@@ -1,4 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "./fixtures";
 import { signIn } from "./session";
 
 const API = process.env.E2E_API_URL || "http://127.0.0.1:8000/api";
@@ -24,7 +25,13 @@ test("views have real URLs: deep links, refresh and Back all work", async ({ pag
   const { project, task } = await workspace(page);
   await page.goto(`/projects/${project.id}?task=${task.id}`);
   await expect(page.getByRole("heading", { name: project.name })).toBeVisible();
-  await expect(page.getByRole("dialog", { name: "Task: Draft the plan" })).toBeVisible();
+  const drawer = page.getByRole("dialog", { name: "Task: Draft the plan" });
+  await expect(drawer).toBeVisible();
+  const accountability = drawer.getByRole("region", { name: "Ownership and accountability" });
+  await expect(accountability.getByText("Requested by")).toBeVisible();
+  await expect(accountability.getByText("Current owner")).toBeVisible();
+  await expect(accountability.getByText("Owner · human").first()).toBeVisible();
+  await expect(drawer.getByLabel("Assignee").locator("option[value='']")).toHaveCount(0);
 
   await page.keyboard.press("Escape");
   await expect(page).toHaveURL(new RegExp(`/projects/${project.id}$`));
@@ -46,7 +53,10 @@ test("cards move between columns by drag and drop and by the keyboard buttons", 
   const { project } = await workspace(page);
   await page.goto(`/projects/${project.id}`);
   const card = page.getByRole("article").filter({ hasText: "Draft the plan" });
-  await card.dragTo(page.getByRole("region", { name: "review" }));
+  // Adjacent columns fit together in the horizontally scrollable board.
+  await card.dragTo(page.getByRole("region", { name: "in progress" }));
+  await expect(page.getByRole("region", { name: "in progress" }).getByText("Draft the plan")).toBeVisible();
+  await page.getByRole("button", { name: "Advance Draft the plan" }).click();
   await expect(page.getByRole("region", { name: "review" }).getByText("Draft the plan")).toBeVisible();
   await page.getByRole("button", { name: "Move back Draft the plan" }).click();
   await expect(page.getByRole("region", { name: "in progress" }).getByText("Draft the plan")).toBeVisible();

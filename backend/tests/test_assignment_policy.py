@@ -4,8 +4,8 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from app.database import Base
-from app.main import WRITE_TOOL_HANDLERS
-from app.models import Organization, User, Project, Task
+from app.main import WRITE_TOOL_HANDLERS, TaskUpdate, task_accountability, update_task
+from app.models import AuditEvent, Organization, User, Project, Task
 
 
 @pytest.fixture
@@ -71,6 +71,21 @@ def test_human_admin_can_assign_agent(workspace, tool):
     assert result["assignee"]["id"] == agent.id
 
 
+def test_assigning_additional_work_does_not_preempt_an_active_agent_task(workspace):
+    db, people, agent, project, task = workspace
+    task.assignee_id = agent.id
+    task.status = "in_progress"
+    agent.current_task_id = task.id
+    queued = Task(project_id=project.id, title="Queued task")
+    db.add(queued)
+    db.commit()
+    WRITE_TOOL_HANDLERS["update_task"]({"task_id": queued.id, "assignee_id": agent.id}, people["admin"], db)
+    db.refresh(agent)
+    db.refresh(queued)
+    assert queued.assignee_id == agent.id
+    assert agent.current_task_id == task.id
+
+
 def test_member_can_assign_human_and_edit_agent_task_without_reassignment(workspace):
     db, people, agent, _, task = workspace
     result = WRITE_TOOL_HANDLERS["update_task"](
@@ -85,15 +100,97 @@ def test_member_can_assign_human_and_edit_agent_task_without_reassignment(worksp
     assert result["assignee"]["id"] == agent.id
 
 
-@pytest.mark.parametrize("replacement", ["clear", "human"])
-def test_admin_can_remove_agent_assignment(workspace, replacement):
+def test_admin_cannot_remove_the_only_task_owner(workspace):
     db, people, agent, _, task = workspace
     task.assignee_id = agent.id
     agent.current_task_id = task.id
     db.commit()
-    target = None if replacement == "clear" else people["member"].id
-    WRITE_TOOL_HANDLERS["update_task"](
-        {"task_id": task.id, "assignee_id": target}, people["admin"], db)
+    with pytest.raises(HTTPException) as exc:
+        WRITE_TOOL_HANDLERS["update_task"](
+            {"task_id": task.id, "assignee_id": None}, people["admin"], db)
+    assert exc.value.status_code == 422
     db.refresh(task); db.refresh(agent)
-    assert task.assignee_id == target
-    assert agent.current_task_id is None
+    assert task.assignee_id == agent.id
+    assert agent.current_task_id == task.id
+
+
+def test_agent_cannot_start_a_second_task_while_one_is_active(workspace):
+    db, people, agent, project, task = workspace
+    task.assignee_id = agent.id
+    task.status = "in_progress"
+    active = Task(project_id=project.id, title="Active task", assignee_id=agent.id, status="in_progress")
+    queued = Task(project_id=project.id, title="Queued task", assignee_id=agent.id, status="todo")
+    db.add_all([active, queued]); db.commit()
+    with pytest.raises(HTTPException) as exc:
+        WRITE_TOOL_HANDLERS["update_task"](
+            {"task_id": queued.id, "status": "in_progress"}, people["admin"], db)
+    assert exc.value.status_code == 409
+    db.refresh(queued)
+    assert queued.status == "todo"
+
+
+def test_active_agent_task_cannot_be_reassigned_mid_execution(workspace):
+    db, people, agent, _, task = workspace
+    task.assignee_id = agent.id
+    task.status = "in_progress"
+    agent.current_task_id = task.id
+    db.commit()
+    with pytest.raises(HTTPException) as exc:
+        WRITE_TOOL_HANDLERS["update_task"](
+            {"task_id": task.id, "assignee_id": people["member"].id}, people["admin"], db)
+    assert exc.value.status_code == 409
+    db.refresh(task)
+    assert task.assignee_id == agent.id
+
+
+def test_repeated_agent_assignment_is_idempotent(workspace):
+    db, people, agent, _, task = workspace
+    WRITE_TOOL_HANDLERS["delegate_task"](
+        {"task_id": task.id, "agent_id": agent.id}, people["admin"], db)
+    before = len(db.scalars(select(AuditEvent).where(
+        AuditEvent.entity_type == "task", AuditEvent.entity_id == task.id,
+    )).all())
+    WRITE_TOOL_HANDLERS["delegate_task"](
+        {"task_id": task.id, "agent_id": agent.id}, people["admin"], db)
+    after = len(db.scalars(select(AuditEvent).where(
+        AuditEvent.entity_type == "task", AuditEvent.entity_id == task.id,
+    )).all())
+    assert after == before
+
+
+def test_task_accountability_tracks_requester_owner_assignment_execution_and_review(workspace):
+    db, people, _, _, task = workspace
+    requester, owner = people["member"], people["manager"]
+    task.reporter_id = requester.id
+    task.assignee_id = requester.id
+    db.commit()
+    update_task(task.id, TaskUpdate(assignee_id=owner.id), people["admin"], db)
+    update_task(task.id, TaskUpdate(status="in_progress"), owner, db)
+    update_task(task.id, TaskUpdate(status="review"), owner, db)
+
+    result = task_accountability(task.id, people["admin"], db)
+    assert result["requested_by"]["id"] == requester.id
+    assert result["owner"]["id"] == owner.id
+    assert result["assigned_by"]["id"] == people["admin"].id
+    assert result["executed_by"]["id"] == owner.id
+    assert result["reviewed_by"]["id"] == owner.id
+    assert result["approved_by"] is None
+    assert {event["action"] for event in result["events"]} >= {
+        "task_reassigned", "task_started", "task_reviewed",
+    }
+
+
+def test_worker_accountability_is_limited_to_its_assigned_task(workspace):
+    db, people, _, project, task = workspace
+    worker = User(organization_id=people["admin"].organization_id, name="Worker", email="worker@local.test",
+                  password_hash="unused", role="member", kind="agent", hierarchy_level="worker", active=True)
+    db.add(worker)
+    db.flush()
+    task.assignee_id = worker.id
+    other = Task(project_id=project.id, title="Private to another owner", assignee_id=people["member"].id)
+    db.add(other)
+    db.commit()
+    assert task_accountability(task.id, worker, db)["owner"]["id"] == worker.id
+    with pytest.raises(HTTPException) as exc:
+        task_accountability(other.id, worker, db)
+    assert exc.value.status_code == 404

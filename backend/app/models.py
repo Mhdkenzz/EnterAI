@@ -110,6 +110,26 @@ class ProjectDocument(Base):
     extracted_text: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
+
+class AgentAccessGrant(Base):
+    """Explicit, revocable least-privilege access for one agent."""
+    __tablename__ = "agent_access_grants"
+    __table_args__ = (
+        UniqueConstraint("organization_id", "agent_id", "resource_type", "resource_id", "permission", name="uq_agent_access_grant"),
+        Index("ix_agent_access_grants_org_agent", "organization_id", "agent_id"),
+    )
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    resource_type: Mapped[str] = mapped_column(String(20))  # project | document | tool
+    resource_id: Mapped[str] = mapped_column(String(255))
+    permission: Mapped[str] = mapped_column(String(20))  # read | write | use
+    granted_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    revoked_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+
 class Task(Base):
     __tablename__ = "tasks"
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
@@ -145,6 +165,20 @@ class Comment(Base):
     author_id: Mapped[str] = mapped_column(ForeignKey("users.id"))
     body: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+class Decision(Base):
+    """A durable, explicitly recorded project decision linked to its source discussion."""
+    __tablename__ = "decisions"
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), nullable=True, index=True)
+    source_comment_id: Mapped[str | None] = mapped_column(ForeignKey("comments.id", ondelete="SET NULL"), nullable=True)
+    title: Mapped[str] = mapped_column(String(240))
+    body: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now, index=True)
+    __table_args__ = (UniqueConstraint("source_comment_id", name="uq_decisions_source_comment_id"),)
 
 class Attachment(Base):
     __tablename__ = "attachments"

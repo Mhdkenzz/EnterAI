@@ -53,7 +53,10 @@ def replace_dependencies(db: Session, task: Task, dependency_ids: list[str]) -> 
                 visited.add(current)
                 pending.extend(graph.get(current, ()))
 
+    wanted = set(dependency_ids)
+    existing = {row.depends_on_task_id for row in rows}
     for row in rows:
-        db.delete(row)
-    for dependency_id in dependency_ids:
+        if row.depends_on_task_id not in wanted:
+            db.delete(row)
+    for dependency_id in wanted - existing:
         db.add(TaskDependency(task_id=task.id, depends_on_task_id=dependency_id))

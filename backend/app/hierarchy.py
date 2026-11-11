@@ -23,7 +23,8 @@ from sqlalchemy.orm import Session
 
 from .auth import hash_password
 from .observability import audit
-from .models import HierarchyConfig, Task, User
+from .models import HierarchyConfig, Notification, Project, Task, User
+from .services import log
 
 LEVEL_TITLES = {
     "ceo": "Chief Executive Officer",
@@ -62,18 +63,41 @@ def _create_agent(db: Session, org_id: str, level: str, parent_id: str | None, n
 
 
 def retire_agent(db: Session, agent: User, actor_id: str | None = None) -> None:
-    """Retire a single agent in place. Its row, its AgentMessage history, and every
-    Task it was ever the assignee of (including completed ones -- assignee_id is the
-    durable historical record, see sync_agent_task_pointers) are left untouched.
-    The only thing cleared is a live in-progress assignment, since a retired agent
-    can no longer be the one doing that work."""
+    """Retire the identity and hand all unfinished owned work to an active human."""
     if agent.retired_at is not None:
         return
-    if agent.current_task_id:
-        current = db.get(Task, agent.current_task_id)
-        if current:
-            current.assignee_id = None
-        agent.current_task_id = None
+    tasks = db.scalars(select(Task).where(
+        Task.assignee_id == agent.id, Task.status != "done",
+    )).all()
+    for task in tasks:
+        project = db.get(Project, task.project_id)
+        reporter = db.get(User, task.reporter_id) if task.reporter_id else None
+        project_owner = db.get(User, project.owner_id) if project and project.owner_id else None
+        human_owner = next((person for person in (reporter, project_owner)
+                            if person and person.kind == "human" and person.active
+                            and person.organization_id == agent.organization_id), None)
+        if human_owner is None:
+            human_owner = db.scalar(select(User).where(
+                User.organization_id == agent.organization_id, User.kind == "human",
+                User.role == "admin", User.active.is_(True),
+            ).order_by(User.created_at, User.id).limit(1))
+        if human_owner is None:
+            # Preserve the durable assignee rather than erase the only known owner.
+            continue
+        task.assignee_id = human_owner.id
+        if task.status == "in_progress":
+            task.status = "blocked"
+            task.blocked_reason = "The assigned agent was retired. A human needs to review the current state before work resumes."
+        log(db, agent.organization_id, actor_id, "task", task.id, "task_reassigned",
+            from_assignee_id=agent.id, to_assignee_id=human_owner.id,
+            assignment_reason="agent_retired")
+        db.add(Notification(
+            user_id=human_owner.id,
+            title=f"Work reassigned after {agent.name} was retired: {task.title}"[:220],
+            body=task.blocked_reason if task.status == "blocked" else "This task now needs your ownership.",
+            href=f"project:{task.project_id}",
+        ))
+    agent.current_task_id = None
     agent.retired_at = datetime.utcnow()
     agent.execution_enabled = False
     audit(db, agent.organization_id, actor_id, "agent", agent.id, "retired")

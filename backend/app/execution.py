@@ -22,6 +22,7 @@ import contextlib
 import hashlib
 import os
 import zlib
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import jwt
@@ -170,7 +171,7 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
     if not task:
         # The task was deleted or unassigned since the agent list was read.
         return
-    tools = WorkspaceTools(db, agent, scope_project_id=task.project_id)
+    tools = WorkspaceTools(db, agent, scope_project_id=task.project_id, scope_task_id=task.id)
     if task.status in {"todo", "backlog"}:
         task.status = "in_progress"
         log(db, agent.organization_id, agent.id, "task", task.id, "agent_started")
@@ -181,7 +182,31 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
         # The workspace cap is a pause, not an agent failure. The next tick can
         # resume once the rolling minute window has room again.
         return
-    except CopilotProviderError:
+    except CopilotProviderError as error:
+        from .copilot import AgentAccessDenied
+        if isinstance(error, AgentAccessDenied):
+            reason = "This task is blocked because the agent needs additional access to continue. A workspace administrator must review and grant the specific tool or resource permission."
+            task.status = "blocked"
+            task.blocked_reason = reason
+            task.updated_at = datetime.utcnow()
+            if agent.current_task_id == task.id:
+                agent.current_task_id = None
+            db.add(Comment(task_id=task.id, author_id=agent.id, body=reason))
+            recipients = db.scalars(select(User).where(
+                User.organization_id == agent.organization_id, User.kind == "human",
+                User.role == "admin", User.active.is_(True),
+            )).all()
+            if task.reporter_id:
+                reporter = db.get(User, task.reporter_id)
+                if reporter and reporter.kind == "human" and reporter.active and reporter.organization_id == agent.organization_id:
+                    recipients = list(recipients) + [reporter]
+            for recipient in {person.id: person for person in recipients}.values():
+                db.add(Notification(user_id=recipient.id, title=f"Agent needs access: {task.title}"[:220], body=reason, href=f"project:{task.project_id}"))
+            agent.consecutive_task_failures = 0
+            agent.last_execution_at = datetime.utcnow()
+            log(db, agent.organization_id, agent.id, "task", task.id, "agent_blocked", cause="access_denied")
+            db.commit()
+            return
         agent.consecutive_task_failures += 1
         # Naive UTC, matching every other timestamp in this schema. An aware value
         # written to a TIMESTAMP WITHOUT TIME ZONE column is converted to the
@@ -194,6 +219,8 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
             _block_after_repeated_failures(db, agent, task, reason, cause="provider_failures")
         db.commit()
         return
+
+    result.setdefault("sources", tools.used_sources[:20])
 
     outcome = result.get("outcome")
     made_progress = bool(
@@ -247,20 +274,30 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
 def _summarize(result: dict) -> str | None:
     outcome, text, notes, action = result["outcome"], result.get("text"), result["progress_notes"], result["action"]
     if outcome == "completed":
-        return text or "Marked my current task complete."
-    if outcome == "proposed":
-        return text or f"I can {action['label'][0].lower()}{action['label'][1:]} once you confirm."
-    if outcome == "narrated":
-        return text
-    if outcome == "blocked":
-        return text or "I need help before I can continue this task."
-    if notes:
-        return "Progress: " + " ".join(notes)
-    return None
+        summary = text or "Marked my current task complete."
+    elif outcome == "proposed":
+        summary = text or f"I can {action['label'][0].lower()}{action['label'][1:]} once you confirm."
+    elif outcome == "narrated":
+        summary = text
+    elif outcome == "blocked":
+        summary = text or "I need help before I can continue this task."
+    elif notes:
+        summary = "Progress: " + " ".join(notes)
+    else:
+        summary = None
+    sources = result.get("sources") or []
+    if summary and sources:
+        lines = [
+            f"- {source.get('title') or source.get('type') or 'Source'} ({source.get('created_at') or 'date unavailable'}): {source.get('source_ref')}"
+            for source in sources[:8] if source.get("source_ref")
+        ]
+        if lines:
+            summary += "\n\nSources used:\n" + "\n".join(lines)
+    return summary
 
 
 def run_execution_tick(db: Session | None = None, service: CopilotService | None = None,
-                       cooldown_seconds: float | None = None) -> int:
+                       cooldown_seconds: float | None = None, *, only_agent_id: str | None = None) -> int:
     """Runs one autonomous-execution pass over every eligible agent. Returns how many
     agents were actually stepped (0 if the configured provider can't tool-call).
 
@@ -277,6 +314,8 @@ def run_execution_tick(db: Session | None = None, service: CopilotService | None
         if injected_service is not None and service.mode != "tool_calling":
             return 0
         for agent in _eligible_agents(db):
+            if only_agent_id is not None and agent.id != only_agent_id:
+                continue
             agent_service = injected_service or CopilotService(db, agent.organization_id)
             if agent_service.mode != "tool_calling":
                 continue
@@ -316,6 +355,16 @@ def run_execution_tick(db: Session | None = None, service: CopilotService | None
                     except Exception as error:
                         db.rollback()
                         scheduler_failure(bind, org_id, agent_id, error)
+                        # Unexpected failures must also trip the circuit breaker;
+                        # otherwise the UI says working while the scheduler retries forever.
+                        failed_agent = db.get(User, agent_id)
+                        failed_task = db.get(Task, failed_agent.current_task_id) if failed_agent and failed_agent.current_task_id else None
+                        if failed_agent and failed_task and failed_task.assignee_id == failed_agent.id and failed_task.status not in {"done", "blocked", "review"}:
+                            failed_agent.consecutive_task_failures += 1
+                            failed_agent.last_execution_at = datetime.utcnow()
+                            if failed_agent.consecutive_task_failures >= MAX_CONSECUTIVE_FAILURES:
+                                _block_after_repeated_failures(db, failed_agent, failed_task, "Agent execution failed repeatedly; a workspace admin needs to review this task and retry or reassign it.", cause="execution_errors")
+                            db.commit()
                 stepped += 1
         return stepped
     finally:
@@ -323,10 +372,22 @@ def run_execution_tick(db: Session | None = None, service: CopilotService | None
             db.close()
 
 
+def _run_background_tick() -> int:
+    """Run different agents concurrently with independent sessions and existing locks."""
+    with SessionLocal() as db:
+        agent_ids = [agent.id for agent in _eligible_agents(db)]
+    if not agent_ids:
+        return 0
+    # A small, fixed cap keeps provider and database load bounded. Each agent is
+    # submitted once; PostgreSQL's per-agent advisory lock still coordinates replicas.
+    with ThreadPoolExecutor(max_workers=min(3, len(agent_ids))) as pool:
+        return sum(pool.map(lambda agent_id: run_execution_tick(only_agent_id=agent_id), agent_ids))
+
+
 async def _loop() -> None:
     while True:
         try:
-            await asyncio.to_thread(run_execution_tick)
+            await asyncio.to_thread(_run_background_tick)
         except Exception:
             scheduler_failure(engine)  # No tenant/agent is known for a global tick failure.
         await asyncio.sleep(TICK_INTERVAL_SECONDS)
@@ -352,8 +413,15 @@ def start_background_loop() -> None:
         _background_task = asyncio.ensure_future(_loop())
 
 
-def stop_background_loop() -> None:
+async def stop_background_loop() -> None:
     global _background_task
-    if _background_task is not None:
-        _background_task.cancel()
-        _background_task = None
+    task = _background_task
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        return
+    _background_task = None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

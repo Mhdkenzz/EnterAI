@@ -49,7 +49,8 @@ def test_kill_switch_blocks_chat_confirmation_runtime_and_stale_inflight():
             with pytest.raises(CopilotProviderError):
                 service.run_execution_step(WorkspaceTools(db, agent), task_row)
             assert service.provider.calls == 0
-            assert run_execution_tick(db, service) == 0
+            # Other tests may leave unrelated organizations with queued work.
+            assert run_execution_tick(db, service, only_agent_id=agent_id) == 0
             c.patch(f'/api/admin/agents/{agent_id}/execution', headers=h, json={'execution_enabled': True})
             class StopDuringCall(_ScriptedProvider):
                 def respond(self, *args, **kwargs):

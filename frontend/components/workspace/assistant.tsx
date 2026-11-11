@@ -1,11 +1,82 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Bot, Check, Circle, FolderKanban, Loader2, Search, Send, Sparkles, X } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, API_BASE } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import type { Project, Task, Action } from "@/lib/types";
+import { routeToUrl } from "@/lib/routes";
+
+type SearchKind = "projects" | "tasks" | "documents" | "attachments" | "discussions" | "decisions";
+type SearchItem = {
+  id: string;
+  title?: string;
+  name?: string;
+  file_name?: string;
+  snippet?: string;
+  created_at?: string | null;
+  project_id?: string | null;
+  task_id?: string | null;
+  source_ref?: string | null;
+  [key: string]: unknown;
+};
+type SearchResponse = Partial<Record<SearchKind, SearchItem[]>>;
+type AgentSource = {
+  id: string;
+  type: string;
+  title: string;
+  created_at?: string | null;
+  source_ref?: string | null;
+  project_id?: string | null;
+  task_id?: string | null;
+};
+
+const SEARCH_GROUPS: { key: SearchKind; label: string }[] = [
+  { key: "projects", label: "Projects" },
+  { key: "tasks", label: "Tasks" },
+  { key: "documents", label: "Files" },
+  { key: "attachments", label: "Attachments" },
+  { key: "discussions", label: "Discussions" },
+  { key: "decisions", label: "Decisions" },
+];
+
+function displayDate(value?: string | null) {
+  if (!value) return "Date unavailable";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Date unavailable" : date.toLocaleString();
+}
+
+function safeSourceHref(source: { source_ref?: string | null; project_id?: string | null; task_id?: string | null }) {
+  if (source.source_ref?.startsWith("/api/") && !source.source_ref.startsWith("//")) {
+    return `${API_BASE}${source.source_ref.slice(4)}`;
+  }
+  if (source.source_ref?.startsWith("/") && !source.source_ref.startsWith("//")) return source.source_ref;
+  if (source.task_id && source.project_id) return routeToUrl({ view: "Project", projectId: source.project_id, taskId: source.task_id });
+  if (source.project_id) return routeToUrl({ view: "Project", projectId: source.project_id });
+  return undefined;
+}
+
+function SourceList({ sources }: { sources?: AgentSource[] }) {
+  if (!sources?.length) return null;
+  return (
+    <section className="mt-4 border-t border-line pt-3" aria-label="Sources used for this answer">
+      <h3 className="text-xs font-semibold text-slate-600">Sources</h3>
+      <ul className="mt-2 space-y-1.5">
+        {sources.map((source, index) => {
+          const href = safeSourceHref(source);
+          return (
+            <li key={`${source.type}:${source.id}:${index}`} className="text-xs leading-5 text-slate-600">
+              {href ? <a className="font-medium text-blue-700 underline-offset-2 hover:underline" href={href}>{source.title}</a> : <span className="font-medium text-ink">{source.title}</span>}
+              <span className="ml-1 text-slate-500">· {source.type} · <time dateTime={source.created_at || undefined}>{displayDate(source.created_at)}</time></span>
+              {source.source_ref && <span className="ml-1 break-all text-slate-500">· {source.source_ref}</span>}
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
 
 export const AI_GREETING = {
   role: "assistant",
@@ -30,7 +101,7 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
         method: "POST",
         body: JSON.stringify({ message: question, project_id: project?.id || null }),
       });
-      setMessages((x: any[]) => [...x, { role: "assistant", body: r.reply, actions: r.actions }]);
+      setMessages((x: any[]) => [...x, { role: "assistant", body: r.reply, actions: r.actions, sources: r.sources || [] }]);
     } catch (e: any) {
       setError(e.message || "Enter AI could not answer right now.");
     } finally {
@@ -99,6 +170,7 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
                 )}
               >
                 <p>{m.body}</p>
+                <SourceList sources={m.sources} />
                 {m.actions?.map((a: Action) => {
                   const outcome = outcomes[a.confirmation_token];
                   return (
@@ -189,57 +261,179 @@ export function AI({ project, clear, onAction, messages, setMessages }: any) {
     </div>
   );
 }
-export function Command({ projects, close, open, ai }: any) {
+export function Command({ projects, close, open, openTask, ai }: {
+  projects: Project[];
+  close: () => void;
+  open: (project: SearchItem | Project) => void;
+  openTask?: (task: SearchItem | Task) => void;
+  ai: () => void;
+}) {
   const [q, setQ] = useState(""),
-    [result, setResult] = useState<any>(null);
+    [result, setResult] = useState<SearchResponse | null>(null),
+    [loading, setLoading] = useState(false),
+    [error, setError] = useState(""),
+    [activeIndex, setActiveIndex] = useState(0);
+  const inputId = useId();
+  const listId = useId();
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const searchGroups = useMemo<{ key: SearchKind; label: string; items: SearchItem[] }[]>(() => SEARCH_GROUPS.map((group) => {
+    const items: SearchItem[] = group.key === "projects" && !q.trim()
+      ? projects.map((project) => ({ ...project, title: project.name, created_at: (project as any).created_at }))
+      : result?.[group.key] || [];
+    return { ...group, items };
+  }).filter((group) => group.items.length), [projects, q, result]);
+  const flattened = useMemo(() => searchGroups.flatMap((group) => group.items.map((item) => ({ ...item, _kind: group.key, _kindLabel: group.label }))), [searchGroups]);
+
   useEffect(() => {
-    const id = setTimeout(() => {
-      if (q.trim())
-        api("/search?q=" + encodeURIComponent(q))
-          .then(setResult)
-          .catch(() => setResult(null));
+    let live = true;
+    const query = q.trim();
+    if (query) {
+      setResult(null);
+      setLoading(true);
+    }
+    const id = setTimeout(async () => {
+      if (!query) {
+        setResult(null);
+        setError("");
+        setLoading(false);
+        return;
+      }
+      setLoading(true);
+      setError("");
+      try {
+        const found = await api<SearchResponse>("/search?q=" + encodeURIComponent(query));
+        if (live) setResult(found);
+      } catch (e: any) {
+        if (live) {
+          setResult(null);
+          setError(e?.message || "Search is unavailable right now.");
+        }
+      } finally {
+        if (live) setLoading(false);
+      }
     }, 180);
-    return () => clearTimeout(id);
+    return () => { live = false; clearTimeout(id); };
   }, [q]);
+
+  useEffect(() => setActiveIndex(0), [q, result]);
+
+  function selectResult(item: SearchItem & { _kind: SearchKind }) {
+    close();
+    if (item._kind === "projects") {
+      open(item);
+      return;
+    }
+    if (item._kind === "tasks" && openTask) {
+      openTask(item);
+      return;
+    }
+    const href = safeSourceHref(item);
+    if (href) window.location.assign(href);
+    else if (item.project_id) {
+      const project = projects.find((candidate) => candidate.id === item.project_id);
+      if (project) open(project);
+    }
+  }
+
+  function onDialogKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      close();
+      return;
+    }
+    if (event.key === "Tab") {
+      const focusable = Array.from(dialogRef.current?.querySelectorAll<HTMLElement>("input:not([disabled]), button:not([disabled]), [href]:not([aria-disabled='true'])") || []);
+      if (focusable.length < 2) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  }
+
   return (
-    <div className="fixed inset-0 z-50 grid place-items-start bg-slate-950/35 p-4 pt-[12vh] backdrop-blur-sm" onMouseDown={close}>
-      <Card className="w-full max-w-2xl overflow-hidden" onMouseDown={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-50 grid place-items-start bg-slate-950/35 p-4 pt-[12vh] backdrop-blur-sm" onMouseDown={(event) => event.target === event.currentTarget && close()}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby={`${inputId}-title`} className="app-card rounded-card border w-full max-w-2xl overflow-hidden" onKeyDown={onDialogKeyDown}>
         <div className="flex gap-3 border-b border-line px-4">
           <Search size={18} className="my-auto text-zinc-500" />
+          <h2 id={`${inputId}-title`} className="sr-only">Search workspace knowledge</h2>
           <input
             autoFocus
+            id={inputId}
+            role="combobox"
+            aria-label="Search projects, tasks, files, discussions, and decisions"
+            aria-autocomplete="list"
+            aria-expanded="true"
+            aria-controls={listId}
+            aria-activedescendant={flattened[activeIndex] ? `${listId}-option-${activeIndex}` : undefined}
             className="h-14 flex-1 bg-transparent text-sm outline-none"
             value={q}
             onChange={(e) => setQ(e.target.value)}
-            placeholder="Search projects and tasks"
+            onKeyDown={(event) => {
+              if (event.key === "ArrowDown" && flattened.length) {
+                event.preventDefault();
+                setActiveIndex((index) => (index + 1) % flattened.length);
+              } else if (event.key === "ArrowUp" && flattened.length) {
+                event.preventDefault();
+                setActiveIndex((index) => (index - 1 + flattened.length) % flattened.length);
+              } else if (event.key === "Enter" && flattened[activeIndex]) {
+                event.preventDefault();
+                selectResult(flattened[activeIndex] as SearchItem & { _kind: SearchKind });
+              }
+            }}
+            placeholder="Search projects, tasks, files, discussions, decisions"
           />
-          <button aria-label="Close command bar" onClick={close}>
+          <button type="button" aria-label="Close search dialog" onClick={close}>
             <X className="text-zinc-500" size={18} />
           </button>
         </div>
-        <div className="max-h-80 overflow-auto p-2">
-          <button onClick={ai} className="flex w-full gap-3 rounded-lg p-3 text-left transition hover:bg-blue-50">
+        <div className="max-h-[min(60vh,32rem)] overflow-auto p-2">
+          <button type="button" onClick={ai} className="flex w-full gap-3 rounded-lg p-3 text-left transition hover:bg-blue-50">
             <Sparkles className="text-accent" size={17} />
             <span className="text-sm">Ask Enter AI</span>
           </button>
-          {(!q ? projects : result?.projects || []).map((p: Project) => (
-            <button
-              key={p.id}
-              onClick={() => open(p)}
-              className="flex w-full gap-3 rounded-lg p-3 text-left transition hover:bg-blue-50"
-            >
-              <FolderKanban size={16} className="text-zinc-500" />
-              <span className="text-sm">{p.name}</span>
-            </button>
-          ))}
-          {result?.tasks?.map((t: Task) => (
-            <div key={t.id} className="flex gap-3 p-3 text-sm">
-              <Circle size={13} />
-              {t.title}
-            </div>
-          ))}
+          <div id={listId} role="listbox" aria-label="Workspace search results" aria-busy={loading} className="mt-2">
+            {loading && <p role="status" className="px-3 py-2 text-xs text-slate-500">Searching workspace…</p>}
+            {error && <p role="alert" className="px-3 py-2 text-sm text-red-700">{error}</p>}
+            {!q.trim() && <p className="px-3 py-2 text-xs text-slate-500">Search authorized projects, tasks, files, discussions, and decisions.</p>}
+            {searchGroups.map((group) => (
+              <div key={group.key} role="group" aria-label={group.label} className="mt-2">
+                <h3 className="px-3 py-2 text-[10px] font-bold uppercase tracking-[.12em] text-slate-500">{group.label}</h3>
+                {group.items.map((item) => {
+                  const index = flattened.findIndex((candidate) => candidate._kind === group.key && candidate.id === item.id);
+                  const title = item.title || item.name || item.file_name || "Untitled result";
+                  return (
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={activeIndex === index}
+                      id={`${listId}-option-${index}`}
+                      key={`${group.key}:${item.id}`}
+                      onMouseEnter={() => setActiveIndex(index)}
+                      onClick={() => selectResult({ ...item, _kind: group.key })}
+                      className={cn("flex w-full gap-3 rounded-lg p-3 text-left transition", activeIndex === index ? "bg-blue-50 ring-1 ring-blue-200" : "hover:bg-blue-50")}
+                    >
+                      {group.key === "projects" ? <FolderKanban size={16} className="mt-0.5 shrink-0 text-zinc-500" /> : <Circle size={13} className="mt-1 shrink-0 text-blue-600" />}
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium text-ink">{title}</span>
+                        <span className="mt-0.5 block truncate text-xs text-slate-500">{group.label} · <time dateTime={item.created_at || undefined}>{displayDate(item.created_at)}</time></span>
+                        {item.snippet && <span className="mt-1 block line-clamp-2 text-xs leading-5 text-slate-600">{item.snippet}</span>}
+                        {item.source_ref && <span className="mt-1 block truncate text-[11px] text-slate-500">Source: {item.source_ref}</span>}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ))}
+            {!loading && q.trim() && !error && flattened.length === 0 && <p role="status" className="px-3 py-5 text-center text-sm text-slate-500">No matching workspace knowledge found.</p>}
+          </div>
         </div>
-      </Card>
+      </div>
     </div>
   );
 }

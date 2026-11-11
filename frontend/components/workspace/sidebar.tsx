@@ -133,7 +133,7 @@ export function Sidebar({ collapsed, mobile, view, user, notices, newRequests = 
           onClick={ai}
           title={collapsed ? "Ask Enter AI" : undefined}
           className={cn(
-            "relative flex min-h-11 w-full items-center gap-3 rounded-lg bg-blue-500 px-3 text-[13px] font-semibold text-white shadow-[0_6px_18px_rgba(37,99,235,.22)] transition hover:bg-blue-400 focus-visible:outline-white",
+            "relative flex min-h-11 w-full items-center gap-3 rounded-lg bg-blue-700 px-3 text-[13px] font-semibold text-white shadow-[0_6px_18px_rgba(37,99,235,.22)] transition hover:bg-blue-600 focus-visible:outline-white",
             collapsed && "lg:justify-center lg:px-0",
           )}
         >

@@ -84,6 +84,7 @@ button { -webkit-tap-highlight-color: transparent; }
 .app-content .text-zinc-400,
 .app-content .text-zinc-500,
 .app-content .text-zinc-600 { color: #65748a !important; }
+.app-content .text-slate-500 { color: #596b82 !important; }
 .app-content .text-sky-200,
 .app-content .text-sky-300 { color: #2854b4 !important; }
 .app-content .text-emerald-200,
@@ -93,10 +94,15 @@ button { -webkit-tap-highlight-color: transparent; }
 .app-content .text-red-200,
 .app-content .text-red-300 { color: #a93647 !important; }
 .app-content .text-slate-950 { color: #fff !important; }
+.auth-shell .text-zinc-400,
+.auth-shell .text-zinc-500 { color: #596b82 !important; }
+:root[data-theme="dark"] .auth-shell .text-zinc-400,
+:root[data-theme="dark"] .auth-shell .text-zinc-500 { color: var(--muted) !important; }
 
 .app-sidebar { color: #eef3fa; background: var(--nav); }
 .app-sidebar .text-zinc-400,
-.app-sidebar .text-zinc-500 { color: var(--nav-muted) !important; }
+.app-sidebar .text-zinc-500,
+.app-sidebar .text-slate-500 { color: var(--nav-muted) !important; }
 .app-sidebar .text-sky-300 { color: #a9c4ff !important; }
 
 .app-card { border-color: var(--line); background: var(--surface); box-shadow: var(--shadow-card); }

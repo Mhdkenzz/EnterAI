@@ -5,12 +5,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.auth import hash_password
-from app.copilot import ProviderTurn, WorkspaceTools, read_agent_confirmation
+from app.copilot import AgentAccessDenied, ProviderTurn, WorkspaceTools, read_agent_confirmation
 from app.copilot import CopilotService
 from app.database import SessionLocal
 from app.hierarchy import MAX_HIERARCHY_AGENTS, desired_counts
 from app.main import _issue_confirmation, app
-from app.models import AgentMessage, Organization, User
+from app.models import AgentAccessGrant, AgentMessage, AuditEvent, Organization, User
 
 
 def _admin_headers_and_org():
@@ -45,14 +45,14 @@ def test_ceo_chat_bootstraps_a_persistent_ceo_without_configured_reports_and_cou
             assert second.json()["id"] == first.json()["id"]
             assert [a["hierarchy_level"] for a in client.get("/api/agents", headers=headers).json()] == ["ceo"]
 
+            since = datetime.utcnow() + timedelta(days=1)
             message = AgentMessage(
                 agent_id=first.json()["id"], author_id=None, role="agent", body="Unread reply",
-                created_at=datetime.utcnow() + timedelta(seconds=1),
+                created_at=since + timedelta(seconds=1),
             )
             db.add(message)
             db.commit()
-            since = datetime.utcnow().isoformat()
-            unread = client.get("/api/ceo-chat/unread", headers=headers, params={"since": since})
+            unread = client.get("/api/ceo-chat/unread", headers=headers, params={"since": since.isoformat()})
             assert unread.status_code == 200
             assert unread.json()["unread_count"] == 1
     finally:
@@ -164,7 +164,7 @@ def test_hierarchy_config_reconciles_agents_to_the_configured_shape_and_shrinks_
         db.close()
 
 
-def test_shrinking_the_hierarchy_unassigns_tasks_held_by_removed_agents():
+def test_shrinking_the_hierarchy_reassigns_work_held_by_removed_agents():
     headers, org, db = _admin_headers_and_org()
     try:
         with TestClient(app) as client:
@@ -181,7 +181,9 @@ def test_shrinking_the_hierarchy_unassigns_tasks_held_by_removed_agents():
             client.patch("/api/hierarchy-config", headers=headers, json={"vp_count": 0})
             after = client.get(f"/api/projects/{project['id']}/tasks", headers=headers).json()
         after_task = next(t for t in after if t["id"] == task["id"])
-        assert after_task["assignee"] is None
+        assert after_task["assignee"] is not None
+        assert after_task["assignee"]["kind"] == "human"
+        assert after_task["assignee"]["role"] == "admin"
     finally:
         with TestClient(app) as client:
             _reset_hierarchy(client, headers)
@@ -317,6 +319,10 @@ def test_delegate_task_tool_end_to_end_agent_proposes_human_confirms():
             client.post(f"/api/tasks/{task['id']}/assign-agent", headers=headers, json={"agent_id": ceo["id"]})
 
         ceo_row = db.get(User, ceo["id"])
+        admin = db.scalar(select(User).where(User.organization_id == org.id, User.kind == "human", User.role == "admin"))
+        db.add(AgentAccessGrant(organization_id=org.id, agent_id=ceo_row.id,
+            resource_type="tool", resource_id="delegate_task", permission="use", granted_by=admin.id))
+        db.commit()
         tools = WorkspaceTools(db, ceo_row)
         provider = _ScriptedProvider([
             ProviderTurn(text="Delegating to my VP.", tool_calls=[{"id": "call_1", "name": "delegate_task", "args": {"task_id": task["id"], "agent_id": vp["id"]}}]),
@@ -358,9 +364,10 @@ def test_a_worker_level_agent_cannot_propose_delegate_task():
             ProviderTurn(text=None, tool_calls=[{"id": "call_1", "name": "delegate_task", "args": {"task_id": "whatever", "agent_id": "whatever"}}]),
             ProviderTurn(text="I can't delegate work.", tool_calls=[]),
         ])
-        result = _service_with(provider).plan("Delegate this somewhere", tools)
-        assert result["actions"] == []
-        assert result["reply"] == "I can't delegate work."
+        import pytest
+        with pytest.raises(AgentAccessDenied):
+            _service_with(provider).plan("Delegate this somewhere", tools)
+        assert db.scalar(select(AuditEvent.id).where(AuditEvent.organization_id == org.id, AuditEvent.action == "access_denied"))
     finally:
         with TestClient(app) as client:
             _reset_hierarchy(client, headers)

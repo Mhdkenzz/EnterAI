@@ -33,6 +33,24 @@ def test_lock_keys_are_stable_and_distinct_per_agent():
     assert -2 ** 31 <= _lock_key("agent-a") < 2 ** 31
 
 
+def test_background_tick_steps_distinct_agents_concurrently(monkeypatch):
+    from types import SimpleNamespace
+    from contextlib import nullcontext
+    barrier = threading.Barrier(3, timeout=3)
+    seen = []
+    guard = threading.Lock()
+    monkeypatch.setattr(execution, "SessionLocal", lambda: nullcontext(object()))
+    monkeypatch.setattr(execution, "_eligible_agents", lambda db: [SimpleNamespace(id=value) for value in ("a", "b", "c")])
+    def step(*, only_agent_id):
+        with guard:
+            seen.append(only_agent_id)
+        barrier.wait()
+        return 1
+    monkeypatch.setattr(execution, "run_execution_tick", step)
+    assert execution._run_background_tick() == 3
+    assert sorted(seen) == ["a", "b", "c"]
+
+
 def test_backends_without_advisory_locks_always_grant():
     class Bind:
         dialect = type("D", (), {"name": "sqlite"})()
@@ -120,6 +138,7 @@ def throwaway_agent():
     yield agent_id
     with SessionLocal() as db:
         db.delete(db.get(User, agent_id))
+        db.flush()  # delete the dependent user before its organization on PostgreSQL
         db.delete(db.get(Organization, org_id))
         db.commit()
 

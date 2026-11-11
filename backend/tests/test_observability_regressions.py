@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from app.main import app
 from app.database import SessionLocal
-from app.models import User, AuditEvent, ProviderCall, ExecutionRun
+from app.models import AgentAccessGrant, User, AuditEvent, ProviderCall, ExecutionRun
 from test_observability import workspace, identity
 
 
@@ -157,6 +157,12 @@ def test_scheduler_execution_outcomes_are_durable_and_correlated(outcome, monkey
         project = c.post('/api/projects', headers=h, json={'name': 'P', 'code': 'P'}).json()
         task = c.post('/api/tasks', headers=h, json={'project_id': project['id'], 'title': 'PRIVATE-TASK'}).json()
         c.post(f"/api/tasks/{task['id']}/assign-agent", headers=h, json={'agent_id': agent_id})
+        with SessionLocal() as db:
+            db.add(AgentAccessGrant(
+                organization_id=org, agent_id=agent_id, resource_type='tool',
+                resource_id='add_comment', permission='use', granted_by=data['user']['id'],
+            ))
+            db.commit()
         calls = {'narrated': [], 'proposed': [{'id': 'w', 'name': 'add_comment', 'args': {'task_id': task['id'], 'body': 'PRIVATE-BODY'}}],
                  'completed': [{'id': 'w', 'name': 'mark_task_complete', 'args': {'result': 'Prepared the requested checklist with detailed findings and documented the next steps.'}}],
                  'inconclusive': [{'id': 'r', 'name': 'get_projects', 'args': {}}]}

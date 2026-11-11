@@ -487,8 +487,15 @@ def start_gmail_sync_loop() -> None:
         _background_task = asyncio.ensure_future(_loop())
 
 
-def stop_gmail_sync_loop() -> None:
+async def stop_gmail_sync_loop() -> None:
     global _background_task
-    if _background_task is not None:
-        _background_task.cancel()
-        _background_task = None
+    task = _background_task
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        return
+    _background_task = None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

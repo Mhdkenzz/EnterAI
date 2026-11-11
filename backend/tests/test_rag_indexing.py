@@ -279,6 +279,59 @@ def test_search_similar_chunks_actually_executes_against_real_pgvector():
 
 
 @postgres_only
+def test_worker_vector_search_stays_inside_the_assigned_project():
+    from app.database import SessionLocal
+    from app.embeddings import get_embedding_provider
+    from app.indexing import index_document, search_similar_chunks
+    from app.models import Organization, Project, ProjectDocument, Task, User
+    import uuid
+
+    db = SessionLocal()
+    try:
+        org = Organization(id=str(uuid.uuid4()), name="Worker RAG Org", slug=f"worker-rag-{uuid.uuid4().hex[:8]}")
+        db.add(org)
+        db.flush()
+        worker = User(id=str(uuid.uuid4()), organization_id=org.id, name="Worker",
+                      email=f"worker-{uuid.uuid4().hex[:8]}@example.com", password_hash="x",
+                      kind="agent", hierarchy_level="worker")
+        teammate = User(id=str(uuid.uuid4()), organization_id=org.id, name="Other worker",
+                        email=f"other-{uuid.uuid4().hex[:8]}@example.com", password_hash="x",
+                        kind="agent", hierarchy_level="worker")
+        db.add_all([worker, teammate])
+        db.flush()
+        assigned = Project(id=str(uuid.uuid4()), organization_id=org.id, name="Assigned", code=f"AS{uuid.uuid4().hex[:6].upper()}")
+        hidden = Project(id=str(uuid.uuid4()), organization_id=org.id, name="Hidden", code=f"HI{uuid.uuid4().hex[:6].upper()}")
+        db.add_all([assigned, hidden])
+        db.flush()
+        db.add_all([
+            Task(id=str(uuid.uuid4()), project_id=assigned.id, title="Assigned source", assignee_id=worker.id),
+            Task(id=str(uuid.uuid4()), project_id=hidden.id, title="Hidden source", assignee_id=teammate.id),
+        ])
+        db.flush()
+        content = "Quarterly risk assessment source text for project search."
+        documents = [
+            ProjectDocument(id=str(uuid.uuid4()), organization_id=org.id, project_id=assigned.id,
+                            uploaded_by=worker.id, file_name="assigned.txt", path="/assigned", extracted_text=content),
+            ProjectDocument(id=str(uuid.uuid4()), organization_id=org.id, project_id=hidden.id,
+                            uploaded_by=worker.id, file_name="hidden.txt", path="/hidden", extracted_text=content),
+            ProjectDocument(id=str(uuid.uuid4()), organization_id=org.id, project_id=None,
+                            uploaded_by=worker.id, file_name="unassigned.txt", path="/unassigned", extracted_text=content),
+        ]
+        db.add_all(documents)
+        db.flush()
+        for document in documents:
+            index_document(db, document)
+        db.commit()
+
+        query_vector = get_embedding_provider().embed([content])[0]
+        results = search_similar_chunks(db, query_vector, worker, project_id=assigned.id, limit=10, similarity_threshold=0.5)
+        assert [chunk.document_id for chunk in results] == [documents[0].id]
+    finally:
+        db.rollback()
+        db.close()
+
+
+@postgres_only
 def test_index_document_stamps_embedding_provenance():
     from app.database import SessionLocal
     from app.indexing import index_document

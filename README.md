@@ -77,6 +77,8 @@ with that organization's ID. The API must have filesystem access to those isolat
 checkouts; for Docker, mount the parent directory into the API container. An
 organization administrator must then enable **Organization repository access** in
 Admin → Execution controls. It is off by default and scoped per organization.
+Autonomous repository work also requires the assigned task to carry the `repository`
+label. Worker-level agents cannot access the shared repository.
 
 Repository tools are available with a structured tool-calling AI provider; the
 deterministic offline provider does not invoke tools. Agents receive safe source-tree, literal-search, bounded file-read, Git status,

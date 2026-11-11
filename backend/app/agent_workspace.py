@@ -502,7 +502,7 @@ def apply_agent_repo_patch(args: dict[str, Any], agent: Any, db: Any, *, assigne
     if assigned_task:
         task = db.get(Task, agent.current_task_id) if agent.current_task_id else None
         project = db.get(Project, task.project_id) if task else None
-        if agent.kind != "agent" or not task or not project or project.organization_id != agent.organization_id or task.assignee_id != agent.id or task.status == "done" or not organization.execution_enabled or not agent.execution_enabled:
+        if agent.kind != "agent" or not task or not project or project.organization_id != agent.organization_id or task.assignee_id != agent.id or task.status in {"done", "blocked", "review"} or "repository" not in (task.labels or []) or not organization.execution_enabled or not agent.execution_enabled:
             raise ValueError("Repository edits are only available while this agent is actively working on its assigned task.")
     elif agent.kind != "agent" or agent.hierarchy_level != "ceo":
         raise ValueError("Interactive repository edits are available only to the CEO agent.")

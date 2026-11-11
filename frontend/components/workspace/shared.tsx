@@ -11,6 +11,10 @@ export const states = ["backlog", "todo", "in_progress", "blocked", "review", "d
     "mt-1.5 w-full rounded-lg border border-line bg-canvas px-3 py-2.5 text-sm text-ink outline-none focus:border-accent";
 export const when = (v?: string) =>
   v ? new Date(v).toLocaleDateString(undefined, { month: "short", day: "numeric" }) : "No date";
+export function assigneeName(user?: { id?: string; name?: string; kind?: string }) {
+  if (!user?.name) return "Unassigned";
+  return user.kind === "agent" && user.id ? `${user.name} · ${user.id.slice(0, 8)}` : user.name;
+}
 export function Avatar({ user }: { user?: { name?: string; avatar?: string } }) {
   return (
     <span role="img" aria-label={user?.name ? `Assigned to ${user.name}` : "Unassigned"} title={user?.name || "Unassigned"} className="inline-grid h-8 w-8 shrink-0 place-items-center rounded-full border border-blue-100 bg-blue-50 text-[10px] font-bold tracking-wide text-blue-800 ring-2 ring-white">
@@ -68,8 +72,8 @@ export function Row({ task, open, toggle }: { task: Task; open: () => void; togg
         {done ? "Completed" : when(task.due_date)}
       </span>
       <span className="flex shrink-0 items-center gap-2">
-        <span className="max-w-24 truncate text-right text-[11px] text-zinc-500" title={task.assignee?.name || "Unassigned"}>
-          {task.assignee?.name || "Unassigned"}
+        <span className="max-w-36 truncate text-right text-[11px] text-zinc-500" title={assigneeName(task.assignee)}>
+          {assigneeName(task.assignee)}
         </span>
         <Avatar user={task.assignee} />
       </span>

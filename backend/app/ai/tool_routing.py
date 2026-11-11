@@ -50,6 +50,7 @@ _DOMAIN_KEYWORDS = {
         re.IGNORECASE,
     ),
     "DOCUMENTS": _DOCUMENT_INTENT_RE,
+    "KNOWLEDGE": re.compile(r"\b(knowledge|decision|decisions|discussion|discussions|conversation|conversations)\b", re.IGNORECASE),
     "USERS": re.compile(
         r"\b(user|users|member|members|team|teams|assign|assignee|who|person)\b",
         re.IGNORECASE,
@@ -68,9 +69,10 @@ _DOMAIN_KEYWORDS = {
 }
 
 _DOMAIN_CANDIDATES: dict[str, list[str]] = {
-    "PROJECTS": ["get_projects", "search", "get_activity", "create_project"],
-    "TASKS": ["get_tasks", "get_my_tasks", "search", "get_comments"],
-    "DOCUMENTS": ["search_documents", "get_projects"],
+    "PROJECTS": ["get_projects", "search", "search_knowledge", "get_activity", "create_project"],
+    "TASKS": ["get_tasks", "get_my_tasks", "search", "search_knowledge", "get_comments"],
+    "DOCUMENTS": ["search_documents", "search_knowledge", "get_projects"],
+    "KNOWLEDGE": ["search_knowledge", "get_comments", "get_projects"],
     "USERS": ["get_users", "get_teams", "get_direct_reports"],
     "TEAMS": ["get_teams"],
     "ADMIN": ["get_teams", "get_users", "get_projects"],
@@ -79,6 +81,7 @@ _DOMAIN_CANDIDATES: dict[str, list[str]] = {
     "READ_ONLY": [
         "get_projects", "get_tasks", "get_my_tasks", "get_teams",
         "get_users", "get_notifications", "get_activity", "search",
+        "search_knowledge",
     ],
 }
 

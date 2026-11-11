@@ -38,6 +38,25 @@ export type Task = {
   due_date?: string;
   assignee?: User;
 };
+export type AccountabilityPerson = Pick<User, "id" | "name" | "kind" | "role" | "title"> & { hierarchy_level?: string | null };
+export type AccountabilityEvent = {
+  id: string;
+  action: string;
+  source: string;
+  actor?: AccountabilityPerson | null;
+  initiator?: AccountabilityPerson | null;
+  created_at: string;
+  detail: Record<string, string | boolean | null>;
+};
+export type TaskAccountability = {
+  requested_by?: AccountabilityPerson | null;
+  owner?: AccountabilityPerson | null;
+  assigned_by?: AccountabilityPerson | null;
+  executed_by?: AccountabilityPerson | null;
+  reviewed_by?: AccountabilityPerson | null;
+  approved_by?: AccountabilityPerson | null;
+  events: AccountabilityEvent[];
+};
 export type InboxNotice = { id: string; title: string; body?: string; href?: string; read: boolean };
 export type InboundMessage = {
   id: string;
@@ -100,6 +119,7 @@ export type Agent = {
   avatar?: string;
   hierarchy_level: string;
   parent_agent_id?: string | null;
+  execution_enabled?: boolean;
   current_task?: Task | null;
   last_completed_task?: Task | null;
   is_working?: boolean;

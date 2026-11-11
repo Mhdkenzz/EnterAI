@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
-import { expect, test as base, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test as base } from "./fixtures";
 import AxeBuilder from "@axe-core/playwright";
 import { signIn } from "./session";
 
@@ -48,7 +49,7 @@ with SessionLocal() as db:
 async function enter(page: Page, token: string) {
   await signIn(page.context(), token);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
 }
 async function openAdmin(page: Page, mobile: boolean) {
   if (mobile) await page.getByRole("button", { name: "Open menu", exact: true }).click();
@@ -63,15 +64,53 @@ test("human admin sees usage, member has no Admin navigation", async ({ page, is
   await openAdmin(page, isMobile);
   await expect(page.getByText(/AI provider calls and agent runs for this workspace/)).toBeVisible();
   await expect(page.getByText(/Provider mode:/)).toBeVisible();
-  await expect(page.getByText("No agents configured.")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Execution controls" }).getByText("Chief Executive Officer", { exact: true })).toBeVisible();
   // The session cookie belongs to the context, so a fresh page picks up the member.
   await signIn(page.context(), workspace.memberToken);
   const memberPage = await page.context().newPage();
   await memberPage.goto("/");
-  await expect(memberPage.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(memberPage.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
+  const welcomeClose = memberPage.getByRole("button", { name: "Close agent inspector" });
+  await expect(welcomeClose).toBeVisible();
+  await welcomeClose.click();
   if (isMobile) await memberPage.getByRole("button", { name: "Open menu", exact: true }).click();
   await expect(memberPage.getByRole("button", { name: "Admin", exact: true })).toHaveCount(0);
   await memberPage.close();
+});
+
+test("admin can invite a teammate, set their role, and revoke the pending invite", async ({ page, isMobile, workspace }) => {
+  await enter(page, workspace.token);
+  await openAdmin(page, isMobile);
+  const inviteForm = page.locator("form").filter({ has: page.getByRole("button", { name: "Send invite" }) });
+  const email = `invite-${Date.now()}@example.com`;
+  await inviteForm.getByLabel("Email address").fill(email);
+  await inviteForm.getByLabel("Role").selectOption("manager");
+  await inviteForm.getByRole("button", { name: "Send invite" }).click();
+  await expect(page.getByRole("status").filter({ hasText: `Invitation sent to ${email}.` })).toBeVisible();
+
+  const inviteRow = page.getByRole("listitem").filter({ hasText: email });
+  await expect(inviteRow).toContainText("manager");
+  await inviteRow.getByRole("button", { name: "Revoke" }).click();
+  await expect(page.getByRole("status").filter({ hasText: `Invitation for ${email} revoked.` })).toBeVisible();
+  await expect(inviteRow).toHaveCount(0);
+});
+
+test("billing actions stay unavailable when hosted checkout is not configured", async ({ page, isMobile, request, workspace }) => {
+  const response = await request.get(`${API}/billing`, { headers: auth(workspace) });
+  expect(response.ok(), await response.text()).toBeTruthy();
+  const billingState = await response.json();
+  expect(billingState.checkout_available).toBe(false);
+  expect(billingState.portal_available).toBe(false);
+
+  await enter(page, workspace.token);
+  await openAdmin(page, isMobile);
+  const billing = page.getByRole("region", { name: "Plan & billing" });
+  await expect(billing.getByRole("button", { name: "Manage billing" })).toHaveCount(0);
+  const choosePlanButtons = billing.getByRole("button", { name: /^Choose / });
+  await expect(choosePlanButtons).toHaveCount(billingState.plans.length);
+  for (let index = 0; index < billingState.plans.length; index += 1) {
+    await expect(choosePlanButtons.nth(index)).toBeDisabled();
+  }
 });
 
 test("execution controls persist and roles protect the signed-in admin", async ({ page, isMobile, request, workspace }) => {

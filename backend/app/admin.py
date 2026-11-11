@@ -8,12 +8,14 @@ from sqlalchemy.orm import Session
 from .auth import current_user
 from .database import get_db
 from .hierarchy import retire_agent
-from .models import AuditEvent, Organization, OrganizationAISettings, ProviderCall, ExecutionRun, User
+from .models import AgentAccessGrant, AuditEvent, Organization, OrganizationAISettings, ProviderCall, ExecutionRun, Project, ProjectDocument, Task, User
 from .services import log
 from .observability import audit
 from .agent_workspace import repository_root
 from . import secrets_store
 from .ai.config import AISettings
+from .agent_access import BASE_AGENT_TOOLS, VALID_PERMISSIONS, allowed_agent_tools, grants_for, tool_catalog
+from .knowledge_access import document_is_visible, visible_project_ids
 
 router = APIRouter(prefix='/api/admin', tags=['admin'])
 
@@ -231,6 +233,115 @@ def retire_agent_route(agent_id: str, user: User = Depends(human_admin), db: Ses
     retire_agent(db, target, actor_id=user.id)
     db.commit()
     return {'id': target.id, 'retired': True, 'retired_at': target.retired_at}
+
+
+class AgentAccessGrantIn(BaseModel):
+    resource_type: Literal['project', 'document', 'tool']
+    resource_id: str = Field(min_length=1, max_length=255)
+    permission: Literal['read', 'write', 'use']
+    reason: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode='after')
+    def permission_matches_resource(self):
+        if self.permission not in VALID_PERMISSIONS[self.resource_type]:
+            raise ValueError('Permission is not valid for this resource type.')
+        return self
+
+
+def _agent_in_org(db: Session, org_id: str, agent_id: str) -> User:
+    agent = db.scalar(select(User).where(User.id == agent_id, User.organization_id == org_id, User.kind == 'agent'))
+    if not agent:
+        raise HTTPException(404, 'Agent not found')
+    return agent
+
+
+def _access_grant_out(grant: AgentAccessGrant) -> dict:
+    return {'id': grant.id, 'resource_type': grant.resource_type, 'resource_id': grant.resource_id,
+            'permission': grant.permission, 'reason': grant.reason, 'granted_by': grant.granted_by,
+            'created_at': grant.created_at, 'revoked_by': grant.revoked_by, 'revoked_at': grant.revoked_at,
+            'active': grant.revoked_at is None}
+
+
+@router.get('/agents/{agent_id}/access')
+def inspect_agent_access(agent_id: str, user: User = Depends(human_admin), db: Session = Depends(get_db)):
+    agent = _agent_in_org(db, user.organization_id, agent_id)
+    projects = db.scalars(select(Project).where(Project.organization_id == user.organization_id).order_by(Project.name, Project.id)).all()
+    documents = db.scalars(select(ProjectDocument).where(ProjectDocument.organization_id == user.organization_id).order_by(ProjectDocument.file_name, ProjectDocument.id)).all()
+    grants = grants_for(db, agent)
+    assigned = db.scalars(select(Task.id).where(Task.assignee_id == agent.id)).all()
+    effective_project_ids = db.scalars(visible_project_ids(db, agent)).all()
+    effective_document_ids = db.scalars(select(ProjectDocument.id).where(document_is_visible(db, agent))).all()
+    return {
+        'agent_id': agent.id,
+        'inherited': {'assigned_task_ids': assigned, 'baseline_tools': sorted(BASE_AGENT_TOOLS)},
+        'effective_tools': sorted(allowed_agent_tools(db, agent)),
+        'effective_project_ids': effective_project_ids,
+        'effective_document_ids': effective_document_ids,
+        'projects': [{'id': p.id, 'name': p.name, 'code': p.code} for p in projects],
+        'documents': [{'id': d.id, 'file_name': d.file_name, 'project_id': d.project_id} for d in documents],
+        'tools': sorted(tool_catalog()),
+        'grants': [_access_grant_out(grant) for grant in grants],
+    }
+
+
+@router.post('/agents/{agent_id}/access', status_code=201)
+def grant_agent_access(agent_id: str, data: AgentAccessGrantIn, user: User = Depends(human_admin), db: Session = Depends(get_db)):
+    agent = _agent_in_org(db, user.organization_id, agent_id)
+    if not agent.active or agent.retired_at is not None:
+        raise HTTPException(409, 'Inactive or retired agents cannot receive new access grants')
+    if data.resource_type == 'project':
+        exists = db.scalar(select(Project.id).where(Project.id == data.resource_id, Project.organization_id == user.organization_id))
+    elif data.resource_type == 'document':
+        exists = db.scalar(select(ProjectDocument.id).where(ProjectDocument.id == data.resource_id, ProjectDocument.organization_id == user.organization_id))
+    else:
+        exists = data.resource_id in tool_catalog()
+    if not exists:
+        raise HTTPException(404, 'Access resource not found')
+    grant = db.scalar(select(AgentAccessGrant).where(
+        AgentAccessGrant.organization_id == user.organization_id, AgentAccessGrant.agent_id == agent.id,
+        AgentAccessGrant.resource_type == data.resource_type, AgentAccessGrant.resource_id == data.resource_id,
+        AgentAccessGrant.permission == data.permission,
+    ))
+    if grant is None:
+        grant = AgentAccessGrant(organization_id=user.organization_id, agent_id=agent.id,
+            resource_type=data.resource_type, resource_id=data.resource_id, permission=data.permission,
+            granted_by=user.id, reason=data.reason)
+        db.add(grant)
+        action = 'agent_access_granted'
+    elif grant.revoked_at is not None:
+        grant.granted_by, grant.created_at = user.id, datetime.utcnow()
+        grant.reason, grant.revoked_by, grant.revoked_at = data.reason, None, None
+        action = 'agent_access_granted'
+    else:
+        grant.reason = data.reason
+        action = 'agent_access_updated'
+    audit(db, user.organization_id, user.id, 'agent', agent.id, action,
+          resource_type=data.resource_type, permission=data.permission,
+          resource_id=data.resource_id if data.resource_type in {'project', 'document'} else None,
+          tool=data.resource_id if data.resource_type == 'tool' else None)
+    db.commit()
+    db.refresh(grant)
+    return _access_grant_out(grant)
+
+
+@router.delete('/agents/{agent_id}/access/{grant_id}')
+def revoke_agent_access(agent_id: str, grant_id: str, user: User = Depends(human_admin), db: Session = Depends(get_db)):
+    agent = _agent_in_org(db, user.organization_id, agent_id)
+    grant = db.scalar(select(AgentAccessGrant).where(
+        AgentAccessGrant.id == grant_id, AgentAccessGrant.organization_id == user.organization_id,
+        AgentAccessGrant.agent_id == agent.id,
+    ))
+    if not grant:
+        raise HTTPException(404, 'Access grant not found')
+    if grant.revoked_at is not None:
+        raise HTTPException(409, 'Access grant is already revoked')
+    grant.revoked_by, grant.revoked_at = user.id, datetime.utcnow()
+    audit(db, user.organization_id, user.id, 'agent', agent.id, 'agent_access_revoked',
+          resource_type=grant.resource_type, permission=grant.permission,
+          resource_id=grant.resource_id if grant.resource_type in {'project', 'document'} else None,
+          tool=grant.resource_id if grant.resource_type == 'tool' else None)
+    db.commit()
+    return _access_grant_out(grant)
 
 
 @router.get('/settings')

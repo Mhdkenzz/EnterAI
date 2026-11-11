@@ -131,7 +131,7 @@ def test_audit_events_survive_user_anonymization(db_session):
 
 def test_export_user_data_excludes_other_users_content(db_session):
     from app.privacy_service import export_user_data
-    from app.models import Comment
+    from app.models import Comment, Decision
     org = _org(db_session)
     me = _user(db_session, org, email="me@example.com")
     someone_else = _user(db_session, org, email="other@example.com")
@@ -140,6 +140,10 @@ def test_export_user_data_excludes_other_users_content(db_session):
     their_task = _task(db_session, project, reporter=someone_else)
     db_session.add(Comment(task_id=my_task.id, author_id=me.id, body="mine"))
     db_session.add(Comment(task_id=their_task.id, author_id=someone_else.id, body="theirs"))
+    db_session.add(Decision(organization_id=org.id, project_id=project.id, task_id=my_task.id,
+                            title="My decision", body="Keep the approved approach.", created_by=me.id))
+    db_session.add(Decision(organization_id=org.id, project_id=project.id, task_id=their_task.id,
+                            title="Their decision", body="Private decision.", created_by=someone_else.id))
     db_session.flush()
 
     export = export_user_data(db_session, me)
@@ -149,6 +153,7 @@ def test_export_user_data_excludes_other_users_content(db_session):
     assert their_task.id not in task_ids
     bodies = {c["body"] for c in export["comments"]}
     assert bodies == {"mine"}
+    assert {d["title"] for d in export["decisions"]} == {"My decision"}
 
 
 def test_export_organization_data_excludes_other_organizations(db_session):
@@ -161,6 +166,12 @@ def test_export_organization_data_excludes_other_organizations(db_session):
     project_b = _project(db_session, org_b)
     _task(db_session, project_a, reporter=user_a)
     _task(db_session, project_b, reporter=user_b)
+    from app.models import Decision
+    db_session.add_all([
+        Decision(organization_id=org_a.id, project_id=project_a.id, title="A decision", body="A", created_by=user_a.id),
+        Decision(organization_id=org_b.id, project_id=project_b.id, title="B decision", body="B", created_by=user_b.id),
+    ])
+    db_session.flush()
 
     export = export_organization_data(db_session, org_a.id)
 
@@ -171,6 +182,7 @@ def test_export_organization_data_excludes_other_organizations(db_session):
     assert task_ids  # at least this org's task is present
     for t in export["tasks"]:
         assert t["project_id"] == project_a.id
+    assert {d["title"] for d in export["decisions"]} == {"A decision"}
 
 
 # --------------------------------------------------------------------------- #
@@ -181,6 +193,7 @@ def test_delete_organization_data_removes_everything_scoped_to_it(db_session):
     from app.privacy_service import delete_organization_data
     from app.models import (AgentMessage, Attachment, AuditEvent, Comment, Organization,
                             Project, ProjectDocument, Task, Team, User)
+    from app.models import Decision
     from app.services import log
     org = _org(db_session)
     user = _user(db_session, org)
@@ -197,6 +210,8 @@ def test_delete_organization_data_removes_everything_scoped_to_it(db_session):
     db_session.add(Attachment(task_id=task.id, uploaded_by=user.id, file_name="f", path="/f"))
     db_session.add(ProjectDocument(organization_id=org.id, project_id=project.id, uploaded_by=user.id,
                                    file_name="d.txt", path="/d.txt", extracted_text="hi"))
+    db_session.add(Decision(organization_id=org.id, project_id=project.id, task_id=task.id,
+                            title="Release gate", body="Wait for review.", created_by=user.id))
     db_session.add(AgentMessage(agent_id=agent.id, author_id=user.id, role="user", body="hi"))
     log(db_session, org.id, user.id, "task", task.id, "created")
     db_session.flush()
@@ -211,6 +226,7 @@ def test_delete_organization_data_removes_everything_scoped_to_it(db_session):
     assert db_session.scalars(select(Comment).where(Comment.task_id == task.id)).all() == []
     assert db_session.scalars(select(Attachment).where(Attachment.task_id == task.id)).all() == []
     assert db_session.scalars(select(ProjectDocument).where(ProjectDocument.organization_id == org.id)).all() == []
+    assert db_session.scalars(select(Decision).where(Decision.organization_id == org.id)).all() == []
     assert db_session.scalars(select(AgentMessage).where(AgentMessage.agent_id == agent.id)).all() == []
     assert db_session.scalars(select(AuditEvent).where(AuditEvent.organization_id == org.id)).all() == []
 

@@ -1,13 +1,16 @@
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./fixtures";
 
 test("admin configures the agent hierarchy, inspects an agent, and chats with it", async ({ page, isMobile }) => {
   await page.goto("/");
+  await page.getByLabel("Email").fill("admin@demo.enterai.com");
+  await page.getByLabel("Password").fill("enterai-demo");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
 
   if (isMobile) await page.getByRole("button", { name: "Open menu", exact: true }).click();
   await page.getByRole("complementary").getByRole("button", { name: "Agents", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Agent hierarchy" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent map" })).toBeVisible();
 
   await page.getByLabel("VPs under CEO").fill("1");
   await page.getByLabel("Directors per VP").fill("1");
@@ -16,12 +19,16 @@ test("admin configures the agent hierarchy, inspects an agent, and chats with it
   await page.getByRole("button", { name: "Save hierarchy" }).click();
 
   await expect(page.getByText("Chief Executive Officer", { exact: true }).first()).toBeVisible({ timeout: 15000 });
-  await expect(page.getByText("Vice President", { exact: true })).toBeVisible();
-  await expect(page.getByText("Director", { exact: true })).toBeVisible();
+  await expect(page.getByText("Vice President", { exact: true }).first()).toBeVisible();
+  await page.getByRole("button", { name: /Expand \d+ reports for Vice President/ }).first().click();
+  await expect(page.getByText("Director", { exact: true }).first()).toBeVisible();
 
   await page.getByRole("button", { name: /Chief Executive Officer/ }).first().click();
   await expect(page.getByRole("heading", { name: "Chief Executive Officer" })).toBeVisible();
-  await expect(page.getByText("Direct reports (1)")).toBeVisible();
+  await expect(page.getByText("Responsibilities & capabilities")).toBeVisible();
+  await expect(page.getByText("Reports to: Workspace")).toBeVisible();
+  await expect(page.getByText("Execution is enabled.")).toBeVisible();
+  await expect(page.getByText(/^Direct reports \(\d+\)$/)).toBeVisible();
   await expect(page.getByText("Idle -- no active task.")).toBeVisible();
 
   const question = `What are you working on, ${test.info().project.name} ${Date.now()}?`;
@@ -39,7 +46,7 @@ test("agent hierarchy is reachable and usable on mobile", async ({ page, isMobil
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.getByRole("button", { name: "Open menu", exact: true }).click();
   await page.getByRole("complementary").getByRole("button", { name: "Agents", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Agent hierarchy" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent map" })).toBeVisible();
   await expect(page.getByRole("complementary")).toBeHidden();
 });
 
@@ -58,10 +65,10 @@ test("a message sent before the transcript finishes loading is not swallowed", a
 
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
   if (isMobile) await page.getByRole("button", { name: "Open menu", exact: true }).click();
   await page.getByRole("complementary").getByRole("button", { name: "Agents", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Agent hierarchy" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent map" })).toBeVisible();
 
   await page.getByLabel("VPs under CEO").fill("1");
   await page.getByRole("button", { name: "Save hierarchy" }).click();

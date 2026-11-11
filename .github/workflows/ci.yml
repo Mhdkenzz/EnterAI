@@ -79,6 +79,8 @@ jobs:
         run: |
           PYTHONPATH=. alembic upgrade head
           PYTHONPATH=. alembic downgrade base
+          # Exercise upgrades from the version table Alembic historically made.
+          python -c 'import os, psycopg; c = psycopg.connect(os.environ["DATABASE_URL"].replace("postgresql+psycopg://", "postgresql://"), autocommit=True); c.execute("ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(32)"); c.close()'
           PYTHONPATH=. alembic upgrade head
       - run: PYTHONPATH=. pytest -q
 
@@ -113,8 +115,9 @@ jobs:
           pip install -r requirements-dev.txt
           # Startup no longer creates schema; migrate the same disposable database.
           DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db PYTHONPATH=. alembic upgrade head
-          ENVIRONMENT=ci ENABLE_API_DOCS=false DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db JWT_SECRET=ci-only-secret AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
+          ENVIRONMENT=test ENABLE_API_DOCS=false DATABASE_URL=sqlite:////tmp/enter-ai-browser-ci.db JWT_SECRET=ci-only-secret AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
+          curl -fsS http://127.0.0.1:8000/health || { cat /tmp/enter-ai-api.log; exit 1; }
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -127,7 +130,9 @@ jobs:
         working-directory: frontend
         run: NEXT_PUBLIC_API_URL=http://127.0.0.1:8000/api npm run dev -- --hostname 127.0.0.1 --port 3000 > /tmp/enter-ai-web.log 2>&1 &
       - name: Wait for web
-        run: for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:3000 && break || sleep 1; done
+        run: |
+          for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:3000 && break || sleep 1; done
+          curl -fsS http://127.0.0.1:3000 || { cat /tmp/enter-ai-web.log; exit 1; }
       - name: Install Chromium
         working-directory: frontend
         run: npx playwright install --with-deps chromium
@@ -158,6 +163,16 @@ jobs:
     runs-on: ubuntu-latest
     needs: backend
     services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: enterai_zap
+          POSTGRES_USER: enterai
+          POSTGRES_PASSWORD: enterai_ci_password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U enterai -d enterai_zap"
+          --health-interval 5s --health-timeout 5s --health-retries 20
       # The ZAP pass below boots the API in production mode, which fails closed
       # without a reachable Redis for shared rate limits.
       redis:
@@ -176,15 +191,16 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install schemathesis==4.27.2 --upgrade pytest
-          DATABASE_URL=sqlite:///./ci.db PYTHONPATH=. alembic upgrade head
-          ENVIRONMENT=ci ENABLE_API_DOCS=true DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
+          DATABASE_URL=postgresql+psycopg://enterai:enterai_ci_password@127.0.0.1:5432/enterai_zap PYTHONPATH=. alembic upgrade head
+          ENVIRONMENT=test ENABLE_API_DOCS=true DATABASE_URL=postgresql+psycopg://enterai:enterai_ci_password@127.0.0.1:5432/enterai_zap JWT_SECRET=ci-only-secret REDIS_URL=redis://127.0.0.1:6379/0 AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api.log 2>&1 &
           echo $! > /tmp/enter-ai-api.pid
           for attempt in $(seq 1 30); do curl -fsS http://127.0.0.1:8000/health && break || sleep 1; done
+          curl -fsS http://127.0.0.1:8000/health || { cat /tmp/enter-ai-api.log; exit 1; }
       - name: Schemathesis
-        # These are browser-navigation handoffs to an external IdP. Schemathesis
-        # correctly discovers their redirects but cannot exercise the external
-        # provider; dedicated OIDC and Playwright tests cover them instead.
-        run: schemathesis run http://127.0.0.1:8000/openapi.json --checks all --exclude-checks allow_header_conformance,positive_data_acceptance --phases examples,coverage,fuzzing --exclude-path-regex '^/api/auth/sso/(start|callback)$'
+        # OAuth endpoints redirect the browser to an external IdP or the web app,
+        # neither of which is present in this API-only job. Dedicated OIDC and
+        # integration tests exercise those handoffs and state validation.
+        run: schemathesis run http://127.0.0.1:8000/openapi.json --checks all --exclude-checks allow_header_conformance,positive_data_acceptance --phases examples,coverage,fuzzing --exclude-path-regex '^/api/(auth/sso/(start|callback)|integrations/(gmail|notion|slack)/(user/)?callback)$'
       - uses: grafana/setup-k6-action@v1
       - name: K6 smoke
         run: k6 run qa/k6/smoke.js
@@ -193,13 +209,23 @@ jobs:
         run: |
           kill "$(cat /tmp/enter-ai-api.pid)"
           for attempt in $(seq 1 30); do ! curl -sS http://127.0.0.1:8000/health >/dev/null 2>&1 && break || sleep 1; done
-          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=sqlite:///./ci.db JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SEED_ADMIN_EMAIL=admin@staging.example.test SEED_ADMIN_PASSWORD=ci-only-seed-admin-password EMAIL_PROVIDER=smtp SMTP_HOST=127.0.0.1 EMAIL_FROM=ci@enterai.test APP_BASE_URL=https://staging.example.test API_BASE_URL=https://api.staging.example.test CORS_ALLOWED_ORIGINS=https://staging.example.test TRUSTED_HOSTS=staging.example.test,api.staging.example.test TRUST_PROXY_HEADERS=true AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
+          DATABASE_URL=postgresql+psycopg://enterai:enterai_ci_password@127.0.0.1:5432/enterai_zap PYTHONPATH=. alembic upgrade head
+          ENVIRONMENT=production ENABLE_API_DOCS=false DATABASE_URL=postgresql+psycopg://enterai:enterai_ci_password@127.0.0.1:5432/enterai_zap JWT_SECRET=ci-only-secret-that-is-long-enough-for-the-production-check REDIS_URL=redis://127.0.0.1:6379/0 SEED_ADMIN_EMAIL=admin@staging.example.test SEED_ADMIN_PASSWORD=ci-only-seed-admin-password EMAIL_PROVIDER=smtp SMTP_HOST=127.0.0.1 EMAIL_FROM=ci@enterai.test APP_BASE_URL=https://staging.example.test API_BASE_URL=https://api.staging.example.test CORS_ALLOWED_ORIGINS=https://staging.example.test TRUSTED_HOSTS=staging.example.test,api.staging.example.test TRUST_PROXY_HEADERS=true AUTH_LOGIN_RATE_LIMIT_PER_MINUTE=100000 AUTH_SIGNUP_RATE_LIMIT_PER_MINUTE=100000 AUTH_RECOVERY_RATE_LIMIT_PER_MINUTE=100000 AUTH_TOKEN_RATE_LIMIT_PER_MINUTE=100000 PYTHONPATH=. uvicorn app.main:app --host 127.0.0.1 --port 8000 > /tmp/enter-ai-api-zap.log 2>&1 &
           for attempt in $(seq 1 30); do curl -fsS -H 'Host: api.staging.example.test' http://127.0.0.1:8000/health && break || sleep 1; done
           curl -fsS -H 'Host: api.staging.example.test' http://127.0.0.1:8000/health || { echo "::error::API failed to come back up in production mode"; cat /tmp/enter-ai-api-zap.log; exit 1; }
       - uses: zaproxy/action-baseline@v0.14.0
         with:
           target: http://127.0.0.1:8000/
-          cmd_options: -c /zap/wrk/qa/zap-rules.conf
+          # Production host validation rejects the IP address used to reach the
+          # local server. Rewrite the Host header without changing the target.
+          cmd_options: >-
+            -c /zap/wrk/qa/zap-rules.conf
+            -z "-config replacer.full_list\(0\).description=ci-host
+            -config replacer.full_list\(0\).enabled=true
+            -config replacer.full_list\(0\).matchtype=REQ_HEADER
+            -config replacer.full_list\(0\).matchstr=Host
+            -config replacer.full_list\(0\).regex=false
+            -config replacer.full_list\(0\).replacement=api.staging.example.test"
           fail_action: true
           allow_issue_writing: false
 
@@ -217,7 +243,7 @@ jobs:
       JWT_SECRET: ci-only-secret-that-is-long-enough-for-the-production-check
       ENTERAI_BACKEND_IMAGE: enterai-backend:ci
       ENTERAI_FRONTEND_IMAGE: enterai-frontend:ci
-      ENVIRONMENT: ci
+      ENVIRONMENT: test
       REDIS_URL: redis://redis:6379/0
       SEED_ADMIN_EMAIL: admin@ci.enterai.test
       SEED_ADMIN_PASSWORD: ci-only-seed-admin-password
@@ -289,6 +315,8 @@ jobs:
       STORAGE_BUCKET: enterai-uploads
       STORAGE_ACCESS_KEY: ci-access-key
       STORAGE_SECRET_KEY: ci-secret-key
+      BACKUP_OBJECTS_BUCKET: enterai-uploads-backup-ci
+      DATABASE_BACKUP_BUCKET: enterai-database-backup-ci
       TLS_CERT_PATH: /tmp/enterai-ci.crt
       TLS_KEY_PATH: /tmp/enterai-ci.key
       ENTERAI_BACKEND_IMAGE: enterai-backend:ci
@@ -299,7 +327,10 @@ jobs:
         run: |
           openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TLS_KEY_PATH" -out "$TLS_CERT_PATH" -days 1 -subj '/CN=staging.example.test'
           docker compose -f docker-compose.prod.yml config -q
-          docker run --rm -v "$PWD/deploy/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$TLS_CERT_PATH:/etc/nginx/tls/tls.crt:ro" -v "$TLS_KEY_PATH:/etc/nginx/tls/tls.key:ro" nginx:1.27-alpine nginx -t
+          # This standalone syntax check is outside the Compose network, so its
+          # static web upstream needs a local placeholder for DNS resolution.
+          # The multi-replica job separately checks the real Compose networking.
+          docker run --rm --add-host web:127.0.0.1 -v "$PWD/deploy/nginx.conf:/etc/nginx/nginx.conf:ro" -v "$TLS_CERT_PATH:/etc/nginx/tls/tls.crt:ro" -v "$TLS_KEY_PATH:/etc/nginx/tls/tls.key:ro" nginx:1.27-alpine nginx -t
       - name: Validate hosted frontend build arguments and images
         run: |
           if docker build --build-arg BUILD_ENVIRONMENT=staging -t enterai-frontend:missing-api ./frontend; then echo 'missing hosted API URL unexpectedly built' >&2; exit 1; fi

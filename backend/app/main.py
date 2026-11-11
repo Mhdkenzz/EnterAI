@@ -2,6 +2,7 @@ import os
 import hashlib
 import re
 import secrets
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Callable, Literal
 import jwt
@@ -16,8 +17,9 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .auth import CONFIRMATION_SECRET, CSRF_HEADER, SESSION_COOKIE, clear_session_cookie, revoke_session_token, create_token, current_user, hash_password, set_session_cookie, verify_password
 from .database import Base, engine, get_db
-from .models import Activity, AgentMessage, Attachment, Comment, CopilotConfirmation, HierarchyConfig, InboundMessage, InboundPlan, Notification, Organization, Project, ProjectDocument, Task, TaskDependency, Team, User
-from .copilot import CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
+from .models import Activity, AgentMessage, Attachment, AuditEvent, Comment, CopilotConfirmation, Decision, HierarchyConfig, InboundMessage, InboundPlan, Notification, Organization, Project, ProjectDocument, Task, TaskDependency, Team, User
+from .copilot import AgentAccessDenied, CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
+from .agent_access import agent_project_access, agent_tool_allowed
 from .agent_workspace import REPO_PATCH_NAME, apply_confirmed_repo_patch
 from .observability import execution_allowed, audit_context, audit, provider_call, legacy_detail, configure_logging, configure_error_reporting
 from . import execution, gmail_sync
@@ -27,6 +29,7 @@ from .request_planning import InboundPlanProposal, create_inbound_plan
 from .storage import get_storage
 from .indexing import index_document
 from .task_dependencies import list_dependencies, replace_dependencies, unmet_dependency_ids
+from .knowledge_access import document_is_visible, is_workspace_manager, task_is_visible, visible_project_ids
 from .deployment_config import is_deployment_environment, migration_revision_status, validate_deployment_configuration
 from .ratelimit import OpenRouterRateLimitExceeded
 
@@ -36,12 +39,39 @@ docs_enabled = os.getenv("ENABLE_API_DOCS", "false" if is_deployment_environment
 # Before the app is built, so the SDK's FastAPI integration hooks every request.
 configure_error_reporting()
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    validate_deployment_configuration()
+    configure_logging()
+    with next(get_db()) as db:
+        seed(db, demo_content=demo_seed_enabled)
+    from .billing_service import sync_plans_from_env
+    with next(get_db()) as db:
+        sync_plans_from_env(db)
+    execution.start_background_loop()
+    gmail_sync.start_gmail_sync_loop()
+    privacy_service.start_background_loop()
+    from . import observability as _observability
+    _observability.start_aggregation_background_loop()
+    mailer.start_retry_loop()
+    try:
+        yield
+    finally:
+        await execution.stop_background_loop()
+        await gmail_sync.stop_gmail_sync_loop()
+        await privacy_service.stop_background_loop()
+        await _observability.stop_aggregation_background_loop()
+        await mailer.stop_retry_loop()
+
+
 app = FastAPI(
     title="Enter AI API",
     version="0.1.0",
     docs_url="/docs" if docs_enabled else None,
     redoc_url="/redoc" if docs_enabled else None,
     openapi_url="/openapi.json" if docs_enabled else None,
+    lifespan=lifespan,
 )
 
 
@@ -149,29 +179,6 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type", "Accept", CSRF_HEADER],
 )
 
-@app.on_event("startup")
-def startup():
-    validate_deployment_configuration()
-    configure_logging()
-    with next(get_db()) as db: seed(db, demo_content=demo_seed_enabled)
-    from .billing_service import sync_plans_from_env
-    with next(get_db()) as db: sync_plans_from_env(db)
-    execution.start_background_loop()
-    gmail_sync.start_gmail_sync_loop()
-    privacy_service.start_background_loop()
-    from . import observability as _observability
-    _observability.start_aggregation_background_loop()
-    mailer.start_retry_loop()
-
-@app.on_event("shutdown")
-def shutdown():
-    execution.stop_background_loop()
-    gmail_sync.stop_gmail_sync_loop()
-    privacy_service.stop_background_loop()
-    from . import observability as _observability
-    _observability.stop_aggregation_background_loop()
-    mailer.stop_retry_loop()
-
 # Upper bounds matter as much as lower ones: an unbounded password is hashed with
 # Argon2 in full on every attempt, and names past the column width fail as a 500.
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str = Field(max_length=200)
@@ -240,6 +247,18 @@ def ensure_project(db, user, project_id):
     if not project or project.organization_id != user.organization_id: raise HTTPException(404,"Project not found")
     return project
 
+
+def ensure_knowledge_project(db: Session, user: User, project_id: str) -> Project:
+    project = db.scalar(select(Project).where(
+        Project.id == project_id, Project.id.in_(visible_project_ids(db, user)),
+    ))
+    if not project:
+        if user.kind == "agent" and db.scalar(select(Project.id).where(Project.id == project_id, Project.organization_id == user.organization_id)):
+            from .agent_access import record_access_denial
+            record_access_denial(db, user, tool="direct_api_request", resource_type="project", reason="out_of_scope")
+        raise HTTPException(404, "Project not found")
+    return project
+
 def ensure_org_team(db, user, team_id):
     if team_id is None: return None
     team = db.get(Team, team_id)
@@ -264,6 +283,37 @@ def ensure_org_assignee(db, user, assignee_id):
         if assignee.retired_at is not None:
             raise HTTPException(409, "This agent has been retired and cannot be assigned new work")
     return assignee
+
+
+def ensure_agent_has_no_active_conflict(db: Session, agent_id: str, task_id: str) -> None:
+    """An agent may queue work, but must never own two tasks in progress."""
+    agent = db.scalar(select(User).where(
+        User.id == agent_id, User.kind == "agent", User.retired_at.is_(None),
+    ).with_for_update())
+    if not agent:
+        raise HTTPException(409, "This agent is no longer available for work")
+    active_task = db.scalar(select(Task).where(
+        Task.assignee_id == agent_id, Task.id != task_id, Task.status == "in_progress",
+    ).join(Project, Project.id == Task.project_id).where(
+        Project.organization_id == agent.organization_id,
+    ).order_by(Task.updated_at.desc()).limit(1))
+    if active_task:
+        raise HTTPException(409, "This agent already has active work. Finish or pause that task before starting another.")
+
+
+def accountability_person(db: Session, user_id: str | None, organization_id: str) -> dict[str, Any] | None:
+    if not user_id:
+        return None
+    person = db.scalar(select(User).where(
+        User.id == user_id, User.organization_id == organization_id,
+    ))
+    if not person:
+        return None
+    return {
+        "id": person.id, "name": person.name, "kind": person.kind,
+        "role": person.role, "title": person.title,
+        "hierarchy_level": person.hierarchy_level,
+    }
 
 def ensure_task_parent(db, project, parent_id):
     """A subtask must live in the same project as its parent; otherwise the task tree
@@ -409,27 +459,27 @@ def me(user: User = Depends(current_user), db: Session = Depends(get_db)): retur
 
 @app.get("/api/dashboard")
 def dashboard(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    projects=db.scalars(select(Project).where(Project.organization_id==user.organization_id).order_by(Project.created_at.desc())).all()
-    assigned=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id, Task.assignee_id==user.id)).all()
+    projects=db.scalars(select(Project).where(Project.id.in_(visible_project_ids(db,user))).order_by(Project.created_at.desc())).all()
+    assigned=db.scalars(select(Task).where(task_is_visible(db,user), Task.assignee_id==user.id)).all()
     priority_order = {"high": 0, "medium": 1, "low": 2}
     tasks=sorted(assigned,key=lambda task: (task.status=="done", priority_order.get(task.priority, 1), task.due_date or datetime.max, task.position, task.created_at))
-    new_requests = db.scalar(select(func.count(InboundMessage.id)).where(
+    new_requests = 0 if not is_workspace_manager(user) else (db.scalar(select(func.count(InboundMessage.id)).where(
         InboundMessage.organization_id == user.organization_id, InboundMessage.status == "new",
-    )) or 0
-    plans_awaiting_approval = db.scalar(select(func.count(InboundPlan.id)).where(
+    )) or 0)
+    plans_awaiting_approval = 0 if not is_workspace_manager(user) else (db.scalar(select(func.count(InboundPlan.id)).where(
         InboundPlan.organization_id == user.organization_id, InboundPlan.status == "pending",
+    )) or 0)
+    blocked_tasks = db.scalar(select(func.count(Task.id)).where(
+        task_is_visible(db,user), Task.status == "blocked",
     )) or 0
-    blocked_tasks = db.scalar(select(func.count(Task.id)).join(Project).where(
-        Project.organization_id == user.organization_id, Task.status == "blocked",
-    )) or 0
-    projects_awaiting_review = db.scalar(select(func.count(Project.id)).where(
-        Project.organization_id == user.organization_id, Project.status == "review",
-    )) or 0
+    projects_awaiting_review = 0 if not is_workspace_manager(user) else (db.scalar(select(func.count(Project.id)).where(
+        Project.id.in_(visible_project_ids(db,user)), Project.status == "review",
+    )) or 0)
     now = datetime.now(timezone.utc); week_start = datetime(now.year, now.month, now.day) - timedelta(days=now.weekday())
     return {"projects":[project_out(p,db) for p in projects],"my_tasks":[task_out(t,db) for t in tasks],"stats":{"active_projects":len([p for p in projects if p.status=="active"]),"at_risk":len([p for p in projects if p.health=="at_risk"]),"my_open_tasks":len([task for task in assigned if task.status!="done"]),"completed_this_week":len([task for task in assigned if task.completed_at and task.completed_at >= week_start]),"new_requests":new_requests,"plans_awaiting_approval":plans_awaiting_approval,"blocked_tasks":blocked_tasks,"projects_awaiting_review":projects_awaiting_review}}
 
 @app.get("/api/projects")
-def projects(user: User = Depends(current_user), db: Session = Depends(get_db)): return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id)).all()]
+def projects(user: User = Depends(current_user), db: Session = Depends(get_db)): return [project_out(p,db) for p in db.scalars(select(Project).where(Project.id.in_(visible_project_ids(db,user)))).all()]
 @app.post("/api/projects", status_code=201)
 def create_project(data: ProjectIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
     ensure_org_team(db, user, data.team_id)
@@ -440,14 +490,18 @@ def create_project(data: ProjectIn, user: User = Depends(current_user), db: Sess
     values=data.model_dump(exclude={"source_document_ids"}); values.update(name=name, code=code)
     p=Project(**values,organization_id=user.organization_id,owner_id=user.id); db.add(p); db.flush()
     if data.source_document_ids:
-        docs=db.scalars(select(ProjectDocument).where(ProjectDocument.id.in_(data.source_document_ids),ProjectDocument.organization_id==user.organization_id,ProjectDocument.project_id.is_(None))).all()
+        docs=db.scalars(select(ProjectDocument).where(
+            ProjectDocument.id.in_(data.source_document_ids),
+            ProjectDocument.project_id.is_(None),
+            document_is_visible(db, user),
+        )).all()
         for document in docs: document.project_id=p.id
     log(db,user.organization_id,user.id,"project",p.id,"created",name=p.name); db.commit(); return project_out(p,db)
 @app.get("/api/projects/{project_id}")
-def project(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)): return project_out(ensure_project(db,user,project_id),db)
+def project(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)): return project_out(ensure_knowledge_project(db,user,project_id),db)
 @app.patch("/api/projects/{project_id}")
 def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    p = ensure_project(db, user, project_id)
+    p = ensure_knowledge_project(db, user, project_id)
     values = data.model_dump(exclude_unset=True)
     if values.get("status") == "completed":
         raise HTTPException(409, "Approve completion after reviewing all finished tasks")
@@ -468,7 +522,7 @@ def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(cu
 def approve_project_completion(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
     if user.kind != "human" or not user.active:
         raise HTTPException(403, "An active human must approve project completion")
-    p = ensure_project(db, user, project_id)
+    p = ensure_knowledge_project(db, user, project_id)
     if user.role not in {"admin", "manager"} and p.owner_id != user.id:
         raise HTTPException(403, "Only the project owner or a manager can approve completion")
     if p.status != "review":
@@ -478,6 +532,9 @@ def approve_project_completion(project_id: str, user: User = Depends(current_use
         raise HTTPException(409, "Every project task must be complete before approval")
     p.status = "completed"
     log(db, user.organization_id, user.id, "project", p.id, "completion_approved", task_count=len(tasks))
+    for task in tasks:
+        log(db, user.organization_id, user.id, "task", task.id, "task_review_approved",
+            reviewed_by_id=user.id, approved_by_id=user.id, project_id=p.id)
     db.commit()
     return project_out(p, db)
 
@@ -493,7 +550,7 @@ def reopen_project(project_id: str, user: User = Depends(current_user), db: Sess
     return project_out(p, db)
 @app.get("/api/projects/{project_id}/tasks")
 def project_tasks(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)):
-    ensure_project(db,user,project_id); return [task_out(t,db) for t in db.scalars(select(Task).where(Task.project_id==project_id).order_by(Task.position)).all()]
+    ensure_knowledge_project(db,user,project_id); return [task_out(t,db) for t in db.scalars(select(Task).where(Task.project_id==project_id,task_is_visible(db,user)).order_by(Task.position)).all()]
 
 @app.post("/api/project-drafts/assist", status_code=201)
 async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(current_user), db: Session=Depends(get_db)):
@@ -522,12 +579,14 @@ async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(cu
 
 @app.get("/api/projects/{project_id}/documents")
 def project_documents(project_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    ensure_project(db,user,project_id)
-    return [{"id":d.id,"file_name":d.file_name,"content_type":d.content_type,"created_at":d.created_at} for d in db.scalars(select(ProjectDocument).where(ProjectDocument.project_id==project_id)).all()]
+    ensure_knowledge_project(db,user,project_id)
+    return [{"id":d.id,"file_name":d.file_name,"content_type":d.content_type,"created_at":d.created_at} for d in db.scalars(select(ProjectDocument).where(
+        ProjectDocument.project_id == project_id, document_is_visible(db, user),
+    )).all()]
 
 @app.post("/api/projects/{project_id}/documents",status_code=201)
 async def add_project_document(project_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
-    ensure_project(db,user,project_id)
+    ensure_knowledge_project(db,user,project_id)
     raw=await file.read()
     if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Documents must be 5 MB or smaller")
     try: extracted=extract_document_text(file.filename or "document.txt",raw)
@@ -544,42 +603,114 @@ async def add_project_document(project_id:str,file:UploadFile=File(...),user:Use
 
 @app.post("/api/tasks",status_code=201)
 def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    p=ensure_project(db,user,data.project_id)
+    p=ensure_knowledge_project(db,user,data.project_id)
     if p.status == "completed": raise HTTPException(409, "Reopen the completed project before adding work")
     if p.status == "review":
         p.status = "active"
         log(db, user.organization_id, user.id, "project", p.id, "completion_review_reopened", reason="task_added")
-    ensure_org_assignee(db,user,data.assignee_id); ensure_task_parent(db,p,data.parent_id)
+    assignee_id = data.assignee_id or user.id
+    assignee = ensure_org_assignee(db,user,assignee_id)
+    if data.status == "in_progress" and assignee.kind == "agent":
+        ensure_agent_has_no_active_conflict(db, assignee.id, "__new_task__")
+    ensure_task_parent(db,p,data.parent_id)
     values=data.model_dump(); dependency_ids=values.pop("depends_on")
+    values["assignee_id"] = assignee_id
     t=Task(**values,reporter_id=user.id); db.add(t); db.flush()
     try: replace_dependencies(db,t,dependency_ids)
     except ValueError as error: raise HTTPException(422,str(error)) from error
     if t.status == "done" and unmet_dependency_ids(db,t.id): raise HTTPException(409,"Complete prerequisite tasks before marking this task done")
-    log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title)
+    log(db,user.organization_id,user.id,"task",t.id,"created",title=t.title,
+        assignee_id=assignee_id, requested_by_id=user.id, assignment_reason="task_created")
     notify(db, t.assignee_id, user, f"{user.name} assigned you “{t.title}”", p.name, f"project:{p.id}")
     db.commit(); return task_out(t,db)
 @app.get("/api/tasks/{task_id}")
 def get_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     """A single task, for links that open it directly (/projects/<id>?task=<id>)."""
-    t=db.get(Task,task_id)
+    t=db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db,user)))
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id)
+    ensure_knowledge_project(db,user,t.project_id)
     return task_out(t,db)
+
+
+@app.get("/api/tasks/{task_id}/accountability")
+def task_accountability(task_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db, user)))
+    if not task:
+        raise HTTPException(404, "Task not found")
+    ensure_knowledge_project(db, user, task.project_id)
+    rows = list(db.scalars(select(AuditEvent).where(
+        AuditEvent.organization_id == user.organization_id,
+        AuditEvent.entity_type == "task", AuditEvent.entity_id == task.id,
+    ).order_by(AuditEvent.created_at.desc(), AuditEvent.id.desc()).limit(100)).all())
+    rows.reverse()
+    person_ids = {value for value in (task.reporter_id, task.assignee_id) if value}
+    for row in rows:
+        person_ids.update(value for value in (row.actor_id, row.initiator_id) if value)
+        person_ids.update(value for key, value in (row.detail or {}).items()
+                          if key in {"assignee_id", "from_assignee_id", "to_assignee_id", "requested_by_id",
+                                     "reviewed_by_id", "approved_by_id", "proposed_by_agent_id", "agent_id"}
+                          and isinstance(value, str))
+    people = {person.id: accountability_person(db, person.id, user.organization_id)
+              for person in db.scalars(select(User).where(
+                  User.id.in_(person_ids), User.organization_id == user.organization_id,
+              )).all()} if person_ids else {}
+
+    def person(user_id: str | None):
+        return people.get(user_id) if user_id else None
+
+    events = [{
+        "id": row.id, "action": row.action, "source": row.source,
+        "actor": person(row.actor_id), "initiator": person(row.initiator_id),
+        "created_at": row.created_at.isoformat(),
+        "detail": {key: value for key, value in (row.detail or {}).items()
+                   if key in {"from_status", "to_status", "assignment_changed", "assignee_id",
+                              "from_assignee_id", "to_assignee_id", "assignment_reason", "tool",
+                              "agent_id", "reviewed_by_id", "approved_by_id"}},
+    } for row in rows]
+    assignment_event = next((event for event in reversed(events)
+                             if event["action"] in {"created", "created_from_inbound_plan", "subtask_delegated", "delegated_to_agent", "task_reassigned"}
+                             or event["detail"].get("assignment_changed")), None)
+    execution_event = next((event for event in reversed(events)
+                            if event["action"] in {"agent_claimed", "agent_started", "agent_progress", "agent_completed", "agent_blocked", "agent_action_proposed", "task_started", "task_completed"}), None)
+    review_event = next((event for event in reversed(events)
+                         if event["action"] in {"agent_action_approved", "agent_action_rejected", "task_reviewed", "task_review_approved"}), None)
+    approval_event = next((event for event in reversed(events)
+                           if event["action"] in {"agent_action_approved", "task_review_approved"}), None)
+    return {
+        "requested_by": person(task.reporter_id), "owner": person(task.assignee_id),
+        "assigned_by": assignment_event["actor"] if assignment_event else None,
+        "executed_by": execution_event["actor"] if execution_event else None,
+        "reviewed_by": review_event["actor"] if review_event else None,
+        "approved_by": approval_event["actor"] if approval_event else None,
+        "events": events,
+    }
 @app.patch("/api/tasks/{task_id}")
 def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id)
+    t=db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db,user)))
     if not t: raise HTTPException(404,"Task not found")
-    p=ensure_project(db,user,t.project_id)
+    p=ensure_knowledge_project(db,user,t.project_id)
     if p.status == "completed" and data.model_fields_set:
         raise HTTPException(409, "Reopen the completed project before changing its tasks")
     if "assignee_id" in data.model_fields_set:
+        if data.assignee_id is None:
+            previous_assignee = db.get(User, t.assignee_id) if t.assignee_id else None
+            if previous_assignee and previous_assignee.kind == "agent":
+                human_admin(user)
+            raise HTTPException(422, "Every task needs an owner. Assign it to a human or active agent.")
         ensure_org_assignee(db, user, data.assignee_id)
         if t.assignee_id and t.assignee_id != data.assignee_id:
             previous_assignee = db.get(User, t.assignee_id)
             if previous_assignee and previous_assignee.kind == "agent":
                 human_admin(user)
+                if t.status == "in_progress":
+                    raise HTTPException(409, "Pause this agent's task before reassigning it. Its current work must be reviewed by a human first.")
     before, before_assignee_id = t.status, t.assignee_id
     changes = data.model_dump(exclude_unset=True)
+    next_assignee_id = changes.get("assignee_id", t.assignee_id)
+    next_status = changes.get("status", t.status)
+    next_assignee = db.get(User, next_assignee_id) if next_assignee_id else None
+    if next_status == "in_progress" and next_assignee and next_assignee.kind == "agent":
+        ensure_agent_has_no_active_conflict(db, next_assignee.id, t.id)
     if data.status == "done" and before == "blocked":
         raise HTTPException(409, "Resolve the blocker and reopen this task before completing it")
     dependency_ids = changes.pop("depends_on", None)
@@ -621,6 +752,10 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
     if "status" in data.model_fields_set and data.status != before:
         t.completed_at = datetime.now(timezone.utc) if data.status == "done" else None
     sync_agent_task_pointers(db, t, before_assignee_id)
+    if t.assignee_id != before_assignee_id and t.assignee_id:
+        assigned_agent = db.get(User, t.assignee_id)
+        if assigned_agent and assigned_agent.kind == "agent":
+            assigned_agent.consecutive_task_failures = 0
     if before != t.status and t.status != "done" and p.status == "review":
         p.status = "active"
         log(db, user.organization_id, user.id, "project", p.id, "completion_review_reopened", reason="task_reopened", task_id=t.id)
@@ -628,7 +763,26 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
         advance_project_to_completion_review(db, p, user.id)
     if t.assignee_id != before_assignee_id:
         notify(db, t.assignee_id, user, f"{user.name} assigned you “{t.title}”", p.name, f"project:{p.id}")
-    log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status,**dependency_detail); db.commit(); return task_out(t,db)
+    owner_changed = t.assignee_id != before_assignee_id
+    log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status,
+        assignment_changed=owner_changed,
+        from_assignee_id=before_assignee_id if owner_changed else None,
+        to_assignee_id=t.assignee_id if owner_changed else None,
+        requested_by_id=t.reporter_id, **dependency_detail)
+    if owner_changed:
+        log(db, user.organization_id, user.id, "task", t.id, "task_reassigned",
+            from_assignee_id=before_assignee_id, to_assignee_id=t.assignee_id,
+            assignment_reason="human_reassignment")
+    if before != t.status and t.status == "done":
+        log(db, user.organization_id, user.id, "task", t.id, "task_completed",
+            from_status=before, to_status="done")
+    elif before != t.status and t.status == "in_progress":
+        log(db, user.organization_id, user.id, "task", t.id, "task_started",
+            from_status=before, to_status="in_progress")
+    elif before != t.status and t.status == "review" and user.kind == "human":
+        log(db, user.organization_id, user.id, "task", t.id, "task_reviewed",
+            from_status=before, to_status="review", reviewed_by_id=user.id)
+    db.commit(); return task_out(t,db)
 def detach_task_references(db, task):
     """PostgreSQL enforces the foreign keys SQLite ignores, so every row pointing at
     this task has to be resolved before the DELETE or the request fails outright.
@@ -644,9 +798,9 @@ def detach_task_references(db, task):
 
 @app.delete("/api/tasks/{task_id}",status_code=204)
 def delete_task(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id)
+    t=db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db,user)))
     if not t: raise HTTPException(404,"Task not found")
-    project = ensure_project(db,user,t.project_id)
+    project = ensure_knowledge_project(db,user,t.project_id)
     if project.status == "completed": raise HTTPException(409, "Reopen the completed project before deleting its tasks")
     if t.reporter_id != user.id: require_manager(user)  # members may delete only what they created
     log(db,user.organization_id,user.id,"task",t.id,"deleted",title=t.title)
@@ -695,26 +849,80 @@ def delete_project(project_id:str,user:User=Depends(current_user),db:Session=Dep
 
 @app.get("/api/tasks/{task_id}/comments")
 def comments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id)
+    t=db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db,user)))
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id)
+    ensure_knowledge_project(db,user,t.project_id)
     comments_list = db.scalars(select(Comment).where(Comment.task_id==task_id)).all()
     author_ids = [c.author_id for c in comments_list if c.author_id]
     authors = {a.id: a for a in db.scalars(select(User).where(User.id.in_(author_ids))).all()}
     return [{"id":c.id,"body":c.body,"created_at":c.created_at,"author":user_out(authors.get(c.author_id))} for c in comments_list]
+
+
+def decision_out(decision: Decision, author: User | None = None) -> dict[str, Any]:
+    return {
+        "id": decision.id, "title": decision.title, "body": decision.body,
+        "created_at": decision.created_at.isoformat(), "project_id": decision.project_id,
+        "task_id": decision.task_id, "source_comment_id": decision.source_comment_id,
+        "source_ref": f"/projects/{decision.project_id}" + (f"?task={decision.task_id}" if decision.task_id else ""),
+        "author": user_out(author) if author else None,
+    }
+
+
+@app.get("/api/tasks/{task_id}/decisions")
+def task_decisions(task_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.get(Task, task_id)
+    if not task or not db.scalar(select(Task.id).where(Task.id == task_id, task_is_visible(db, user))):
+        raise HTTPException(404, "Task not found")
+    decisions = db.scalars(select(Decision).where(
+        Decision.organization_id == user.organization_id, Decision.task_id == task_id,
+    ).order_by(Decision.created_at.desc()).limit(100)).all()
+    authors = {row.id: row for row in db.scalars(select(User).where(User.id.in_([d.created_by for d in decisions]))).all()} if decisions else {}
+    return [decision_out(d, authors.get(d.created_by)) for d in decisions]
+
+
+@app.post("/api/tasks/{task_id}/decisions/from-comment/{comment_id}", status_code=201)
+def record_comment_decision(task_id: str, comment_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "An active human must record a decision")
+    task = db.get(Task, task_id)
+    if not task or not db.scalar(select(Task.id).where(Task.id == task_id, task_is_visible(db, user))):
+        raise HTTPException(404, "Task not found")
+    comment = db.scalar(select(Comment).where(Comment.id == comment_id, Comment.task_id == task_id))
+    if not comment:
+        raise HTTPException(404, "Discussion comment not found")
+    existing = db.scalar(select(Decision).where(Decision.source_comment_id == comment.id))
+    if existing:
+        author = db.get(User, existing.created_by)
+        return decision_out(existing, author)
+    body = comment.body.strip()
+    if not body:
+        raise HTTPException(422, "A decision needs discussion text")
+    title = next((line.strip(" #-\t") for line in body.splitlines() if line.strip()), "Decision")[:240]
+    decision = Decision(
+        organization_id=user.organization_id, project_id=task.project_id, task_id=task.id,
+        source_comment_id=comment.id, title=title, body=body[:20000], created_by=user.id,
+    )
+    db.add(decision)
+    db.flush()
+    log(db, user.organization_id, user.id, "decision", decision.id, "recorded", task_id=task.id, source_comment_id=comment.id)
+    db.commit()
+    db.refresh(decision)
+    return decision_out(decision, user)
+
+
 @app.post("/api/tasks/{task_id}/comments",status_code=201)
 def add_comment(task_id:str,data:CommentIn,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id)
+    t=db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db,user)))
     if not t: raise HTTPException(404,"Task not found")
-    p=ensure_project(db,user,t.project_id); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented")
+    p=ensure_knowledge_project(db,user,t.project_id); c=Comment(task_id=task_id,author_id=user.id,body=data.body); db.add(c); log(db,user.organization_id,user.id,"task",task_id,"commented")
     for recipient in {t.assignee_id, t.reporter_id} - {None}:
         notify(db, recipient, user, f"{user.name} commented on “{t.title}”", data.body[:280], f"project:{p.id}")
     db.commit(); return {"id":c.id,"body":c.body}
 @app.post("/api/tasks/{task_id}/attachments",status_code=201)
 async def add_attachment(task_id:str,file:UploadFile=File(...),user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id)
+    t=db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db,user)))
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id)
+    ensure_knowledge_project(db,user,t.project_id)
     raw=await file.read()
     if len(raw) > MAX_UPLOAD_BYTES: raise HTTPException(413,"Attachments must be 5 MB or smaller")
     path=get_storage().save("task-attachments", file.filename or "attachment", raw); a=Attachment(task_id=task_id,uploaded_by=user.id,file_name=file.filename or "attachment",path=path,content_type=file.content_type); db.add(a); log(db,user.organization_id,user.id,"task",task_id,"attachment_uploaded"); db.commit(); return {"id":a.id,"file_name":a.file_name}
@@ -739,9 +947,9 @@ def _download(identifier: str, file_name: str) -> Response:
 
 @app.get("/api/tasks/{task_id}/attachments")
 def list_attachments(task_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
-    t=db.get(Task,task_id)
+    t=db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db,user)))
     if not t: raise HTTPException(404,"Task not found")
-    ensure_project(db,user,t.project_id)
+    ensure_knowledge_project(db,user,t.project_id)
     rows=db.scalars(select(Attachment).where(Attachment.task_id==task_id).order_by(Attachment.created_at)).all()
     return [{"id":a.id,"file_name":a.file_name,"content_type":a.content_type,"created_at":a.created_at} for a in rows]
 
@@ -749,16 +957,24 @@ def list_attachments(task_id:str,user:User=Depends(current_user),db:Session=Depe
 @app.get("/api/attachments/{attachment_id}/download")
 def download_attachment(attachment_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     a=db.get(Attachment,attachment_id)
-    t=db.get(Task,a.task_id) if a else None
-    if not a or not t: raise HTTPException(404,"Attachment not found")
-    ensure_project(db,user,t.project_id)
+    t=db.scalar(select(Task).where(Task.id == a.task_id, task_is_visible(db,user))) if a else None
+    if not a or not t:
+        if user.kind == "agent":
+            from .agent_access import record_access_denial
+            record_access_denial(db, user, tool="direct_api_request", resource_type="document", reason="out_of_scope")
+        raise HTTPException(404,"Attachment not found")
+    ensure_knowledge_project(db,user,t.project_id)
     return _download(a.path, a.file_name)
 
 
 @app.get("/api/project-documents/{document_id}/download")
 def download_project_document(document_id:str,user:User=Depends(current_user),db:Session=Depends(get_db)):
     d=db.get(ProjectDocument,document_id)
-    if not d or d.organization_id!=user.organization_id: raise HTTPException(404,"Document not found")
+    if not d or not db.scalar(select(ProjectDocument.id).where(ProjectDocument.id == document_id, document_is_visible(db,user))):
+        if user.kind == "agent":
+            from .agent_access import record_access_denial
+            record_access_denial(db, user, tool="direct_api_request", resource_type="document", reason="out_of_scope")
+        raise HTTPException(404,"Document not found")
     return _download(d.path, d.file_name)
 
 
@@ -785,6 +1001,7 @@ def agent_out(a: User, db: Session) -> dict:
     return {
         "id": a.id, "name": a.name, "title": a.title, "avatar": a.avatar,
         "hierarchy_level": a.hierarchy_level, "parent_agent_id": a.parent_agent_id,
+        "execution_enabled": a.execution_enabled,
         "current_task": task_out(current, db) if current else None,
         "last_completed_task": task_out(last_completed, db) if last_completed else None,
         "is_working": a.current_task_id is not None and not blocked and not rate_limited and current is not None and current.status != "review",
@@ -873,11 +1090,20 @@ def assign_task_to_agent(task_id: str, data: AssignAgent, user: User, db: Sessio
         raise HTTPException(404, "Agent not found")
     if agent.retired_at is not None:
         raise HTTPException(409, "This agent has been retired and cannot be assigned new work")
+    if t.assignee_id == agent.id:
+        return task_out(t, db)
+    if t.status == "in_progress":
+        previous = db.get(User, t.assignee_id) if t.assignee_id else None
+        if previous and previous.kind == "agent":
+            raise HTTPException(409, "Pause this agent's task before reassigning it. Its current work must be reviewed by a human first.")
+        ensure_agent_has_no_active_conflict(db, agent.id, t.id)
     before_assignee_id = t.assignee_id
     t.assignee_id = agent.id
     sync_agent_task_pointers(db, t, before_assignee_id)
     agent.consecutive_task_failures = 0  # a fresh assignment is a human intervention -- give it a clean start
-    log(db, user.organization_id, user.id, "task", t.id, "delegated_to_agent", agent_id=agent.id, agent_name=agent.name)
+    log(db, user.organization_id, user.id, "task", t.id, "delegated_to_agent",
+        agent_id=agent.id, from_assignee_id=before_assignee_id,
+        to_assignee_id=agent.id, assignment_reason="human_reassignment")
     db.commit()
     return task_out(t, db)
 
@@ -911,17 +1137,22 @@ def send_agent_message(agent_id: str, data: AgentMessageIn, user:User=Depends(cu
     db.add(AgentMessage(agent_id=agent.id, author_id=user.id, role="user", body=data.message))
     audit(db,user.organization_id,user.id,"agent",agent.id,"message_sent")
     scope_project_id = None
+    scope_task_id = None
     if agent.current_task_id:
         current_task = db.get(Task, agent.current_task_id)
         if current_task:
             scope_project_id = current_task.project_id
+            scope_task_id = current_task.id
     try:
         with audit_context("agent", agent.id, user.id):
-            result = CopilotService(db, user.organization_id).plan(data.message, WorkspaceTools(db, agent, scope_project_id=scope_project_id))
+            result = CopilotService(db, user.organization_id).plan(data.message, WorkspaceTools(db, agent, scope_project_id=scope_project_id, scope_task_id=scope_task_id))
         _issue_result_confirmations(result, agent, db)
     except OpenRouterRateLimitExceeded as error:
         db.rollback()
         raise HTTPException(429, "AI provider request limit reached for this workspace. Try again in a minute.", headers={"Retry-After": "60"}) from error
+    except AgentAccessDenied as error:
+        db.commit()
+        raise HTTPException(403, "The agent needs additional access to answer this request. A workspace administrator must review its access grants.") from error
     except CopilotProviderError as error:
         db.commit()
         raise HTTPException(503, "The configured AI provider is unavailable. Try again later.") from error
@@ -1214,7 +1445,7 @@ def approve_inbound_plan(
     for position, (plan_index, item) in enumerate(ordered_tasks):
         # The CEO owns the approved task queue. The scheduler claims one task at a
         # time; CEO/managers can then split work into directly assigned subtasks.
-        assignee_id = ceo.id if ceo and autonomous_execution_ready else None
+        assignee_id = ceo.id if ceo and autonomous_execution_ready else user.id
         task = Task(
             project_id=project.id, title=item["title"].strip(), description=item["description"].strip(),
             status="todo", priority=item["priority"], assignee_id=assignee_id,
@@ -1239,7 +1470,9 @@ def approve_inbound_plan(
     message.status = "planned"
     log(db, user.organization_id, user.id, "project", project.id, "created_from_inbound_plan", plan_id=plan.id, source_message_id=message.id)
     for task in tasks:
-        log(db, user.organization_id, user.id, "task", task.id, "created_from_inbound_plan", plan_id=plan.id, priority=task.priority)
+        log(db, user.organization_id, user.id, "task", task.id, "created_from_inbound_plan",
+            plan_id=plan.id, priority=task.priority, assignee_id=task.assignee_id,
+            requested_by_id=user.id, assignment_reason="inbound_plan")
     log(db, user.organization_id, user.id, "inbound_plan", plan.id, "approved", project_id=project.id, source_message_id=message.id)
     db.commit()
     return {"plan": inbound_plan_out(plan), "project": project_out(project, db),
@@ -1273,12 +1506,72 @@ def activity(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [{"id":a.id,"action":a.action,"entity_type":a.entity_type,"detail":legacy_detail(a.detail or {}),"created_at":a.created_at,"actor":user_out(db.get(User,a.actor_id)) if a.actor_id else None} for a in db.scalars(select(Activity).where(Activity.organization_id==user.organization_id,Activity.action.notin_(FEED_EXCLUDED_ACTIONS)).order_by(Activity.created_at.desc()).limit(50)).all()]
 @app.get("/api/search")
 def search(q:str=Query(min_length=1, max_length=200),user:User=Depends(current_user),db:Session=Depends(get_db)):
+    """Search authorized workspace knowledge and return bounded, timestamped citations."""
+    from .models import Decision
     # `%` and `_` are LIKE wildcards: escaped, "100%" finds "100%" rather than everything.
-    # Capped, because a one-letter query would otherwise serialize every task in the org.
     term="%"+q.replace("\\","\\\\").replace("%","\\%").replace("_","\\_")+"%"
-    ps=db.scalars(select(Project).where(Project.organization_id==user.organization_id,or_(Project.name.ilike(term,escape="\\"),Project.code.ilike(term,escape="\\"))).limit(20)).all()
-    ts=db.scalars(select(Task).join(Project).where(Project.organization_id==user.organization_id,Task.title.ilike(term,escape="\\")).limit(30)).all()
-    return {"projects":[project_out(p,db) for p in ps],"tasks":[task_out(t,db) for t in ts]}
+    project_scope = visible_project_ids(db, user)
+    task_scope = task_is_visible(db, user)
+
+    def excerpt(value: str | None) -> str:
+        text = " ".join((value or "").split())
+        if len(text) <= 280:
+            return text
+        position = text.casefold().find(q.casefold())
+        start = max(0, position - 90) if position >= 0 else 0
+        end = min(len(text), start + 260)
+        return ("…" if start else "") + text[start:end] + ("…" if end < len(text) else "")
+
+    def stamp(value: datetime | None) -> str | None:
+        return value.isoformat() if value else None
+
+    ps=db.scalars(select(Project).where(
+        Project.id.in_(project_scope),
+        or_(Project.name.ilike(term,escape="\\"), Project.code.ilike(term,escape="\\"), Project.description.ilike(term,escape="\\")),
+    ).order_by(Project.created_at.desc()).limit(20)).all()
+    ts=db.scalars(select(Task).where(
+        task_scope,
+        or_(Task.title.ilike(term,escape="\\"), Task.description.ilike(term,escape="\\")),
+    ).order_by(Task.updated_at.desc()).limit(30)).all()
+    docs=db.scalars(select(ProjectDocument).where(
+        document_is_visible(db, user),
+        or_(ProjectDocument.file_name.ilike(term,escape="\\"), ProjectDocument.extracted_text.ilike(term,escape="\\")),
+    ).order_by(ProjectDocument.created_at.desc()).limit(20)).all()
+    attachment_rows=db.execute(select(Attachment, Task).join(Task, Task.id == Attachment.task_id).where(
+        task_scope, Attachment.file_name.ilike(term,escape="\\"),
+    ).order_by(Attachment.created_at.desc()).limit(20)).all()
+    discussion_rows=db.execute(select(Comment, Task).join(Task, Task.id == Comment.task_id).where(
+        task_scope, Comment.body.ilike(term,escape="\\"),
+    ).order_by(Comment.created_at.desc()).limit(30)).all()
+    decision_rows=db.scalars(select(Decision).where(
+        Decision.organization_id == user.organization_id,
+        Decision.project_id.in_(project_scope),
+        or_(Decision.task_id.is_(None), Decision.task_id.in_(select(Task.id).where(task_scope))),
+        or_(Decision.title.ilike(term,escape="\\"), Decision.body.ilike(term,escape="\\")),
+    ).order_by(Decision.created_at.desc()).limit(20)).all()
+
+    result_projects=[{"id":p.id,"type":"project","title":p.name,"name":p.name,"code":p.code,"snippet":excerpt(p.description),"created_at":stamp(p.created_at),"project_id":p.id,"task_id":None,"source_ref":f"/projects/{p.id}"} for p in ps]
+    result_tasks=[]
+    for task in ts:
+        project = db.get(Project, task.project_id)
+        if project:
+            result_tasks.append({"id":task.id,"type":"task","title":task.title,"snippet":excerpt(task.description),"created_at":stamp(task.updated_at),"project_id":task.project_id,"task_id":task.id,"source_ref":f"/projects/{task.project_id}?task={task.id}","status":task.status,"priority":task.priority})
+    result_docs=[]
+    for document in docs:
+        ref = f"/projects/{document.project_id}" if document.project_id else f"/api/project-documents/{document.id}/download"
+        result_docs.append({"id":document.id,"type":"document","title":document.file_name,"snippet":excerpt(document.extracted_text),"created_at":stamp(document.created_at),"project_id":document.project_id,"task_id":None,"source_ref":ref,"file_name":document.file_name})
+    result_attachments=[]
+    for attachment, task in attachment_rows:
+        result_attachments.append({"id":attachment.id,"type":"attachment","title":attachment.file_name,"snippet":"File attached to " + task.title,"created_at":stamp(attachment.created_at),"project_id":task.project_id,"task_id":task.id,"source_ref":f"/projects/{task.project_id}?task={task.id}","file_name":attachment.file_name})
+    result_discussions=[]
+    for comment, task in discussion_rows:
+        result_discussions.append({"id":comment.id,"type":"discussion","title":f"Discussion on {task.title}","snippet":excerpt(comment.body),"created_at":stamp(comment.created_at),"project_id":task.project_id,"task_id":task.id,"source_ref":f"/projects/{task.project_id}?task={task.id}"})
+    result_decisions=[]
+    for decision in decision_rows:
+        result_decisions.append({"id":decision.id,"type":"decision","title":decision.title,"snippet":excerpt(decision.body),"created_at":stamp(decision.created_at),"project_id":decision.project_id,"task_id":decision.task_id,"source_comment_id":decision.source_comment_id,"source_ref":f"/projects/{decision.project_id}" + (f"?task={decision.task_id}" if decision.task_id else "")})
+    groups={"projects":result_projects,"tasks":result_tasks,"documents":result_docs,"attachments":result_attachments,"discussions":result_discussions,"decisions":result_decisions}
+    groups["results"]=[item for key in ("projects","tasks","documents","attachments","discussions","decisions") for item in groups[key]]
+    return groups
 @app.get("/api/risks")
 def risks(user:User=Depends(current_user),db:Session=Depends(get_db)):
     return [project_out(p,db) for p in db.scalars(select(Project).where(Project.organization_id==user.organization_id,Project.health=="at_risk")).all()]
@@ -1290,7 +1583,7 @@ def _record_ai_usage(db: Session, organization_id: str) -> None:
 @app.post("/api/ai/plan")
 def ai_plan(data:AIRequest,user:User=Depends(current_user),db:Session=Depends(get_db)):
     if data.project_id:
-        ensure_project(db, user, data.project_id)
+        ensure_knowledge_project(db, user, data.project_id)
     try:
         with audit_context("copilot", user.id, user.id):
             result = CopilotService(db, user.organization_id).plan(data.message, WorkspaceTools(db, user, scope_project_id=data.project_id))
@@ -1410,8 +1703,32 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
             tool, args, proposer_agent_id = read_agent_confirmation(data.confirmation_token, user, db)
         except ValueError:
             raise HTTPException(400, str(self_error)) from self_error
-    if proposer_agent_id and not execution_allowed(db, db.get(User, proposer_agent_id)):
-        raise HTTPException(403, "Agent execution is disabled")
+    if proposer_agent_id:
+        proposer = db.scalar(select(User).where(User.id == proposer_agent_id, User.organization_id == user.organization_id, User.kind == "agent"))
+        if not proposer or not execution_allowed(db, proposer):
+            raise HTTPException(403, "Agent execution is disabled")
+        if not agent_tool_allowed(db, proposer, tool):
+            from .agent_access import record_access_denial
+            record_access_denial(db, proposer, tool=tool, reason="revoked")
+            raise HTTPException(403, "The agent no longer has access to this action.")
+        project_id = args.get("project_id")
+        task_id = args.get("task_id")
+        if task_id and not db.scalar(select(Task.id).where(Task.id == task_id, Task.assignee_id == proposer.id)):
+            from .agent_access import record_access_denial
+            record_access_denial(db, proposer, tool=tool, resource_type="project", reason="out_of_scope")
+            raise HTTPException(403, "The agent no longer owns the task for this action.")
+        report_id = args.get("agent_id")
+        if report_id and not db.scalar(select(User.id).where(
+            User.id == report_id, User.organization_id == proposer.organization_id,
+            User.kind == "agent", User.parent_agent_id == proposer.id,
+            User.active.is_(True), User.retired_at.is_(None),
+        )):
+            from .agent_access import record_access_denial
+            record_access_denial(db, proposer, tool=tool, resource_type="tool", reason="out_of_scope")
+            raise HTTPException(403, "The target is no longer a direct report for this action.")
+        if project_id and not agent_project_access(db, proposer, project_id, "write", task_id=task_id):
+            record_access_denial(db, proposer, tool=tool, resource_type="project", reason="revoked")
+            raise HTTPException(403, "The agent no longer has access to this project.")
     handler = WRITE_TOOL_HANDLERS.get(tool)
     if not handler:
         raise HTTPException(400, "Unsupported action")
@@ -1452,6 +1769,10 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
             linked_task.blocked_reason = None
             db.add(Comment(task_id=linked_task.id, author_id=user.id,
                            body=f"Approved agent action: {linked_proposal.label or tool}. The agent can continue."))
+            with audit_context("human", user.id):
+                log(db, user.organization_id, user.id, "task", linked_task.id, "agent_action_approved",
+                    reviewed_by_id=user.id, approved_by_id=user.id,
+                    proposed_by_agent_id=proposer_agent_id)
     db.commit()
     return result
 
@@ -1500,6 +1821,8 @@ def reject_agent_proposal(proposal_id:str, user:User=Depends(current_user), db:S
         task.status = "blocked"
         task.blocked_reason = f"A human rejected the proposed action: {row.label or row.tool}. Review and unblock when ready."
         db.add(Comment(task_id=task.id, author_id=user.id, body=f"Rejected agent action: {row.label or row.tool}. The task is paused for review."))
+        log(db, user.organization_id, user.id, "task", task.id, "agent_action_rejected",
+            reviewed_by_id=user.id, proposed_by_agent_id=row.subject_id)
     row.rejected_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     return {"ok": True}

@@ -25,7 +25,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
-import { states, when, Avatar, Health, Row, describeActivity, field, Modal } from "@/components/workspace/shared";
+import { states, when, Avatar, Health, Row, describeActivity, field, Modal, assigneeName } from "@/components/workspace/shared";
 import type { Doc, Project, Task, InboxNotice, InboundMessage, InboundPlan } from "@/lib/types";
 
 export function Home({ data, activity, project, task, toggle, all, ai }: any) {
@@ -795,8 +795,8 @@ export function Kanban({ tasks, open, update, subtaskCount = () => 0 }: any) {
                     )}
                     <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-2.5">
                       <span className="text-[10px] font-medium text-slate-500">{when(t.due_date)}</span>
-                      <span className="flex min-w-0 items-center gap-1.5" title={t.assignee?.name || "Unassigned"}>
-                        <span className="max-w-28 truncate text-[11px] text-slate-500">{t.assignee?.name || "Unassigned"}</span>
+                      <span className="flex min-w-0 items-center gap-1.5" title={assigneeName(t.assignee)}>
+                        <span className="max-w-36 truncate text-[11px] text-slate-500">{assigneeName(t.assignee)}</span>
                         <Avatar user={t.assignee} />
                       </span>
                     </div>

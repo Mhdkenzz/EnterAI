@@ -63,6 +63,7 @@ export default function EnterAI() {
   const [onboarding, setOnboarding] = useState<any>(null);
   const [aiMessages, setAiMessages] = useState<any[]>([AI_GREETING]);
   const [agents, setAgents] = useState<Agent[]>([]),
+    [agentsLoading, setAgentsLoading] = useState(true),
     [agentProposals, setAgentProposals] = useState<AgentProposal[]>([]),
     [hierarchyConfig, setHierarchyConfig] = useState<HierarchyConfigT | null>(null),
     [agentInspect, setAgentInspect] = useState<Agent | null>(null),
@@ -73,6 +74,16 @@ export default function EnterAI() {
     [ceoUnavailable, setCeoUnavailable] = useState(false),
     [ceoUnreadMessages, setCeoUnreadMessages] = useState(0);
   const ceoWelcomeTriggered = useRef(false);
+  useEffect(() => {
+    if ((!taskForm && !task) || user?.role !== "admin" || user?.kind !== "human") return;
+    let active = true;
+    setAgentsLoading(true);
+    api<Agent[]>("/agents")
+      .then((result) => { if (active) setAgents(result); })
+      .catch(() => { if (active) { setAgents([]); setError("Could not load AI agents for assignment. Close the task form and try again."); } })
+      .finally(() => { if (active) setAgentsLoading(false); });
+    return () => { active = false; };
+  }, [taskForm, task?.id, user?.role, user?.kind]);
   async function refresh() {
     try {
       const [me, d, p, u, t, n, a, incoming, plans, summary] = await Promise.all([
@@ -618,7 +629,7 @@ export default function EnterAI() {
         open={openTask}
         update={changeTask}
         edit={() => setEditProject(project)}
-        create={() => setTaskForm(true)}
+        create={() => { setAgentsLoading(true); setTaskForm(true); }}
         ai={() => openAI(project)}
         canManage={user?.kind === "human" && (user?.role === "admin" || user?.role === "manager")}
         canApproveCompletion={user?.kind === "human" && (user?.role === "admin" || user?.role === "manager" || project?.owner?.id === user.id)}
@@ -780,7 +791,7 @@ export default function EnterAI() {
         type="button"
         onClick={openCeoChat}
         disabled={ceoChatLoading}
-        className="fixed bottom-5 right-5 z-20 inline-flex min-h-12 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white shadow-[0_10px_28px_rgba(49,95,206,.28)] transition hover:-translate-y-0.5 hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-wait disabled:opacity-80 sm:bottom-6 sm:right-6"
+        className="fixed bottom-5 right-5 z-20 inline-flex min-h-12 items-center gap-2 rounded-full bg-accent px-4 text-sm font-semibold text-white shadow-[0_10px_28px_rgba(49,95,206,.28)] transition hover:-translate-y-0.5 hover:bg-accent-hover focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-blue-200 disabled:cursor-wait sm:bottom-6 sm:right-6"
       >
         {ceoChatLoading ? <LoaderCircle size={17} className="animate-spin" /> : <MessageCircle size={17} />}
         <span>{ceoChatLoading ? "Opening Ask Enter AI…" : "Ask Enter AI"}</span>
@@ -789,9 +800,25 @@ export default function EnterAI() {
         <Command
           projects={projects}
           close={() => setCommand(false)}
-          open={(p: Project) => {
+          open={async (p: any) => {
             setCommand(false);
-            openProject(p);
+            try {
+              await openProject(await api<Project>("/projects/" + encodeURIComponent(p.project_id || p.id)));
+            } catch (e: any) {
+              setError(e?.message || "Could not open this project.");
+            }
+          }}
+          openTask={async (item: any) => {
+            setCommand(false);
+            try {
+              if (item.project_id) {
+                const knownProject = projects.find((candidate) => candidate.id === item.project_id);
+                await openProject(knownProject || await api<Project>("/projects/" + encodeURIComponent(item.project_id)));
+              }
+              await openTask(await api<Task>("/tasks/" + encodeURIComponent(item.task_id || item.id)));
+            } catch (e: any) {
+              setError(e?.message || "Could not open this task.");
+            }
           }}
           ai={() => {
             setCommand(false);
@@ -832,6 +859,9 @@ export default function EnterAI() {
         <TaskForm
           project={project}
           users={users}
+          currentUserId={user?.id}
+          agents={user?.role === "admin" && user?.kind === "human" ? agents : []}
+          agentsLoading={user?.role === "admin" && user?.kind === "human" && agentsLoading}
           close={() => setTaskForm(false)}
           create={async (data: any) => {
             const t = await api<Task>("/tasks", {
@@ -859,6 +889,7 @@ export default function EnterAI() {
           key={task.id}
           task={task}
           users={users}
+          agents={user?.role === "admin" && user?.kind === "human" ? agents : []}
           openTask={openTask}
           tasksChanged={async (projectId: string) => {
             if (project?.id === projectId) setTasks(await api<Task[]>("/projects/" + projectId + "/tasks"));
@@ -885,6 +916,7 @@ export default function EnterAI() {
       {agentInspect && (
         <AgentInspector
           agent={agents.find((x) => x.id === agentInspect.id) || agentInspect}
+          parentAgent={agents.find((x) => x.id === agentInspect.parent_agent_id)}
           reports={agents.filter((x) => x.parent_agent_id === agentInspect.id)}
           messages={agentMessages}
           busy={agentChatBusy}

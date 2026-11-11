@@ -74,6 +74,9 @@ def test_project_completion_waits_for_human_approval_after_every_task_is_done():
         assert c.patch(f"/api/projects/{project['id']}", headers=admin, json={"status": "completed"}).status_code == 409
         approved = c.post(f"/api/projects/{project['id']}/approve-completion", headers=admin)
         assert approved.status_code == 200 and approved.json()["status"] == "completed"
+        accountability = c.get(f"/api/tasks/{first['id']}/accountability", headers=admin).json()
+        assert accountability["reviewed_by"]["name"] == "Admin"
+        assert accountability["approved_by"]["name"] == "Admin"
         assert c.post(f"/api/projects/{project['id']}/reopen", headers=admin).json()["status"] == "active"
 
 

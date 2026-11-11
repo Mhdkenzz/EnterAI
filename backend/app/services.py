@@ -99,7 +99,9 @@ def sync_agent_task_pointers(db: Session, task: Task, before_assignee_id: str | 
         if task.assignee_id:
             new_assignee = db.get(User, task.assignee_id)
             if new_assignee and new_assignee.kind == "agent":
-                new_assignee.current_task_id = task.id
+                current = db.get(Task, new_assignee.current_task_id) if new_assignee.current_task_id else None
+                if not current or current.assignee_id != new_assignee.id or current.status in {"done", "blocked", "review"}:
+                    new_assignee.current_task_id = task.id
     if task.status in {"done", "blocked"} and task.assignee_id:
         assignee = db.get(User, task.assignee_id)
         if assignee and assignee.kind == "agent" and assignee.current_task_id == task.id:

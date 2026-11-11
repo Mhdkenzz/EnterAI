@@ -6,6 +6,7 @@ real PostgreSQL) can catch cyclic-FK schema defects.
 import warnings
 
 from sqlalchemy import exc
+from sqlalchemy import inspect
 
 
 def test_model_metadata_is_drop_sortable():
@@ -39,3 +40,19 @@ def test_cycle_edges_are_named_and_use_alter():
         assert fk.constraint.name, f"{table_name}.{column_name} FK needs an explicit name"
         if needs_alter:
             assert fk.constraint.use_alter, f"{table_name}.{column_name} must use_alter to break the create/drop cycle"
+
+
+def test_postgres_version_column_fits_all_migration_revisions():
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+    from app.database import engine
+    import pytest
+
+    if engine.dialect.name != "postgresql":
+        pytest.skip("PostgreSQL enforces varchar lengths")
+    scripts = ScriptDirectory.from_config(Config("alembic.ini"))
+    required = max(len(revision.revision) for revision in scripts.walk_revisions())
+    columns = inspect(engine).get_columns("alembic_version")
+    version = next(column for column in columns if column["name"] == "version_num")
+    length = getattr(version["type"], "length", None)
+    assert length is None or length >= required

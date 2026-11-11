@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta
+from datetime import timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import AuthToken, Invite
+from .models import AuthToken, Invite, utc_naive
 
 PASSWORD_RESET = "password_reset"
 EMAIL_VERIFICATION = "email_verification"
@@ -43,7 +43,7 @@ def issue_auth_token(db: Session, user_id: str, purpose: str, ttl: timedelta) ->
     invalidate_auth_tokens(db, user_id, purpose)
     raw, token_hash = mint()
     db.add(AuthToken(user_id=user_id, purpose=purpose, token_hash=token_hash,
-                     expires_at=datetime.utcnow() + ttl))
+                     expires_at=utc_naive() + ttl))
     return raw
 
 
@@ -51,7 +51,7 @@ def invalidate_auth_tokens(db: Session, user_id: str, purpose: str) -> None:
     for token in db.scalars(select(AuthToken).where(
             AuthToken.user_id == user_id, AuthToken.purpose == purpose,
             AuthToken.used_at.is_(None))).all():
-        token.used_at = datetime.utcnow()
+        token.used_at = utc_naive()
 
 
 def redeem_auth_token(db: Session, raw: str, purpose: str) -> AuthToken | None:
@@ -61,9 +61,9 @@ def redeem_auth_token(db: Session, raw: str, purpose: str) -> AuthToken | None:
     token = db.scalar(select(AuthToken).where(AuthToken.token_hash == hash_token(raw)))
     if not token or token.purpose != purpose or token.used_at is not None:
         return None
-    if token.expires_at < datetime.utcnow():
+    if token.expires_at < utc_naive():
         return None
-    token.used_at = datetime.utcnow()
+    token.used_at = utc_naive()
     return token
 
 
@@ -71,6 +71,6 @@ def find_live_invite(db: Session, raw: str) -> Invite | None:
     invite = db.scalar(select(Invite).where(Invite.token_hash == hash_token(raw)))
     if not invite or invite.accepted_at is not None or invite.revoked_at is not None:
         return None
-    if invite.expires_at < datetime.utcnow():
+    if invite.expires_at < utc_naive():
         return None
     return invite

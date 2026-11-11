@@ -17,7 +17,7 @@ export function AuthShell({
   children: ReactNode;
 }) {
   return (
-    <main className="grid min-h-screen place-items-center bg-canvas p-4 sm:p-6">
+    <main className="auth-shell grid min-h-screen place-items-center bg-canvas p-4 sm:p-6">
       <Card className="w-full max-w-md p-6 shadow-glow sm:p-7">
         <div className="mb-6 flex gap-3">
           <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-accent font-black text-slate-950">

@@ -146,7 +146,7 @@ def test_shrinking_the_hierarchy_retires_descendants_instead_of_deleting_them():
         db.close()
 
 
-def test_retiring_an_agent_with_a_live_task_frees_it_for_reassignment():
+def test_retiring_an_agent_with_a_live_task_reassigns_it_to_a_human():
     headers, org, db = _admin_headers_and_org()
     try:
         with TestClient(app) as client:
@@ -159,10 +159,14 @@ def test_retiring_an_agent_with_a_live_task_frees_it_for_reassignment():
 
             after = client.get(f"/api/projects/{project['id']}/tasks", headers=headers).json()
             after_task = next(t for t in after if t["id"] == task["id"])
-            assert after_task["assignee"] is None
+            assert after_task["assignee"] is not None
+            assert after_task["assignee"]["kind"] == "human"
+            assert after_task["assignee"]["role"] == "admin"
         with SessionLocal() as fresh:
             assert fresh.get(User, worker["id"]).current_task_id is None
-            assert fresh.get(Task, task["id"]).assignee_id is None
+            task_row = fresh.get(Task, task["id"])
+            assert task_row.assignee_id is not None
+            assert fresh.get(User, task_row.assignee_id).kind == "human"
     finally:
         with TestClient(app) as client:
             _reset_hierarchy(client, headers)

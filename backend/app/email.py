@@ -236,11 +236,18 @@ def start_retry_loop() -> None:
         _retry_task = asyncio.ensure_future(_retry_loop())
 
 
-def stop_retry_loop() -> None:
+async def stop_retry_loop() -> None:
     global _retry_task
-    if _retry_task is not None:
-        _retry_task.cancel()
-        _retry_task = None
+    task = _retry_task
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        return
+    _retry_task = None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 
 def send_verification(to: str, name: str, token: str) -> None:

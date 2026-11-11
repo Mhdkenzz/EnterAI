@@ -20,10 +20,13 @@ def upgrade():
     # for, so it keeps creating document_chunks here as before (0009 then
     # no-ops on SQLite because the table already exists).
     if bind.dialect.name == "postgresql":
-        tables = [t for t in Base.metadata.sorted_tables if t.name != "document_chunks"]
+        tables = [t for t in Base.metadata.sorted_tables if t.name not in {"document_chunks", "agent_access_grants"}]
         Base.metadata.create_all(bind=bind, tables=tables)
     else:
-        Base.metadata.create_all(bind=bind)
+        # New tables must still be introduced by their own revision on both
+        # fresh installs and upgrades, not silently materialized by this baseline.
+        tables = [t for t in Base.metadata.sorted_tables if t.name != "agent_access_grants"]
+        Base.metadata.create_all(bind=bind, tables=tables)
 
 def downgrade():
     bind = op.get_bind()

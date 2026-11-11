@@ -47,7 +47,7 @@ export function Agents({
         </div>
         <div className="flex flex-wrap gap-2" aria-label="Agent status summary">
           <span className="agent-summary"><Bot size={14} /> {agents.length} agents</span>
-          <span className="agent-summary"><i className="agent-status-dot is-working" /> {working} working</span>
+          <span className="agent-summary"><i className="agent-status-dot is-working" /> {working} assigned</span>
           <span className="agent-summary"><i className={cn("agent-status-dot", blocked ? "is-blocked" : "is-idle")} /> {blocked} blocked</span>
           {awaitingApproval > 0 && <span className="agent-summary"><i className="agent-status-dot is-review" /> {awaitingApproval} awaiting approval</span>}
           {limited > 0 && <span className="agent-summary"><i className="agent-status-dot is-limited" /> {limited} at daily limit</span>}
@@ -86,7 +86,7 @@ export function Agents({
         {roots.length ? (
           <Card className="agent-map-panel overflow-hidden">
             <div className="agent-map-legend">
-              <span><i className="agent-status-dot is-working" /> Working</span>
+              <span><i className="agent-status-dot is-working" /> Assigned</span>
               <span><i className="agent-status-dot is-idle" /> Available</span>
               <span><i className="agent-status-dot is-blocked" /> Blocked</span>
               <span><i className="agent-status-dot is-review" /> Awaiting approval</span>
@@ -199,15 +199,16 @@ export function AgentNode({
   const [open, setOpen] = useState(() => agent.hierarchy_level === "ceo");
   const kids = childrenOf(agent.id);
   const status = agent.is_awaiting_approval ? "review" : agent.is_blocked ? "blocked" : agent.is_rate_limited ? "limited" : agent.is_working ? "working" : "idle";
+  const statusLabel = status === "working" ? "assigned" : status;
   return (
     <li className={cn("agent-tree-item", root && "is-root")}>
       <div className="agent-tree-branch">
         <button
           onClick={() => inspect(agent)}
           className={cn("agent-node-card", agent.hierarchy_level === "ceo" && "agent-node-ceo")}
-          aria-label={`Open ${agent.name}, ${agent.title}, ${status}`}
+          aria-label={`Open ${agent.name}, ${agent.title}, ${statusLabel}`}
         >
-          <span className={cn("agent-node-status", `is-${status}`)} aria-label={`Status: ${status}`} title={`Status: ${status}`} />
+          <span className={cn("agent-node-status", `is-${status}`)} aria-label={`Status: ${statusLabel}`} title={`Status: ${statusLabel}`} />
           <span className="agent-node-identity">
             <Avatar user={agent} />
             <span className="min-w-0 text-left">
@@ -246,6 +247,7 @@ export function AgentNode({
 }
 export function AgentInspector({
   agent,
+  parentAgent,
   reports,
   messages,
   busy,
@@ -256,6 +258,7 @@ export function AgentInspector({
   connect,
 }: {
   agent: Agent;
+  parentAgent?: Agent;
   reports: Agent[];
   messages: AgentMsg[];
   busy: boolean;
@@ -272,19 +275,29 @@ export function AgentInspector({
         className="absolute inset-y-0 right-0 flex w-full max-w-xl flex-col border-l border-line bg-white text-ink shadow-float"
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-line p-5">
-          <div className="flex items-center gap-3">
+        <div className="relative flex min-h-[76px] items-center border-b border-line p-5">
+          <div className="flex min-w-0 items-center gap-3 pr-12">
             <Avatar user={agent} />
-            <div>
-              <h2 className="font-semibold">{agent.name}</h2>
-              <p className="text-xs text-zinc-500">{agent.title}</p>
+            <div className="min-w-0">
+              <h2 className="truncate font-semibold">{agent.name}</h2>
+              <p className="truncate text-xs text-zinc-500">{agent.title}</p>
             </div>
           </div>
-          <button aria-label="Close agent inspector" className="rounded-lg p-2 text-slate-500 transition hover:bg-slate-100 hover:text-ink" onClick={close}>
+          <button aria-label="Close agent inspector" className="absolute right-3 top-1/2 z-20 flex h-11 w-11 -translate-y-1/2 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-ink" onClick={close}>
             <X className="text-zinc-500" />
           </button>
         </div>
-        <div className="max-h-72 space-y-4 overflow-y-auto border-b border-line p-5">
+        <div aria-label="Agent details" tabIndex={0} className="max-h-72 space-y-4 overflow-y-auto border-b border-line p-5">
+          <div>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Responsibilities & capabilities</h3>
+            <p className="mt-1 text-sm">Reports to: {parentAgent?.name || "Workspace"}</p>
+            <p className="mt-1 text-xs leading-5 text-slate-600">
+              {agent.hierarchy_level === "worker"
+                ? "Works only on tasks assigned to this worker and can read only those assigned projects and tasks. Blockers and unclear priorities must be raised for human review."
+                : "Can work across shared workspace projects, delegate subtasks only to direct reports, and escalate blockers for human review. Extra assignments wait in the queue; only one task runs at a time."}
+            </p>
+            <p className="mt-1 text-xs text-slate-500">Execution is {agent.execution_enabled === false ? "disabled" : "enabled"}.</p>
+          </div>
           <div>
             <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">Current task</h3>
             <p className="mt-1 text-sm">
@@ -301,7 +314,7 @@ export function AgentInspector({
               </p>
             )}
             {agent.is_working && (
-              <p className="mt-1 text-xs text-blue-700">Working autonomously on this task.</p>
+              <p className="mt-1 text-xs text-blue-700">Assigned to this task. Check task comments for recorded progress.</p>
             )}
           </div>
           <div>

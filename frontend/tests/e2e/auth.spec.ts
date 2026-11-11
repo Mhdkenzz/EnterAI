@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test } from "./fixtures";
 import AxeBuilder from "@axe-core/playwright";
 import { sessionCookie, signIn } from "./session";
 
@@ -55,7 +56,7 @@ test("a visitor can create a workspace and lands in it as its first admin", asyn
   await page.getByLabel("Password", { exact: true }).fill("a-strong-password-1");
   await page.getByRole("button", { name: "Create workspace" }).click();
 
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
   // The first admin is met by onboarding and a prompt to confirm their address.
   await expect(page.getByText(`Finish setting up Workspace ${key}`)).toBeVisible();
   await expect(page.getByText("Confirm your email address to secure your account.")).toBeVisible();
@@ -68,7 +69,7 @@ test("the SSO callback opens the workspace from the session cookie the API set",
   // The API's callback sets this cookie on its redirect; the token never rides in the URL.
   await signIn(page.context(), account.token);
   await page.goto("/sso/callback");
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
   expect(page.url()).not.toContain("#");
   expect(page.url()).not.toContain("?");
 });
@@ -84,7 +85,7 @@ test("sign out clears the session cookie and does not restore the workspace", as
   const account = await registerWorkspace(page, key, `Logout Org ${key}`);
   await signIn(page.context(), account.token);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
   if (isMobile) await page.getByRole("button", { name: "Open menu" }).click();
   await page.getByRole("button", { name: "Sign out" }).click();
   await expect(page.getByRole("heading", { name: "Enter AI" })).toBeVisible();
@@ -110,7 +111,7 @@ test("an invited teammate accepts from the emailed link and is signed in", async
 
   seed(`
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.database import SessionLocal
 from app.models import Invite, Organization
 from app.tokens import hash_token
@@ -119,7 +120,7 @@ with SessionLocal() as db:
     assert org and org.name.startswith('Invite Org '), 'Refusing non-test organization'
     db.add(Invite(organization_id=org.id, email=sys.argv[2], role='manager',
                   token_hash=hash_token(sys.argv[3]),
-                  expires_at=datetime.utcnow() + timedelta(days=7)))
+                  expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(days=7)))
     db.commit()
     print('seeded')
 `, [account.organization.id, invitee, token]);
@@ -132,7 +133,7 @@ with SessionLocal() as db:
   await page.getByLabel("Choose a password").fill("invited-password-1");
   await page.getByRole("button", { name: "Accept invitation" }).click();
 
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
   // The single-use token is cleared from the address bar rather than left in history.
   expect(page.url()).not.toContain("invite=");
 });
@@ -144,7 +145,7 @@ test("a reset link lets its owner choose a new password and sign in with it", as
 
   seed(`
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.database import SessionLocal
 from app.models import AuthToken, User
 from app.tokens import PASSWORD_RESET, hash_token
@@ -152,7 +153,7 @@ with SessionLocal() as db:
     user = db.get(User, sys.argv[1])
     assert user and user.email.endswith('@example.com'), 'Refusing non-test user'
     db.add(AuthToken(user_id=user.id, purpose=PASSWORD_RESET, token_hash=hash_token(sys.argv[2]),
-                     expires_at=datetime.utcnow() + timedelta(minutes=60)))
+                     expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=60)))
     db.commit()
     print('seeded')
 `, [account.user.id, token]);
@@ -169,7 +170,7 @@ with SessionLocal() as db:
   await page.getByLabel("Email").fill(`${key}@example.com`);
   await page.getByLabel("Password", { exact: true }).fill("rotated-password-9");
   await page.getByRole("button", { name: "Sign in" }).click();
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
 });
 
 test("a bad reset link fails safe rather than silently doing nothing", async ({ page }) => {
@@ -196,7 +197,7 @@ test("a verification link confirms the address and clears the banner", async ({ 
 
   seed(`
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from app.database import SessionLocal
 from app.models import AuthToken, User
 from app.tokens import EMAIL_VERIFICATION, hash_token
@@ -204,7 +205,7 @@ with SessionLocal() as db:
     user = db.get(User, sys.argv[1])
     assert user and user.email.endswith('@example.com'), 'Refusing non-test user'
     db.add(AuthToken(user_id=user.id, purpose=EMAIL_VERIFICATION, token_hash=hash_token(sys.argv[2]),
-                     expires_at=datetime.utcnow() + timedelta(hours=24)))
+                     expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=24)))
     db.commit()
     print('seeded')
 `, [account.user.id, token]);
@@ -214,14 +215,15 @@ with SessionLocal() as db:
 
   await signIn(page.context(), account.token);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
   await expect(page.getByText("Confirm your email address to secure your account.")).toHaveCount(0);
 });
 
 test("auth screens have no serious accessibility violations", async ({ page }) => {
   for (const path of ["/", `/?reset=${rawToken()}`, `/?invite=${rawToken()}`]) {
     await page.goto(path);
-    await page.waitForLoadState("networkidle");
+    await expect(page.locator("main h1")).toBeVisible();
+    if (path.includes("invite=")) await expect(page.getByRole("alert").filter({ hasText: "This link is invalid" })).toBeVisible();
     const results = await new AxeBuilder({ page }).analyze();
     const serious = results.violations.filter((v) => v.impact === "serious" || v.impact === "critical");
     expect(serious, `${path}: ${serious.map((v) => v.id).join(", ")}`).toEqual([]);
@@ -232,7 +234,8 @@ test("auth screens fit a phone without horizontal overflow", async ({ page }) =>
   await page.setViewportSize({ width: 360, height: 780 });
   for (const path of ["/", `/?invite=${rawToken()}`]) {
     await page.goto(path);
-    await page.waitForLoadState("networkidle");
+    await expect(page.locator("main h1")).toBeVisible();
+    if (path.includes("invite=")) await expect(page.getByRole("alert").filter({ hasText: "This link is invalid" })).toBeVisible();
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
     expect(overflow, `${path} overflows by ${overflow}px`).toBeLessThanOrEqual(1);
   }

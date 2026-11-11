@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
-import { expect, test as base, type Page } from "@playwright/test";
+import { expect, type Page } from "@playwright/test";
+import { test as base } from "./fixtures";
 import AxeBuilder from "@axe-core/playwright";
 import { signIn } from "./session";
 
@@ -48,12 +49,12 @@ with SessionLocal() as db:
 async function enter(page: Page, token: string) {
   await signIn(page.context(), token);
   await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Your workspace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
 }
 async function openSettings(page: Page, mobile: boolean) {
   if (mobile) await page.getByRole("button", { name: "Open menu", exact: true }).click();
   await page.getByRole("complementary").getByRole("button", { name: "Settings", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Privacy", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Privacy & account", exact: true })).toBeVisible();
 }
 
 test("every human account -- admin or member -- can reach Settings", async ({ page, isMobile, workspace }) => {
@@ -61,6 +62,56 @@ test("every human account -- admin or member -- can reach Settings", async ({ pa
   await openSettings(page, isMobile);
   await expect(page.getByRole("heading", { name: "Export my data" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Delete my account" })).toBeVisible();
+});
+
+test("integrations clearly show which server connections are unavailable", async ({ page, isMobile, workspace }) => {
+  await enter(page, workspace.token);
+  if (isMobile) await page.getByRole("button", { name: "Open menu", exact: true }).click();
+  await page.getByRole("complementary").getByRole("button", { name: "Integrations", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Integrations", exact: true })).toBeVisible();
+  await expect(page.getByText("Gmail connection has not been configured for this Enter AI server yet.")).toBeVisible();
+  await expect(page.getByText("Slack OAuth and event signing are not configured for this Enter AI server yet.")).toBeVisible();
+  await expect(page.getByText("Notion OAuth is not configured for this Enter AI server yet.")).toBeVisible();
+  await expect(page.getByRole("link", { name: /Connect (Gmail|Slack|Notion)/ })).toHaveCount(0);
+});
+
+test("theme selection persists and AI provider settings validate safely", async ({ page, isMobile, workspace }) => {
+  await enter(page, workspace.token);
+  await openSettings(page, isMobile);
+
+  const themes = page.getByRole("radiogroup", { name: "Color theme" });
+  await themes.getByRole("radio", { name: /Dark/ }).click();
+  await expect(themes.getByRole("radio", { name: /Dark/ })).toHaveAttribute("aria-checked", "true");
+  await page.reload();
+  await openSettings(page, isMobile);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(themes.getByRole("radio", { name: /Dark/ })).toHaveAttribute("aria-checked", "true");
+
+  await expect(page.getByRole("heading", { name: "AI provider" })).toBeVisible();
+  const providerSettings = page.getByRole("region", { name: "AI provider" });
+  const requestsPerMinute = providerSettings.getByLabel("Requests per minute");
+  await requestsPerMinute.fill("21");
+  await providerSettings.getByRole("button", { name: "Save AI settings" }).click();
+  await expect(providerSettings.getByRole("status").filter({ hasText: "Settings saved." })).toBeVisible();
+  await expect(requestsPerMinute).toHaveValue("21");
+
+  await providerSettings.getByLabel("Provider").selectOption("openrouter");
+  await providerSettings.getByLabel("OpenRouter model ID").fill("openai/gpt-4o-mini");
+  await providerSettings.getByRole("button", { name: "Save AI settings" }).click();
+  await expect(providerSettings.getByRole("alert")).toContainText("Enter a new API key when changing providers");
+  await expect(providerSettings.getByRole("button", { name: "Save AI settings" })).toBeEnabled();
+
+  // Use a disposable test credential to exercise provider-specific success copy
+  // and the clear-key control without relying on a live provider account.
+  const testKey = "disposable-e2e-provider-key";
+  await providerSettings.getByLabel("OpenRouter API key").fill(testKey);
+  await providerSettings.getByRole("button", { name: "Save AI settings" }).click();
+  await expect(providerSettings.getByRole("status")).toContainText("OpenRouter settings saved. New AI requests will use openai/gpt-4o-mini.");
+  await expect(page.locator("body")).not.toContainText(testKey);
+  await providerSettings.getByRole("button", { name: "Clear saved key" }).click();
+  await expect(providerSettings.getByRole("button", { name: "Key will be cleared on save" })).toBeVisible();
+  await providerSettings.getByRole("button", { name: "Save AI settings" }).click();
+  await expect(providerSettings.getByRole("status")).toContainText("Add a provider API key to enable hosted AI.");
 });
 
 test("export requires the correct password and then downloads a file", async ({ page, isMobile, workspace }) => {

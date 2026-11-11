@@ -211,7 +211,14 @@ def search_similar_chunks(
     Returns:
         List of matching DocumentChunks ordered by similarity (highest first)
     """
-    from sqlalchemy import text
+    # Embeddings are JSON on SQLite for local development and unit tests.
+    # pgvector operators only exist on PostgreSQL, so semantic search should
+    # return no vector matches there instead of raising a SQL syntax error.
+    if db.get_bind().dialect.name != "postgresql":
+        return []
+    from sqlalchemy import bindparam, text
+    from .knowledge_access import document_is_visible, is_workspace_manager, visible_project_ids
+    from .models import ProjectDocument
 
     # Build the query with pgvector cosine similarity
     # cosine similarity = 1 - cosine_distance
@@ -222,6 +229,21 @@ def search_similar_chunks(
     dim = _expected_embedding_dimension()
 
     project_filter = "AND dc.project_id = :project_id" if project_id else ""
+    if is_workspace_manager(user):
+        document_scope = "AND pd.organization_id = :org_id"
+        allowed_project_ids: list[str] = []
+        allowed_document_ids: list[str] = []
+    else:
+        allowed_project_ids = list(db.scalars(visible_project_ids(db, user)).all())
+        if user.kind == "agent":
+            allowed_document_ids = list(db.scalars(select(ProjectDocument.id).where(document_is_visible(db, user))).all())
+            document_scope = "AND pd.id IN :allowed_document_ids"
+        elif allowed_project_ids:
+            allowed_document_ids = []
+            document_scope = "AND ((dc.project_id IN :allowed_project_ids) OR (dc.project_id IS NULL AND pd.uploaded_by = :user_id))"
+        else:
+            allowed_document_ids = []
+            document_scope = "AND dc.project_id IS NULL AND pd.uploaded_by = :user_id"
     # The bound parameter needs its own cast too, not just the column -- pgvector's
     # <=> operator isn't defined for vector <=> double precision[], only
     # vector <=> vector, and psycopg sends a Python list as a plain array with no
@@ -232,7 +254,9 @@ def search_similar_chunks(
     sql = f"""
         SELECT dc.*
         FROM document_chunks dc
+        JOIN project_documents pd ON pd.id = dc.document_id
         WHERE dc.organization_id = :org_id
+        {document_scope}
         AND dc.embedding IS NOT NULL
         AND (dc.embedding::vector({dim}) <=> (:query_vec)::vector({dim})) <= :max_distance
         {project_filter}
@@ -246,10 +270,21 @@ def search_similar_chunks(
         "max_distance": max_distance,
         "limit": limit,
     }
+    if not is_workspace_manager(user):
+        params["user_id"] = user.id
+        if user.kind == "agent":
+            params["allowed_document_ids"] = allowed_document_ids
+        elif allowed_project_ids:
+            params["allowed_project_ids"] = allowed_project_ids
     if project_id:
         params["project_id"] = project_id
 
-    result = db.execute(text(sql), params)
+    statement = text(sql)
+    if not is_workspace_manager(user) and user.kind == "agent":
+        statement = statement.bindparams(bindparam("allowed_document_ids", expanding=True))
+    elif not is_workspace_manager(user) and allowed_project_ids:
+        statement = statement.bindparams(bindparam("allowed_project_ids", expanding=True))
+    result = db.execute(statement, params)
     # Map to DocumentChunk objects
     chunks = []
     for row in result:

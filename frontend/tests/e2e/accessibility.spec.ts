@@ -1,9 +1,11 @@
-import { expect, test } from "@playwright/test";
+import { expect } from "@playwright/test";
+import { test } from "./fixtures";
 import AxeBuilder from "@axe-core/playwright";
 
 test("workspace has no serious accessibility violations", async ({ page }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
   const results = await new AxeBuilder({ page }).analyze();
   expect(results.violations.filter((violation) => ["critical", "serious"].includes(violation.impact || ""))).toEqual([]);
 });
@@ -11,9 +13,10 @@ test("workspace has no serious accessibility violations", async ({ page }) => {
 test("agent hierarchy view and inspector have no serious accessibility violations", async ({ page, isMobile }) => {
   await page.goto("/");
   await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Workspace overview" })).toBeVisible();
   if (isMobile) await page.getByRole("button", { name: "Open menu", exact: true }).click();
   await page.getByRole("complementary").getByRole("button", { name: "Agents", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Agent hierarchy" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Agent map" })).toBeVisible();
   await page.getByLabel("VPs under CEO").fill("1");
   await page.getByRole("button", { name: "Save hierarchy" }).click();
   await expect(page.getByText("Chief Executive Officer", { exact: true }).first()).toBeVisible({ timeout: 15000 });

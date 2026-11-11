@@ -32,6 +32,17 @@ _NO_TENANT = '__system__'
 _context = ContextVar('audit_context', default=None)
 _run_id: ContextVar[str | None] = ContextVar('execution_run_id', default=None)
 logger = logging.getLogger('enterai.observability')
+_SAFE_TOOL_NAMES = {
+    'get_projects', 'get_tasks', 'get_my_tasks', 'get_teams', 'get_users',
+    'get_assignable_agents', 'get_notifications', 'get_activity', 'get_comments',
+    'search', 'search_documents', 'search_knowledge', 'get_direct_reports',
+    'create_task', 'update_task', 'add_comment', 'create_project', 'update_project',
+    'create_team', 'delegate_task', 'log_progress', 'mark_task_complete',
+    'raise_blocker', 'delegate_subtask', 'enter_ai_cli', 'repo_context',
+    'repo_search', 'repo_read', 'repo_status', 'repo_tree', 'repo_check',
+    'repo_propose_patch', 'repo_apply_patch', 'unknown_tool',
+    'direct_api_request',
+}
 
 
 class StructuredFormatter(logging.Formatter):
@@ -154,6 +165,25 @@ def safe_detail(detail):
             result[key] = value
         elif key == 'api_key_changed' and isinstance(value, bool):
             result[key] = value
+        elif key in {'assignment_changed'} and isinstance(value, bool):
+            result[key] = value
+        elif key in {'resource_type'} and value in {'project', 'document', 'tool'}:
+            result[key] = value
+        elif key in {'permission'} and value in {'read', 'write', 'use'}:
+            result[key] = value
+        elif key in {'denial_reason'} and value in {'not_granted', 'revoked', 'out_of_scope', 'invalid_resource'}:
+            result[key] = value
+        elif key in {'tool'} and value in _SAFE_TOOL_NAMES:
+            result[key] = value
+        elif key in {
+            'assignee_id', 'from_assignee_id', 'to_assignee_id', 'requested_by_id',
+            'reviewed_by_id', 'approved_by_id', 'proposed_by_agent_id', 'project_id',
+            'task_id', 'parent_task_id', 'subtask_id', 'agent_id',
+            'resource_id',
+        } and isinstance(value, str) and re.fullmatch(r'[0-9a-f-]{36}', value):
+            result[key] = value
+        elif key == 'assignment_reason' and value in {'task_created', 'inbound_plan', 'agent_retired', 'human_reassignment'}:
+            result[key] = value
         elif key == 'provider' and value in {'openrouter', 'ifm'}:
             result[key] = value
         elif key == 'model' and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9._:/-]{1,200}', value):
@@ -258,7 +288,7 @@ def tool_audit(tools, entity_type, action, **detail):
 _KNOWN_ERROR_KINDS = {
     'ProviderUnavailableError', 'ProviderTimeoutError', 'ProviderAuthError',
     'ProviderRateLimitedError', 'ToolCallValidationError', 'LoopBudgetExceededError',
-    'DuplicateCallDetectedError', 'CopilotProviderError',
+    'DuplicateCallDetectedError', 'CopilotProviderError', 'AIProviderRateLimitExceeded',
 }
 
 
@@ -298,13 +328,14 @@ def provider_call(tools, mode, invoke, *, provider=None, model=None, round_numbe
         error_kind = _classify_error_kind(exc)
         from .ai.errors import AIError
         from .copilot import CopilotProviderError
+        from .ratelimit import AIProviderRateLimitExceeded
         # A provider/loop failure that already carries a specific, typed reason
         # (e.g. "AI_API_KEY is not configured") is re-raised unchanged -- only a
         # genuinely unexpected exception (a bare RuntimeError, a network library's
         # own exception type, etc.) gets collapsed into the generic message below.
         # This is what lets a future caller distinguish retryable from
         # non-retryable failures instead of every provider error looking identical.
-        if isinstance(exc, (AIError, CopilotProviderError)):
+        if isinstance(exc, (AIError, CopilotProviderError, AIProviderRateLimitExceeded)):
             raise
         raise CopilotProviderError("The configured AI provider is unavailable. Try again later.") from None
     finally:
@@ -440,8 +471,15 @@ def start_aggregation_background_loop() -> None:
         _aggregation_background_task = asyncio.ensure_future(_aggregation_loop())
 
 
-def stop_aggregation_background_loop() -> None:
+async def stop_aggregation_background_loop() -> None:
     global _aggregation_background_task
-    if _aggregation_background_task is not None:
-        _aggregation_background_task.cancel()
-        _aggregation_background_task = None
+    task = _aggregation_background_task
+    if task is not None and task.get_loop() is not asyncio.get_running_loop():
+        return
+    _aggregation_background_task = None
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass

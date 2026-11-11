@@ -58,7 +58,9 @@ export function AIProviderSettings() {
       setModel(updated.model || "IFM/K2-Horizon-375B-A23B");
       setRequestsPerMinute(updated.requests_per_minute);
       setApiKey(""); setClearKey(false);
-      setNotice(updated.api_key_configured ? `IFM settings saved. New AI requests will use ${updated.model}.` : "Settings saved. Add a provider API key to enable hosted AI.");
+      setNotice(updated.api_key_configured
+        ? `${updated.configured_provider === "ifm" ? "IFM K2 Horizon" : "OpenRouter"} settings saved. New AI requests will use ${updated.model}.`
+        : "Settings saved. Add a provider API key to enable hosted AI.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Could not save AI settings.");
     } finally { setBusy(false); }

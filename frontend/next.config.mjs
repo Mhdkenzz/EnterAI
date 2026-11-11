@@ -1,5 +1,7 @@
 const isDev = process.env.NODE_ENV === "development";
-const apiOrigin = new URL(process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api").origin;
+const apiOrigins = process.env.NEXT_PUBLIC_API_URL
+  ? [new URL(process.env.NEXT_PUBLIC_API_URL).origin]
+  : ["http://localhost:8000", "http://127.0.0.1:8000"];
 
 // The dashboard only ever talks to its own API. Pinning connect-src to it means an
 // injected script cannot ship data anywhere else, and frame-ancestors stops the app
@@ -12,9 +14,9 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
-  `connect-src 'self' ${apiOrigin}${isDev && !process.env.NEXT_PUBLIC_API_URL ? " http://127.0.0.1:8000" : ""}${isDev ? " ws:" : ""}`,
+  `connect-src 'self' ${apiOrigins.join(" ")}${isDev ? " ws:" : ""}`,
   // SSO sign-in is a top-level navigation to the API, which redirects to the IdP.
-  `form-action 'self' ${apiOrigin}`,
+  `form-action 'self' ${apiOrigins.join(" ")}`,
   "frame-ancestors 'none'",
   "object-src 'none'",
   "base-uri 'self'",

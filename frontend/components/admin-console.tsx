@@ -38,6 +38,17 @@ type AuditEvent = {
   action: string; entity_type: string; entity_id: string | null; detail: unknown; created_at: string;
 };
 type AuditPage = { items: AuditEvent[]; total: number; offset: number; limit: number };
+type AgentAccess = {
+  agent_id: string;
+  inherited: { assigned_task_ids: string[]; baseline_tools: string[] };
+  effective_tools: string[];
+  effective_project_ids: string[];
+  effective_document_ids: string[];
+  projects: { id: string; name: string; code: string }[];
+  documents: { id: string; file_name: string; project_id: string | null }[];
+  tools: string[];
+  grants: { id: string; resource_type: "project" | "document" | "tool"; resource_id: string; permission: "read" | "write" | "use"; reason: string | null; active: boolean; created_at: string; revoked_at: string | null }[];
+};
 type Filters = { q: string; action: string; source: string; actor_id: string; entity_type: string; start: string; end: string };
 const emptyFilters: Filters = { q: "", action: "", source: "", actor_id: "", entity_type: "", start: "", end: "" };
 const field = "mt-1 block w-full min-w-0 rounded-lg border border-line bg-canvas px-3 py-2 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-accent";
@@ -52,6 +63,88 @@ function ExecutionSwitch({ label, enabled, disabled, onChange }: {
     aria-checked={enabled} disabled={disabled} onClick={onChange}>
     {enabled ? "Enabled" : "Disabled"}
   </Button>;
+}
+
+function AgentAccessPanel({ agentId, agentName }: { agentId: string; agentName: string }) {
+  const [access, setAccess] = useState<AgentAccess | null>(null);
+  const [resource, setResource] = useState("");
+  const [permission, setPermission] = useState<"read" | "write" | "use">("read");
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  async function reload(signal?: AbortSignal) {
+    const value = await api<AgentAccess>(`/admin/agents/${agentId}/access`, { signal });
+    if (!signal?.aborted) {
+      setAccess(value);
+      if (!resource && value.projects.length) setResource(`project:${value.projects[0].id}`);
+    }
+  }
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    reload(controller.signal).catch(reason => { if (!controller.signal.aborted) setError(errorText(reason)); })
+      .finally(() => { if (!controller.signal.aborted) setLoading(false); });
+    return () => controller.abort();
+  }, [agentId]);
+
+  const [kind, id] = resource.split(":", 2);
+  const choices = kind === "project" ? ["read", "write"] : kind === "document" ? ["read"] : ["use"];
+  async function grant(event: FormEvent) {
+    event.preventDefault();
+    if (!kind || !id || pending) return;
+    setPending(true); setError(""); setNotice("");
+    try {
+      await api(`/admin/agents/${agentId}/access`, { method: "POST", body: JSON.stringify({ resource_type: kind, resource_id: id, permission, reason: reason.trim() || undefined }) });
+      await reload(); setReason(""); setNotice("Access grant saved.");
+    } catch (cause) { setError(errorText(cause)); }
+    finally { setPending(false); }
+  }
+  async function revoke(grantId: string) {
+    if (pending) return;
+    setPending(true); setError(""); setNotice("");
+    try {
+      await api(`/admin/agents/${agentId}/access/${grantId}`, { method: "DELETE" });
+      await reload(); setNotice("Access revoked.");
+    } catch (cause) { setError(errorText(cause)); }
+    finally { setPending(false); }
+  }
+  return <details className="rounded-lg border border-line p-3">
+    <summary className="cursor-pointer text-sm font-medium">Access controls for {agentName}</summary>
+    {loading ? <p role="status" className="mt-3 text-sm text-zinc-300">Loading access…</p> : access && <div className="mt-3 space-y-3">
+      <p className="text-xs text-zinc-300">Effective scope: {access.inherited.assigned_task_ids.length} assigned task(s), {access.effective_project_ids.length} project(s), and {access.effective_document_ids.length} document(s). Effective tools: {access.effective_tools.join(", ") || "none"}.</p>
+      <form className="grid gap-2 sm:grid-cols-2" onSubmit={event => void grant(event)}>
+        <label className="text-sm text-zinc-300">Resource
+          <select className={field} value={resource} onChange={event => { setResource(event.target.value); const next = event.target.value.startsWith("tool:") ? "use" : "read"; setPermission(next); }}>
+            {access.projects.map(item => <option key={`p-${item.id}`} value={`project:${item.id}`}>Project · {item.name} ({item.code})</option>)}
+            {access.documents.map(item => <option key={`d-${item.id}`} value={`document:${item.id}`}>Document · {item.file_name}</option>)}
+            {access.tools.map(item => <option key={`t-${item}`} value={`tool:${item}`}>Tool · {item}</option>)}
+          </select>
+        </label>
+        <label className="text-sm text-zinc-300">Permission
+          <select className={field} value={permission} onChange={event => setPermission(event.target.value as "read" | "write" | "use")}>
+            {choices.map(item => <option key={item} value={item}>{item === "use" ? "Use tool" : item === "write" ? "Read and write" : "Read"}</option>)}
+          </select>
+        </label>
+        <label className="text-sm text-zinc-300 sm:col-span-2">Reason (optional)
+          <input className={field} maxLength={500} value={reason} onChange={event => setReason(event.target.value)} placeholder="Why this access is needed" />
+        </label>
+        <Button className="sm:col-span-2" type="submit" disabled={pending || !resource}>{pending ? "Saving…" : "Grant access"}</Button>
+      </form>
+      <div className="space-y-2">
+        <h5 className="text-sm font-medium">Explicit grants</h5>
+        {!access.grants.length && <p className="text-xs text-zinc-400">No explicit grants.</p>}
+        {access.grants.map(grant => <div key={grant.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-canvas p-2 text-xs">
+          <span>{grant.resource_type} · {grant.resource_id} · {grant.permission} · {grant.active ? "active" : "revoked"}{grant.reason ? ` · ${grant.reason}` : ""}</span>
+          {grant.active && <Button type="button" variant="outline" disabled={pending} onClick={() => void revoke(grant.id)}>Revoke</Button>}
+        </div>)}
+      </div>
+    </div>}
+    {error && <p role="alert" className="mt-2 text-sm text-red-300">{error}</p>}
+    {notice && <p role="status" className="mt-2 text-sm text-sky-200">{notice}</p>}
+  </details>;
 }
 
 function AIProviderWorkspaceSettings({ onSaved }: { onSaved: () => void }) {
@@ -312,6 +405,7 @@ export function AdminConsole({ currentUserId }: { currentUserId: string }) {
                 ["Last execution", timestamp(agent.last_execution_at)],
               ] as const).map(([label, value]) => <div key={label} className="min-w-0"><dt className="text-zinc-300">{label}</dt><dd>{value}</dd></div>)}
             </dl>
+            <AgentAccessPanel agentId={agent.id} agentName={agent.name} />
           </Card>)}
         </div>
       </section>

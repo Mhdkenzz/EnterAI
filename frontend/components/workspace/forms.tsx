@@ -1,12 +1,17 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { Download, Paperclip, Plus, Send, X } from "lucide-react";
 import { API_BASE, api, upload } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { states, Avatar, Modal, field } from "@/components/workspace/shared";
-import type { Task, User } from "@/lib/types";
+import type { AccountabilityEvent, Agent, Task, TaskAccountability, User } from "@/lib/types";
+
+function agentLabel(agent: Agent, agents: Agent[]) {
+  const parent = agents.find((item) => item.id === agent.parent_agent_id);
+  return `${agent.name}${parent ? ` — reports to ${parent.name}` : ""} (${agent.id.slice(0, 8)})`;
+}
 
 /** Every save goes through this: the button is disabled while it runs (no duplicate
  *  records from a double click) and a failure is shown instead of vanishing. */
@@ -38,21 +43,26 @@ const statusLabels: Record<string, string> = {
 };
 
 /** Keep a selection visible while its save is in flight, and restore it on failure. */
-function TaskSelect({ label, value, tone, options, onSave }: {
+function TaskSelect({ label, value, tone, options, onSave, searchable = false }: {
   label: string;
   value: string;
   tone?: string;
   options: { value: string; label: string; disabled?: boolean }[];
   onSave: (value: string) => Promise<string | null>;
+  searchable?: boolean;
 }) {
+  const id = useId();
   const [selected, setSelected] = useState(value);
+  const [query, setQuery] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => { setSelected(value); }, [value]);
   return (
-    <label className="text-xs text-zinc-500">
-      {label}
+    <div className="text-xs text-zinc-500">
+      <label htmlFor={id}>{label}</label>
+      {searchable && <input className={field} aria-label={`Search ${label.toLowerCase()}s`} placeholder="Search people or agents" value={query} onChange={(event) => setQuery(event.target.value)} />}
       <select
+        id={id}
         className={cn(field, "task-select")}
         data-tone={tone ? `${tone}-${selected}` : undefined}
         value={selected}
@@ -73,11 +83,11 @@ function TaskSelect({ label, value, tone, options, onSave }: {
           }
         }}
       >
-        {options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
+        {options.filter((option) => !query || option.value === selected || option.label.toLowerCase().includes(query.toLowerCase())).map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>)}
       </select>
       {saving && <span className="mt-1 block">Saving…</span>}
       {error && <span role="alert" className="task-select-error mt-1 block">{error}</span>}
-    </label>
+    </div>
   );
 }
 
@@ -298,11 +308,12 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
     </Modal>
   );
 }
-export function TaskForm({ project, users, close, create }: any) {
+export function TaskForm({ project, users, agents = [], agentsLoading = false, currentUserId, close, create }: any) {
   const [title, setTitle] = useState(""),
     [description, setDescription] = useState(""),
     [priority, setPriority] = useState("medium"),
-    [assignee, setAssignee] = useState(""),
+    [assignee, setAssignee] = useState(currentUserId || ""),
+    [assigneeSearch, setAssigneeSearch] = useState(""),
     [dueDate, setDueDate] = useState("");
   const { saving, run, failure } = useSubmit();
   return (
@@ -311,7 +322,7 @@ export function TaskForm({ project, users, close, create }: any) {
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
-          if (title.trim())
+          if (!agentsLoading && title.trim())
             run(() => create({ title: title.trim(), description, priority, assignee_id: assignee || null, due_date: dueDate ? dueDate + "T00:00:00" : null }));
         }}
       >
@@ -336,17 +347,20 @@ export function TaskForm({ project, users, close, create }: any) {
               <option value="high">High</option>
             </select>
           </label>
-          <label className="text-xs text-zinc-400">
-            Assignee
-            <select className={field} value={assignee} onChange={(e) => setAssignee(e.target.value)}>
-              <option value="">Unassigned</option>
-              {users.map((u: User) => (
+          <div className="text-xs text-zinc-400">
+            <label htmlFor="new-task-assignee">Assignee</label>
+            {agentsLoading && <span role="status">Loading AI agents…</span>}
+            <input className={field} aria-label="Search assignees" placeholder="Search people or agents" value={assigneeSearch} onChange={(e) => setAssigneeSearch(e.target.value)} />
+            <select id="new-task-assignee" className={field} value={assignee} onChange={(e) => setAssignee(e.target.value)}>
+              {users.filter((u: User) => u.id === assignee || u.name.toLowerCase().includes(assigneeSearch.toLowerCase())).map((u: User) => (
                 <option key={u.id} value={u.id}>
                   {u.name}
                 </option>
               ))}
+              {agents.length > 0 && <optgroup label="AI agents">{agents.filter((agent: Agent) => agent.id === assignee || agentLabel(agent, agents).toLowerCase().includes(assigneeSearch.toLowerCase())).map((agent: Agent) => <option key={agent.id} value={agent.id}>{agentLabel(agent, agents)}</option>)}</optgroup>}
             </select>
-          </label>
+            <span className="mt-1 block text-[11px] text-zinc-500">Every task needs an owner. New tasks are assigned to you unless you choose someone else.</span>
+          </div>
         </div>
         <label className="block text-xs text-zinc-400">
           Due date
@@ -357,7 +371,7 @@ export function TaskForm({ project, users, close, create }: any) {
           <Button type="button" variant="ghost" onClick={close}>
             Cancel
           </Button>
-          <Button type="submit" disabled={saving}>
+          <Button type="submit" disabled={saving || agentsLoading}>
             <Plus size={15} />
             {saving ? "Creating…" : "Create task"}
           </Button>
@@ -405,10 +419,47 @@ export function TeamForm({ close, create }: any) {
   );
 }
 type AttachmentRow = { id: string; file_name: string };
+type DecisionRow = {
+  id: string;
+  title: string;
+  body: string;
+  created_at: string;
+  project_id: string;
+  task_id: string;
+  source_comment_id: string | null;
+  author?: { name: string } | null;
+};
+
+const accountabilityActionLabels: Record<string, string> = {
+  created: "Task requested and created",
+  created_from_inbound_plan: "Task created from an approved request",
+  subtask_delegated: "Subtask assigned",
+  delegated_to_agent: "Task assigned to an agent",
+  task_reassigned: "Task owner changed",
+  agent_claimed: "Agent claimed the task",
+  agent_started: "Work started",
+  agent_progress: "Progress recorded",
+  agent_completed: "Agent submitted completed work",
+  task_completed: "Task marked complete",
+  agent_action_proposed: "Agent requested human approval",
+  agent_action_approved: "Human approved the proposed action",
+  agent_action_rejected: "Human rejected the proposed action",
+  agent_blocked: "Agent escalated a blocker",
+  task_started: "Work started",
+  task_reviewed: "Human reviewed the task",
+  task_review_approved: "Human reviewed and approved the task",
+  updated: "Task details updated",
+};
+
+function accountabilityName(person?: TaskAccountability["owner"]) {
+  if (!person) return "Not recorded";
+  return `${person.name}${person.kind === "agent" ? ` · AI${person.title ? `, ${person.title}` : ""}` : " · human"}`;
+}
 
 export function Drawer({
   task,
   users,
+  agents = [],
   comments,
   close,
   update,
@@ -420,7 +471,14 @@ export function Drawer({
   const [body, setBody] = useState(""),
     [uploading, setUploading] = useState(false),
     [attachments, setAttachments] = useState<AttachmentRow[]>([]),
-    [attachError, setAttachError] = useState("");
+    [attachError, setAttachError] = useState(""),
+    [decisions, setDecisions] = useState<DecisionRow[]>([]),
+    [decisionLoading, setDecisionLoading] = useState(false),
+    [decisionSaving, setDecisionSaving] = useState<string | null>(null),
+    [decisionError, setDecisionError] = useState(""),
+    [accountability, setAccountability] = useState<TaskAccountability | null>(null),
+    [accountabilityError, setAccountabilityError] = useState(""),
+    [accountabilityRevision, setAccountabilityRevision] = useState(0);
   const { saving, run, failure } = useSubmit();
   const closeRef = useRef(close);
   closeRef.current = close;
@@ -443,12 +501,31 @@ export function Drawer({
   const parent = task.parent_id ? siblings.find((t) => t.id === task.parent_id) : null;
   useEffect(() => {
     let live = true;
+    setAccountability(null);
+    setAccountabilityError("");
+    api<TaskAccountability>(`/tasks/${task.id}/accountability`)
+      .then((value) => live && setAccountability(value))
+      .catch((e: any) => live && setAccountabilityError(e?.message || "Could not load task accountability."));
+    return () => { live = false; };
+  }, [task.id, accountabilityRevision]);
+  useEffect(() => {
+    let live = true;
     api<AttachmentRow[]>("/tasks/" + task.id + "/attachments")
       .then((rows) => live && setAttachments(rows))
       .catch(() => {});
     return () => {
       live = false;
     };
+  }, [task.id]);
+  useEffect(() => {
+    let live = true;
+    setDecisionLoading(true);
+    setDecisionError("");
+    api<DecisionRow[]>(`/tasks/${task.id}/decisions`)
+      .then((rows) => live && setDecisions(rows))
+      .catch((e: any) => live && setDecisionError(e?.message || "Could not load saved decisions."))
+      .finally(() => live && setDecisionLoading(false));
+    return () => { live = false; };
   }, [task.id]);
   async function attach(file?: File) {
     if (!file) return;
@@ -461,6 +538,21 @@ export function Drawer({
       setAttachError(e.message);
     } finally {
       setUploading(false);
+    }
+  }
+  async function recordDecision(commentId: string) {
+    if (decisionSaving) return;
+    setDecisionSaving(commentId);
+    setDecisionError("");
+    try {
+      const saved = await api<DecisionRow>(`/tasks/${task.id}/decisions/from-comment/${commentId}`, { method: "POST" });
+      setDecisions((current) => current.some((decision) => decision.id === saved.id)
+        ? current.map((decision) => decision.id === saved.id ? saved : decision)
+        : [...current, saved]);
+    } catch (e: any) {
+      setDecisionError(e?.message || "Could not record this decision. Please try again.");
+    } finally {
+      setDecisionSaving(null);
     }
   }
   return (
@@ -493,6 +585,7 @@ export function Drawer({
           className="w-full bg-transparent text-xl font-semibold outline-none"
         />
         <textarea
+          aria-label="Task description"
           defaultValue={task.description}
           onBlur={(e) => e.target.value !== task.description && update(task, { description: e.target.value })}
           className={cn(field, "min-h-24")}
@@ -505,9 +598,13 @@ export function Drawer({
           <TaskSelect label="Priority" value={task.priority} tone="priority"
             options={[{ value: "low", label: "Low" }, { value: "medium", label: "Medium" }, { value: "high", label: "High" }]}
             onSave={(priority) => update(task, { priority })} />
-          <TaskSelect label="Assignee" value={task.assignee?.id || ""}
-            options={[{ value: "", label: "Unassigned" }, ...(task.assignee && !(users || []).some((u: User) => u.id === task.assignee?.id) ? [{ value: task.assignee.id, label: task.assignee.name }] : []), ...(users || []).map((u: User) => ({ value: u.id, label: u.name }))]}
-            onSave={(assignee) => update(task, { assignee_id: assignee || null })} />
+          <TaskSelect label="Assignee" value={task.assignee?.id || ""} searchable
+            options={[...(task.assignee && !(users || []).some((u: User) => u.id === task.assignee?.id) && !agents.some((a: Agent) => a.id === task.assignee?.id) ? [{ value: task.assignee.id, label: task.assignee.name }] : []), ...(users || []).map((u: User) => ({ value: u.id, label: u.name })), ...agents.map((agent: Agent) => ({ value: agent.id, label: `AI: ${agentLabel(agent, agents)}${agent.current_task ? ` · active: ${agent.current_task.title}` : " · available"}`, disabled: task.status === "in_progress" && !!agent.current_task && agent.current_task.id !== task.id }))]}
+            onSave={async (assignee) => {
+              const error = await update(task, { assignee_id: assignee });
+              if (!error) setAccountabilityRevision((value) => value + 1);
+              return error;
+            }} />
           <label className="text-xs text-zinc-500">
             Due date
             <input
@@ -520,6 +617,32 @@ export function Drawer({
             />
           </label>
         </div>
+        <section aria-label="Ownership and accountability" className="mt-5 rounded-xl border border-line bg-slate-50 p-4">
+          <h3 className="text-sm font-semibold text-ink">Ownership & accountability</h3>
+          {accountabilityError && <p role="alert" className="mt-2 text-xs text-red-700">{accountabilityError}</p>}
+          {!accountability && !accountabilityError && <p role="status" className="mt-2 text-xs text-slate-500">Loading ownership history…</p>}
+          {accountability && <>
+            <dl className="mt-3 grid gap-x-3 gap-y-2 text-xs sm:grid-cols-2">
+              <div><dt className="font-medium text-slate-500">Requested by</dt><dd className="mt-0.5 text-ink">{accountabilityName(accountability.requested_by)}</dd></div>
+              <div><dt className="font-medium text-slate-500">Current owner</dt><dd className="mt-0.5 text-ink">{accountabilityName(accountability.owner)}</dd></div>
+              <div><dt className="font-medium text-slate-500">Last assigned by</dt><dd className="mt-0.5 text-ink">{accountabilityName(accountability.assigned_by)}</dd></div>
+              <div><dt className="font-medium text-slate-500">Last executed by</dt><dd className="mt-0.5 text-ink">{accountabilityName(accountability.executed_by)}</dd></div>
+              <div><dt className="font-medium text-slate-500">Last reviewed by</dt><dd className="mt-0.5 text-ink">{accountabilityName(accountability.reviewed_by)}</dd></div>
+              <div><dt className="font-medium text-slate-500">Last approved by</dt><dd className="mt-0.5 text-ink">{accountabilityName(accountability.approved_by)}</dd></div>
+            </dl>
+            <details className="mt-3 border-t border-line pt-3">
+              <summary className="cursor-pointer text-xs font-semibold text-slate-600">Ownership and work history ({accountability.events.length})</summary>
+              <ol className="mt-2 space-y-2">
+                {accountability.events.slice(-20).reverse().map((event: AccountabilityEvent) => <li key={event.id} className="text-xs text-slate-600">
+                  <span className="font-medium text-ink">{accountabilityActionLabels[event.action] || event.action.replaceAll("_", " ")}</span>
+                  {event.actor && <> · {event.actor.name}</>}
+                  {event.initiator && event.initiator.id !== event.actor?.id && <> · initiated by {event.initiator.name}</>}
+                  <time className="ml-1 text-slate-400" dateTime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time>
+                </li>)}
+              </ol>
+            </details>
+          </>}
+        </section>
         {task.status === "blocked" && <p className="mt-2 text-xs text-zinc-500">Reopen the task to clear its blocker before marking it done.</p>}
         <label className="mt-3 block text-xs text-zinc-500">
           Labels
@@ -544,6 +667,7 @@ export function Drawer({
         </label>
         <label className="mt-4 block text-xs text-zinc-500">
           Prerequisites
+          <span className="mt-1 block text-[11px]">{(task.depends_on || []).length ? `Selected: ${(task.depends_on || []).map((dependency: any) => dependency.title).join(", ")}` : "No prerequisites selected."}</span>
           <select
             multiple
             className={cn(field, "mt-1 min-h-24")}
@@ -559,7 +683,7 @@ export function Drawer({
               </option>
             ))}
           </select>
-          <span className="mt-1 block text-[11px] text-zinc-400">Select tasks that must finish first. Agents will wait for these tasks.</span>
+          <span className="mt-1 block text-[11px] text-zinc-400">The list shows available tasks. Select those that must finish first; agents will wait for the selected tasks.</span>
           {(task.depends_on || []).some((dependency: any) => dependency.status !== "done") && (
             <span className="mt-1 block text-[11px] font-medium text-amber-700">Blocked until all prerequisites are complete.</span>
           )}
@@ -661,15 +785,40 @@ export function Drawer({
         <div className="mt-7 border-t border-line pt-5">
           <h3 className="text-sm font-medium">Comments</h3>
           <div className="mt-4 space-y-3">
-            {comments.map((c: any) => (
-              <div key={c.id} className="flex gap-2">
-                <Avatar user={c.author} />
-                <div className="rounded-lg bg-white/[.045] p-3 text-sm">
-                  <b className="mb-1 block text-xs">{c.author?.name}</b>
-                  {c.body}
+            {comments.map((c: any) => {
+              const decision = decisions.find((item) => item.source_comment_id === c.id);
+              return (
+                <div key={c.id} className="flex gap-2">
+                  <Avatar user={c.author} />
+                  <div className="min-w-0 flex-1 rounded-lg bg-white/[.045] p-3 text-sm">
+                    <b className="mb-1 block text-xs">{c.author?.name}</b>
+                    <p className="whitespace-pre-wrap">{c.body}</p>
+                    {decision ? (
+                      <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-emerald-950">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <a href={`/projects/${encodeURIComponent(task.project_id)}?task=${encodeURIComponent(task.id)}`} className="text-xs font-semibold text-emerald-800 underline-offset-2 hover:underline">Saved decision: {decision.title}</a>
+                          <time className="text-[11px] text-emerald-800" dateTime={decision.created_at}>{new Date(decision.created_at).toLocaleString()}</time>
+                        </div>
+                        <p className="mt-1 whitespace-pre-wrap text-xs leading-5">{decision.body}</p>
+                        <p className="mt-1 text-[11px] text-emerald-800">Recorded by {decision.author?.name || "a team member"}</p>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        className="mt-2 rounded text-xs font-semibold text-blue-700 underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+                        disabled={decisionSaving !== null || decisionLoading}
+                        aria-label={`Record ${c.author?.name || "this comment"}'s comment as a decision`}
+                        onClick={() => recordDecision(c.id)}
+                      >
+                        {decisionSaving === c.id ? "Saving decision…" : "Record as decision"}
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
+            {decisionLoading && <p role="status" className="text-xs text-slate-500">Loading saved decisions…</p>}
+            {decisionError && <p role="alert" className="text-xs text-red-700">{decisionError}</p>}
           </div>
           <form
             className="mt-5 flex gap-2"
@@ -685,6 +834,7 @@ export function Drawer({
           >
             <input
               className="min-w-0 flex-1 rounded-lg border border-line bg-canvas p-2.5 text-sm outline-none focus:border-accent"
+              aria-label="Write a comment"
               value={body}
               onChange={(e) => setBody(e.target.value)}
               placeholder="Write a comment"
@@ -696,10 +846,10 @@ export function Drawer({
           {failure}
         </div>
         <div className="mt-5 flex flex-wrap gap-2">
-          <label className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border border-line bg-panel px-3 text-xs">
+          <label className="inline-flex h-8 cursor-pointer items-center gap-2 rounded-lg border border-line bg-panel px-3 text-xs focus-within:ring-2 focus-within:ring-accent">
             <Paperclip size={14} />
             {uploading ? "Uploading..." : "Attach file"}
-            <input type="file" className="hidden" onChange={(e) => attach(e.target.files?.[0])} />
+            <input type="file" aria-label="Attach file" className="sr-only" onChange={(e) => attach(e.target.files?.[0])} />
           </label>
           {attachError && (
             <span role="alert" className="self-center text-xs text-red-700">
