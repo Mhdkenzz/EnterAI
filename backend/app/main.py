@@ -17,7 +17,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .auth import CONFIRMATION_SECRET, CSRF_HEADER, SESSION_COOKIE, clear_session_cookie, revoke_session_token, create_token, current_user, hash_password, set_session_cookie, verify_password
 from .database import Base, engine, get_db
-from .models import Activity, AgentMessage, Attachment, AuditEvent, Comment, CopilotConfirmation, Decision, HierarchyConfig, InboundMessage, InboundPlan, Notification, Organization, Project, ProjectDocument, Task, TaskDependency, Team, User
+from .time_utils import utcnow_naive
+from .models import Activity, AgentMessage, AgentNextStep, Attachment, AuditEvent, Comment, CopilotConfirmation, Decision, HierarchyConfig, InboundMessage, InboundPlan, Notification, Organization, Project, ProjectDocument, ProjectMilestone, Task, TaskDependency, Team, User
 from .copilot import AgentAccessDenied, CopilotProviderError, CopilotService, TOOL_ROLES, WorkspaceTools, read_agent_confirmation, read_confirmation
 from .agent_access import agent_project_access, agent_tool_allowed
 from .agent_workspace import REPO_PATCH_NAME, apply_confirmed_repo_patch
@@ -184,10 +185,16 @@ app.add_middleware(
 # Argon2 in full on every attempt, and names past the column width fail as a 500.
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str = Field(max_length=200)
 class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200); accept_terms: bool = False
-class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
-class ProjectUpdate(BaseModel): name: str | None = None; code: str | None = None; description: str | None = None; status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: str | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
-class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "done"] = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []; depends_on: list[str] = Field(default_factory=list); qa_required: bool = False; requires_human_approval: bool = False; acceptance_criteria: list[str] = Field(default_factory=list, max_length=20); review_rubric: list[str] = Field(default_factory=list, max_length=20)
-class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "blocked", "done"] | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None; depends_on: list[str] | None = None; qa_required: bool | None = None; requires_human_approval: bool | None = None; acceptance_criteria: list[str] | None = Field(default=None, max_length=20); review_rubric: list[str] | None = Field(default=None, max_length=20); qa_evidence: list[str] | None = Field(default=None, max_length=50)
+class ProjectIn(BaseModel):
+    name: str = Field(min_length=1, max_length=180); code: str = Field(min_length=1, max_length=16); description: str | None = None; team_id: str | None = None; health: Literal["on_track", "at_risk", "off_track"] = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
+    north_star_goal: str | None = Field(default=None, max_length=2000); success_metric: str | None = Field(default=None, max_length=180); metric_unit: str | None = Field(default=None, max_length=60); baseline_value: float | None = None; current_value: float | None = None; target_value: float | None = None
+class ProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=180); code: str | None = Field(default=None, min_length=1, max_length=16); description: str | None = None; status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: Literal["on_track", "at_risk", "off_track"] | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
+    north_star_goal: str | None = Field(default=None, max_length=2000); success_metric: str | None = Field(default=None, max_length=180); metric_unit: str | None = Field(default=None, max_length=60); baseline_value: float | None = None; current_value: float | None = None; target_value: float | None = None
+class MilestoneIn(BaseModel): title: str = Field(min_length=1, max_length=180); description: str | None = Field(default=None, max_length=2000); due_date: datetime | None = None
+class MilestoneUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=180); description: str | None = Field(default=None, max_length=2000); due_date: datetime | None = None
+class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; milestone_id: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "done"] = "todo"; priority: Literal["low", "medium", "high"] = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []; depends_on: list[str] = Field(default_factory=list); qa_required: bool = False; requires_human_approval: bool = False; acceptance_criteria: list[str] = Field(default_factory=list, max_length=20); review_rubric: list[str] = Field(default_factory=list, max_length=20)
+class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "blocked", "done"] | None = None; priority: Literal["low", "medium", "high"] | None = None; assignee_id: str | None = None; milestone_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None; depends_on: list[str] | None = None; qa_required: bool | None = None; requires_human_approval: bool | None = None; acceptance_criteria: list[str] | None = Field(default=None, max_length=20); review_rubric: list[str] | None = Field(default=None, max_length=20); qa_evidence: list[str] | None = Field(default=None, max_length=50)
 class QAPeerReviewRequest(BaseModel): reviewer_agent_id: str
 class QAPeerReviewDecision(BaseModel): outcome: Literal["approved", "changes_requested"]; summary: str = Field(min_length=8, max_length=2000)
 class CommentIn(BaseModel): body: str = Field(min_length=1)
@@ -217,16 +224,104 @@ class HierarchyConfigUpdate(BaseModel):
     workers_per_manager: int | None = Field(default=None, ge=0)
 
 def user_out(user: User): return {"id":user.id,"name":user.name,"email":user.email,"role":user.role,"kind":user.kind,"title":user.title,"avatar":user.avatar,"email_verified":user.email_verified_at is not None}
+def _north_star_values(values: dict[str, Any], existing: Project | None = None) -> dict[str, Any]:
+    result = {name: getattr(existing, name, None) for name in (
+        "north_star_goal", "success_metric", "metric_unit", "baseline_value", "current_value", "target_value",
+    )} if existing else {}
+    result.update(values)
+    goal = (result.get("north_star_goal") or "").strip()
+    metric = (result.get("success_metric") or "").strip()
+    fields_present = bool(goal or metric or result.get("baseline_value") is not None
+                         or result.get("current_value") is not None or result.get("target_value") is not None)
+    if not fields_present:
+        return result
+    if not goal or not metric or result.get("target_value") is None:
+        raise HTTPException(422, "A measurable project goal needs a north-star outcome, a named success metric, and a target value")
+    baseline = result.get("baseline_value")
+    current = result.get("current_value")
+    target = result.get("target_value")
+    if baseline is None:
+        baseline = 0.0
+        result["baseline_value"] = baseline
+    if current is None:
+        current = baseline
+        result["current_value"] = current
+    if baseline == target:
+        raise HTTPException(422, "The metric target must differ from its baseline")
+    if not all(value == value and abs(value) != float("inf") for value in (baseline, current, target)):
+        raise HTTPException(422, "Project metric values must be finite numbers")
+    result["north_star_goal"] = goal
+    result["success_metric"] = metric
+    result["metric_unit"] = (result.get("metric_unit") or "count").strip() or "count"
+    return result
+
+
+def _metric_progress(project: Project) -> float | None:
+    if project.baseline_value is None or project.target_value is None or project.current_value is None:
+        return None
+    span = project.target_value - project.baseline_value
+    if span == 0:
+        return None
+    return round(max(0.0, min(100.0, (project.current_value - project.baseline_value) / span * 100)), 1)
+
+
+def milestone_out(milestone: ProjectMilestone, db: Session) -> dict[str, Any]:
+    tasks = db.scalars(select(Task).where(
+        Task.project_id == milestone.project_id, Task.milestone_id == milestone.id, Task.parent_id.is_(None),
+    )).all()
+    total = len(tasks)
+    done = sum(task.status == "done" for task in tasks)
+    blocked = sum(task.status == "blocked" for task in tasks)
+    status = "completed" if total and done == total else "blocked" if blocked else "in_progress" if any(task.status in {"in_progress", "review"} for task in tasks) else "planned"
+    assignments = []
+    for task in tasks:
+        assignee = db.get(User, task.assignee_id) if task.assignee_id else None
+        assignments.append({"id": task.id, "title": task.title, "status": task.status,
+            "priority": task.priority, "assignee_name": assignee.name if assignee else None,
+            "assignee_kind": assignee.kind if assignee else None})
+    return {"id": milestone.id, "project_id": milestone.project_id, "title": milestone.title,
+            "description": milestone.description, "due_date": milestone.due_date,
+            "status": status, "progress": round(done / total * 100) if total else 0,
+            "task_count": total, "completed_task_count": done, "blocked_task_count": blocked,
+            "tasks": assignments,
+            "created_at": milestone.created_at, "updated_at": milestone.updated_at}
+
+
+def next_step_out(suggestion: AgentNextStep, db: Session) -> dict[str, Any]:
+    agent = db.get(User, suggestion.agent_id)
+    task = db.get(Task, suggestion.source_task_id)
+    milestone = db.get(ProjectMilestone, suggestion.milestone_id) if suggestion.milestone_id else None
+    return {"id": suggestion.id, "project_id": suggestion.project_id, "source_task_id": suggestion.source_task_id,
+            "source_task_title": task.title if task else "Task", "agent_id": suggestion.agent_id,
+            "agent_name": agent.name if agent else "Agent", "milestone_id": suggestion.milestone_id,
+            "milestone_title": milestone.title if milestone else None, "title": suggestion.title,
+            "description": suggestion.description, "rationale": suggestion.rationale,
+            "priority": suggestion.priority, "status": suggestion.status,
+            "created_task_id": suggestion.created_task_id, "created_at": suggestion.created_at}
+
+
+def _require_project_lead(project: Project, user: User) -> None:
+    if user.kind != "human" or not user.active or (user.role not in {"admin", "manager"} and project.owner_id != user.id):
+        raise HTTPException(403, "Only the project owner, a manager, or an administrator can change project coordination")
+
+
 def project_out(p: Project, db: Session):
     total = db.query(Task).filter(Task.project_id == p.id, Task.parent_id.is_(None)).count(); done = db.query(Task).filter(Task.project_id == p.id, Task.status == "done", Task.parent_id.is_(None)).count()
     owner = db.get(User,p.owner_id) if p.owner_id else None; team = db.get(Team,p.team_id) if p.team_id else None
     documents = db.scalars(select(ProjectDocument).where(ProjectDocument.project_id == p.id)).all()
-    return {"id":p.id,"name":p.name,"code":p.code,"description":p.description,"status":p.status,"health":p.health,"color":p.color,"due_date":p.due_date,"owner":user_out(owner) if owner else None,"team":team.name if team else None,"progress":round(done/total*100) if total else 0,"task_count":total,"documents":[{"id":d.id,"file_name":d.file_name,"created_at":d.created_at} for d in documents]}
+    milestones = db.scalars(select(ProjectMilestone).where(ProjectMilestone.project_id == p.id).order_by(ProjectMilestone.due_date, ProjectMilestone.created_at)).all()
+    north_star = None
+    if p.north_star_goal:
+        north_star = {"goal": p.north_star_goal, "metric": p.success_metric, "unit": p.metric_unit,
+                      "baseline": p.baseline_value, "current": p.current_value, "target": p.target_value,
+                      "progress": _metric_progress(p)}
+    return {"id":p.id,"name":p.name,"code":p.code,"description":p.description,"status":p.status,"health":p.health,"color":p.color,"due_date":p.due_date,"owner":user_out(owner) if owner else None,"team":team.name if team else None,"progress":round(done/total*100) if total else 0,"task_count":total,"documents":[{"id":d.id,"file_name":d.file_name,"created_at":d.created_at} for d in documents],"north_star":north_star,"milestones":[milestone_out(m,db) for m in milestones]}
 def task_out(t: Task, db: Session):
     assignee = db.get(User,t.assignee_id) if t.assignee_id else None
     dependencies = list_dependencies(db, t.id)
     reviewer = db.get(User, t.peer_review_agent_id) if t.peer_review_agent_id else None
-    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"title":t.title,"description":t.description,"status":t.status,"blocked_reason":t.blocked_reason,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"depends_on":[{"id":dependency.id,"title":dependency.title,"status":dependency.status} for dependency in dependencies],"due_date":t.due_date,"labels":t.labels,"qa_required":t.qa_required,"requires_human_approval":t.requires_human_approval,"acceptance_criteria":t.acceptance_criteria or [],"review_rubric":t.review_rubric or [],"qa_evidence":t.qa_evidence or [],"qa_checks":t.qa_checks or [],"qa_checked_at":t.qa_checked_at,"peer_review_status":t.peer_review_status,"peer_review_agent":user_out(reviewer) if reviewer else None,"peer_review_task_id":t.peer_review_task_id,"peer_review_summary":t.peer_review_summary,"peer_review_decision":t.peer_review_decision,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
+    milestone = db.get(ProjectMilestone, t.milestone_id) if t.milestone_id else None
+    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"milestone_id":t.milestone_id,"milestone_title":milestone.title if milestone else None,"title":t.title,"description":t.description,"status":t.status,"blocked_reason":t.blocked_reason,"escalation_category":t.escalation_category,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"depends_on":[{"id":dependency.id,"title":dependency.title,"status":dependency.status} for dependency in dependencies],"due_date":t.due_date,"labels":t.labels,"qa_required":t.qa_required,"requires_human_approval":t.requires_human_approval,"acceptance_criteria":t.acceptance_criteria or [],"review_rubric":t.review_rubric or [],"qa_evidence":t.qa_evidence or [],"qa_checks":t.qa_checks or [],"qa_checked_at":t.qa_checked_at,"peer_review_status":t.peer_review_status,"peer_review_agent":user_out(reviewer) if reviewer else None,"peer_review_task_id":t.peer_review_task_id,"peer_review_summary":t.peer_review_summary,"peer_review_decision":t.peer_review_decision,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
 def notify(db, recipient_id: str | None, actor: User, title: str, body: str | None = None, href: str | None = None) -> None:
     """Tell a person about something someone else did to their work. Never the actor
     themselves, and never an agent (agents have no inbox to read)."""
@@ -491,7 +586,8 @@ def create_project(data: ProjectIn, user: User = Depends(current_user), db: Sess
     if not name or not code: raise HTTPException(422, "Project name and code are required")
     duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, or_(Project.name.ilike(name), Project.code.ilike(code))))
     if duplicate: raise HTTPException(409, "A project with this name or code already exists")
-    values=data.model_dump(exclude={"source_document_ids"}); values.update(name=name, code=code)
+    values=data.model_dump(exclude={"source_document_ids"})
+    values.update(_north_star_values(values), name=name, code=code)
     p=Project(**values,organization_id=user.organization_id,owner_id=user.id); db.add(p); db.flush()
     if data.source_document_ids:
         docs=db.scalars(select(ProjectDocument).where(
@@ -507,6 +603,14 @@ def project(project_id: str,user: User=Depends(current_user),db:Session=Depends(
 def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
     p = ensure_knowledge_project(db, user, project_id)
     values = data.model_dump(exclude_unset=True)
+    metric_fields = {"north_star_goal", "success_metric", "metric_unit", "baseline_value", "current_value", "target_value"}
+    if metric_fields.intersection(values):
+        _require_project_lead(p, user)
+        before_metric = p.current_value
+        normalized = _north_star_values(values, p)
+        values.update({key: normalized.get(key) for key in metric_fields})
+        if p.current_value != before_metric and "current_value" in values:
+            values["current_value"] = normalized["current_value"]
     if values.get("status") == "completed":
         raise HTTPException(409, "Approve completion after reviewing all finished tasks")
     if p.status == "completed" and values.get("status") not in {None, "archived"}:
@@ -520,7 +624,12 @@ def update_project(project_id: str, data: ProjectUpdate, user: User = Depends(cu
     duplicate = db.scalar(select(Project).where(Project.organization_id==user.organization_id, Project.id != p.id, or_(Project.name.ilike(values.get("name", p.name)), Project.code.ilike(values.get("code", p.code)))))
     if duplicate: raise HTTPException(409, "A project with this name or code already exists")
     for key, value in values.items(): setattr(p, key, value)
-    log(db, user.organization_id, user.id, "project", p.id, "updated", fields=list(values)); db.commit(); return project_out(p, db)
+    log(db, user.organization_id, user.id, "project", p.id, "updated", fields=list(values))
+    if "current_value" in values:
+        log(db, user.organization_id, user.id, "project", p.id, "north_star_metric_updated",
+            current_value=values.get("current_value"), target_value=values.get("target_value", p.target_value),
+            metric=values.get("success_metric", p.success_metric))
+    db.commit(); return project_out(p, db)
 
 @app.post("/api/projects/{project_id}/approve-completion")
 def approve_project_completion(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
@@ -555,6 +664,117 @@ def reopen_project(project_id: str, user: User = Depends(current_user), db: Sess
 @app.get("/api/projects/{project_id}/tasks")
 def project_tasks(project_id: str,user: User=Depends(current_user),db:Session=Depends(get_db)):
     ensure_knowledge_project(db,user,project_id); return [task_out(t,db) for t in db.scalars(select(Task).where(Task.project_id==project_id,task_is_visible(db,user)).order_by(Task.position)).all()]
+
+
+@app.post("/api/projects/{project_id}/milestones", status_code=201)
+def create_milestone(project_id: str, data: MilestoneIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    project = ensure_knowledge_project(db, user, project_id)
+    _require_project_lead(project, user)
+    if project.status == "completed":
+        raise HTTPException(409, "Reopen the completed project before adding a milestone")
+    title = " ".join(data.title.split())
+    milestone = ProjectMilestone(organization_id=user.organization_id, project_id=project.id,
+        title=title, description=data.description, due_date=data.due_date, created_by=user.id)
+    db.add(milestone); db.flush()
+    log(db, user.organization_id, user.id, "project_milestone", milestone.id, "created", project_id=project.id)
+    db.commit(); db.refresh(milestone)
+    return milestone_out(milestone, db)
+
+
+@app.patch("/api/projects/{project_id}/milestones/{milestone_id}")
+def update_milestone(project_id: str, milestone_id: str, data: MilestoneUpdate, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    project = ensure_knowledge_project(db, user, project_id)
+    _require_project_lead(project, user)
+    milestone = db.scalar(select(ProjectMilestone).where(
+        ProjectMilestone.id == milestone_id, ProjectMilestone.project_id == project.id,
+        ProjectMilestone.organization_id == user.organization_id,
+    ))
+    if not milestone:
+        raise HTTPException(404, "Milestone not found")
+    values = data.model_dump(exclude_unset=True)
+    if "title" in values:
+        values["title"] = " ".join(values["title"].split())
+    for key, value in values.items():
+        setattr(milestone, key, value)
+    log(db, user.organization_id, user.id, "project_milestone", milestone.id, "updated", fields=list(values))
+    db.commit(); db.refresh(milestone)
+    return milestone_out(milestone, db)
+
+
+@app.get("/api/projects/{project_id}/next-steps")
+def list_project_next_steps(project_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    ensure_knowledge_project(db, user, project_id)
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "A human must review agent next-step suggestions")
+    rows = db.scalars(select(AgentNextStep).where(
+        AgentNextStep.organization_id == user.organization_id, AgentNextStep.project_id == project_id,
+        AgentNextStep.status == "pending",
+    ).order_by(AgentNextStep.created_at.desc())).all()
+    return [next_step_out(row, db) for row in rows]
+
+
+@app.post("/api/projects/{project_id}/next-steps/{suggestion_id}/approve", status_code=201)
+def approve_project_next_step(project_id: str, suggestion_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    project = ensure_knowledge_project(db, user, project_id)
+    _require_project_lead(project, user)
+    if project.status == "completed":
+        raise HTTPException(409, "Reopen the completed project before creating work from a suggestion")
+    suggestion = db.scalar(select(AgentNextStep).where(
+        AgentNextStep.id == suggestion_id, AgentNextStep.project_id == project.id,
+        AgentNextStep.organization_id == user.organization_id,
+    ).with_for_update())
+    if not suggestion or suggestion.status != "pending":
+        raise HTTPException(409, "This next-step suggestion is no longer pending")
+    milestone = None
+    if suggestion.milestone_id:
+        milestone = db.scalar(select(ProjectMilestone).where(
+            ProjectMilestone.id == suggestion.milestone_id, ProjectMilestone.project_id == project.id,
+        ))
+        if not milestone:
+            raise HTTPException(409, "The suggested milestone no longer exists")
+    high = suggestion.priority == "high"
+    task = Task(
+        project_id=project.id, milestone_id=milestone.id if milestone else None,
+        title=suggestion.title, description=suggestion.description, priority=suggestion.priority,
+        status="todo", assignee_id=user.id, reporter_id=user.id,
+        qa_required=high, requires_human_approval=high,
+        acceptance_criteria=["Deliver the proposed next step and show evidence of the outcome"] if high else [],
+        review_rubric=["Evidence supports the result", "No unresolved blocker remains"] if high else [],
+    )
+    db.add(task); db.flush()
+    if project.status == "review":
+        project.status = "active"
+        log(db, user.organization_id, user.id, "project", project.id,
+            "completion_review_reopened", reason="agent_next_step_approved")
+    suggestion.status = "approved"
+    suggestion.created_task_id = task.id
+    suggestion.reviewed_by = user.id
+    suggestion.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    log(db, user.organization_id, user.id, "agent_next_step", suggestion.id, "approved",
+        task_id=task.id, project_id=project.id, milestone_id=milestone.id if milestone else None)
+    log(db, user.organization_id, user.id, "task", task.id, "created_from_agent_next_step",
+        suggestion_id=suggestion.id, source_task_id=suggestion.source_task_id)
+    db.commit(); db.refresh(task)
+    return task_out(task, db)
+
+
+@app.post("/api/projects/{project_id}/next-steps/{suggestion_id}/reject")
+def reject_project_next_step(project_id: str, suggestion_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    project = ensure_knowledge_project(db, user, project_id)
+    _require_project_lead(project, user)
+    suggestion = db.scalar(select(AgentNextStep).where(
+        AgentNextStep.id == suggestion_id, AgentNextStep.project_id == project.id,
+        AgentNextStep.organization_id == user.organization_id,
+    ).with_for_update())
+    if not suggestion or suggestion.status != "pending":
+        raise HTTPException(409, "This next-step suggestion is no longer pending")
+    suggestion.status = "rejected"
+    suggestion.reviewed_by = user.id
+    suggestion.reviewed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    log(db, user.organization_id, user.id, "agent_next_step", suggestion.id, "rejected",
+        project_id=project.id, source_task_id=suggestion.source_task_id)
+    db.commit()
+    return {"ok": True}
 
 @app.post("/api/project-drafts/assist", status_code=201)
 async def assist_project_draft(file: UploadFile=File(...), user: User=Depends(current_user), db: Session=Depends(get_db)):
@@ -628,6 +848,11 @@ def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(
     if data.status == "in_progress" and assignee.kind == "agent":
         ensure_agent_has_no_active_conflict(db, assignee.id, "__new_task__")
     ensure_task_parent(db,p,data.parent_id)
+    if data.milestone_id and not db.scalar(select(ProjectMilestone.id).where(
+        ProjectMilestone.id == data.milestone_id, ProjectMilestone.project_id == p.id,
+        ProjectMilestone.organization_id == user.organization_id,
+    )):
+        raise HTTPException(422, "Choose a milestone from this project")
     values=data.model_dump(); dependency_ids=values.pop("depends_on")
     values["qa_required"] = data.qa_required or data.requires_human_approval
     values["assignee_id"] = assignee_id
@@ -723,6 +948,14 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
         changes["requires_human_approval"] = True
     if changes.get("requires_human_approval"):
         changes["qa_required"] = True
+    if "milestone_id" in changes:
+        if user.kind != "human" or (user.role not in {"admin", "manager"} and p.owner_id != user.id):
+            raise HTTPException(403, "Only the project owner, a manager, or an administrator can link tasks to milestones")
+        if changes["milestone_id"] and not db.scalar(select(ProjectMilestone.id).where(
+            ProjectMilestone.id == changes["milestone_id"], ProjectMilestone.project_id == p.id,
+            ProjectMilestone.organization_id == user.organization_id,
+        )):
+            raise HTTPException(422, "Choose a milestone from this project")
     next_qa_required = changes.get("qa_required", t.qa_required)
     next_requires_human_approval = changes.get("requires_human_approval", t.requires_human_approval)
     next_criteria = changes.get("acceptance_criteria", t.acceptance_criteria or [])
@@ -742,7 +975,7 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
                 human_admin(user)
                 if t.status == "in_progress":
                     raise HTTPException(409, "Pause this agent's task before reassigning it. Its current work must be reviewed by a human first.")
-    before, before_assignee_id = t.status, t.assignee_id
+    before, before_assignee_id, before_priority, before_milestone_id = t.status, t.assignee_id, t.priority, t.milestone_id
     next_assignee_id = changes.get("assignee_id", t.assignee_id)
     next_status = changes.get("status", t.status)
     next_assignee = db.get(User, next_assignee_id) if next_assignee_id else None
@@ -773,6 +1006,7 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
         t.peer_review_decision = None
     if data.status == "blocked" and before != "blocked":
         t.blocked_reason = f"Marked blocked by {user.name}."
+        t.escalation_category = "other"
         db.add(Comment(task_id=t.id, author_id=user.id, body=f"Blocked: {t.blocked_reason}"))
         recipients = db.scalars(select(User).where(
             User.organization_id == user.organization_id, User.kind == "human",
@@ -783,6 +1017,7 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
     elif before == "blocked" and data.status is not None and data.status != "blocked":
         previous_blocker = t.blocked_reason
         t.blocked_reason = None
+        t.escalation_category = None
         if t.assignee_id:
             previous_assignee = db.get(User, t.assignee_id)
             if previous_assignee and previous_assignee.kind == "agent":
@@ -826,11 +1061,19 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
     if t.assignee_id != before_assignee_id:
         notify(db, t.assignee_id, user, f"{user.name} assigned you “{t.title}”", p.name, f"project:{p.id}")
     owner_changed = t.assignee_id != before_assignee_id
+    priority_changed = t.priority != before_priority
     log(db,user.organization_id,user.id,"task",t.id,"updated",from_status=before,to_status=t.status,
         assignment_changed=owner_changed,
         from_assignee_id=before_assignee_id if owner_changed else None,
         to_assignee_id=t.assignee_id if owner_changed else None,
+        priority_changed=priority_changed, from_priority=before_priority if priority_changed else None,
+        to_priority=t.priority if priority_changed else None,
+        from_milestone_id=before_milestone_id if before_milestone_id != t.milestone_id else None,
+        to_milestone_id=t.milestone_id if before_milestone_id != t.milestone_id else None,
         requested_by_id=t.reporter_id, **dependency_detail)
+    if priority_changed:
+        log(db, user.organization_id, user.id, "task", t.id, "task_priority_changed",
+            from_priority=before_priority, to_priority=t.priority, project_id=p.id)
     if owner_changed:
         log(db, user.organization_id, user.id, "task", t.id, "task_reassigned",
             from_assignee_id=before_assignee_id, to_assignee_id=t.assignee_id,
@@ -1168,7 +1411,7 @@ def agent_out(a: User, db: Session) -> dict:
     current = db.get(Task, a.current_task_id) if a.current_task_id else None
     last_completed = db.get(Task, a.last_completed_task_id) if a.last_completed_task_id else None
     blocked = a.current_task_id is not None and a.consecutive_task_failures >= execution.MAX_CONSECUTIVE_FAILURES
-    rate_limited = a.daily_limit_reached_at is not None and a.daily_limit_reached_at >= datetime.utcnow() - timedelta(hours=24)
+    rate_limited = a.daily_limit_reached_at is not None and a.daily_limit_reached_at >= utcnow_naive() - timedelta(hours=24)
     return {
         "id": a.id, "name": a.name, "title": a.title, "avatar": a.avatar,
         "hierarchy_level": a.hierarchy_level, "parent_agent_id": a.parent_agent_id,
@@ -1938,6 +2181,7 @@ def ai_confirm(data:ConfirmAction,user:User=Depends(current_user),db:Session=Dep
         if linked_task and linked_task.status == "review":
             linked_task.status = "in_progress"
             linked_task.blocked_reason = None
+            linked_task.escalation_category = None
             db.add(Comment(task_id=linked_task.id, author_id=user.id,
                            body=f"Approved agent action: {linked_proposal.label or tool}. The agent can continue."))
             with audit_context("human", user.id):
@@ -1991,6 +2235,7 @@ def reject_agent_proposal(proposal_id:str, user:User=Depends(current_user), db:S
     if task and task.status == "review":
         task.status = "blocked"
         task.blocked_reason = f"A human rejected the proposed action: {row.label or row.tool}. Review and unblock when ready."
+        task.escalation_category = "strategic_decision"
         db.add(Comment(task_id=task.id, author_id=user.id, body=f"Rejected agent action: {row.label or row.tool}. The task is paused for review."))
         log(db, user.organization_id, user.id, "task", task.id, "agent_action_rejected",
             reviewed_by_id=user.id, proposed_by_agent_id=row.subject_id)

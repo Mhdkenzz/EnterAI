@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from uuid import uuid4
+from .time_utils import utcnow_naive
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -88,6 +89,7 @@ def retire_agent(db: Session, agent: User, actor_id: str | None = None) -> None:
         if task.status == "in_progress":
             task.status = "blocked"
             task.blocked_reason = "The assigned agent was retired. A human needs to review the current state before work resumes."
+            task.escalation_category = "other"
         log(db, agent.organization_id, actor_id, "task", task.id, "task_reassigned",
             from_assignee_id=agent.id, to_assignee_id=human_owner.id,
             assignment_reason="agent_retired")
@@ -98,7 +100,7 @@ def retire_agent(db: Session, agent: User, actor_id: str | None = None) -> None:
             href=f"project:{task.project_id}",
         ))
     agent.current_task_id = None
-    agent.retired_at = datetime.utcnow()
+    agent.retired_at = utcnow_naive()
     agent.execution_enabled = False
     audit(db, agent.organization_id, actor_id, "agent", agent.id, "retired")
     db.flush()

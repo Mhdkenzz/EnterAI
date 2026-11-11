@@ -34,6 +34,7 @@ from .copilot import CopilotProviderError, CopilotService, WorkspaceTools
 from .auth import CONFIRMATION_SECRET
 from .database import SessionLocal, engine
 from .models import AgentMessage, Comment, CopilotConfirmation, Notification, OrganizationAISettings, Task, User, Organization
+from .time_utils import utcnow_naive
 from .observability import execution_allowed, audit_context, scheduler_failure
 from .services import log
 from .ratelimit import OpenRouterRateLimitExceeded, build_rate_limiter
@@ -105,7 +106,7 @@ def _stepped_recently(bind, agent_id: str, cooldown_seconds: float) -> bool:
         return False
     with Session(bind=bind) as fresh:
         last = fresh.scalar(select(User.last_execution_at).where(User.id == agent_id))
-    return last is not None and (datetime.utcnow() - last).total_seconds() < cooldown_seconds
+    return last is not None and (utcnow_naive() - last).total_seconds() < cooldown_seconds
 
 
 def _eligible_agents(db: Session) -> list[User]:
@@ -146,6 +147,7 @@ def _claim_next_task(db: Session, agent: User) -> Task | None:
 def _block_after_repeated_failures(db: Session, agent: User, task: Task, reason: str, *, cause: str) -> None:
     task.status = "blocked"
     task.blocked_reason = reason
+    task.escalation_category = "other"
     db.add(Comment(task_id=task.id, author_id=agent.id, body=reason))
     recipients = db.scalars(select(User).where(
         User.organization_id == agent.organization_id, User.kind == "human",
@@ -188,7 +190,8 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
             reason = "This task is blocked because the agent needs additional access to continue. A workspace administrator must review and grant the specific tool or resource permission."
             task.status = "blocked"
             task.blocked_reason = reason
-            task.updated_at = datetime.utcnow()
+            task.escalation_category = "access"
+            task.updated_at = utcnow_naive()
             if agent.current_task_id == task.id:
                 agent.current_task_id = None
             db.add(Comment(task_id=task.id, author_id=agent.id, body=reason))
@@ -203,7 +206,7 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
             for recipient in {person.id: person for person in recipients}.values():
                 db.add(Notification(user_id=recipient.id, title=f"Agent needs access: {task.title}"[:220], body=reason, href=f"project:{task.project_id}"))
             agent.consecutive_task_failures = 0
-            agent.last_execution_at = datetime.utcnow()
+            agent.last_execution_at = utcnow_naive()
             log(db, agent.organization_id, agent.id, "task", task.id, "agent_blocked", cause="access_denied")
             db.commit()
             return
@@ -212,7 +215,7 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
         # written to a TIMESTAMP WITHOUT TIME ZONE column is converted to the
         # PostgreSQL server's timezone first, which silently shifts it out of step
         # with the rest of the row on any server that is not running in UTC.
-        agent.last_execution_at = datetime.utcnow()
+        agent.last_execution_at = utcnow_naive()
         db.add(AgentMessage(agent_id=agent.id, author_id=None, role="agent", body="I couldn't make progress just now. Try again later."))
         if agent.consecutive_task_failures >= MAX_CONSECUTIVE_FAILURES:
             reason = "Agent execution failed repeatedly; a workspace admin needs to review this task and retry or reassign it."
@@ -232,7 +235,7 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
         agent.consecutive_task_failures += 1
     else:
         agent.consecutive_task_failures = 0
-    agent.last_execution_at = datetime.utcnow()
+    agent.last_execution_at = utcnow_naive()
     narrative = _summarize(result)
     if narrative:
         db.add(AgentMessage(agent_id=agent.id, author_id=None, role="agent", body=narrative))
@@ -255,6 +258,7 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
             ))
             task.status = "review"
             task.blocked_reason = None
+            task.escalation_category = None
             db.add(Comment(task_id=task.id, author_id=agent.id,
                            body=f"Proposed action for human approval: {action.get('label', 'Agent action')}"))
             admins = db.scalars(select(User).where(
@@ -331,7 +335,7 @@ def run_execution_tick(db: Session | None = None, service: CopilotService | None
                 db.refresh(agent)
                 if not _daily_limiter.allow(agent_id):
                     if agent.daily_limit_reached_at is None:
-                        agent.daily_limit_reached_at = datetime.utcnow()
+                        agent.daily_limit_reached_at = utcnow_naive()
                         reason = f"This agent reached its {DAILY_CALL_LIMIT}-step rolling 24-hour execution limit. It will resume when capacity renews."
                         for admin in db.scalars(select(User).where(
                             User.organization_id == org_id, User.kind == "human",
@@ -361,7 +365,7 @@ def run_execution_tick(db: Session | None = None, service: CopilotService | None
                         failed_task = db.get(Task, failed_agent.current_task_id) if failed_agent and failed_agent.current_task_id else None
                         if failed_agent and failed_task and failed_task.assignee_id == failed_agent.id and failed_task.status not in {"done", "blocked", "review"}:
                             failed_agent.consecutive_task_failures += 1
-                            failed_agent.last_execution_at = datetime.utcnow()
+                            failed_agent.last_execution_at = utcnow_naive()
                             if failed_agent.consecutive_task_failures >= MAX_CONSECUTIVE_FAILURES:
                                 _block_after_repeated_failures(db, failed_agent, failed_task, "Agent execution failed repeatedly; a workspace admin needs to review this task and retry or reassign it.", cause="execution_errors")
                             db.commit()

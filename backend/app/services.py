@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+from .time_utils import utcnow_naive
 import json
 import os
 import re
@@ -142,9 +143,9 @@ def _bootstrap(db: Session, *, demo_content: bool):
     product, platform = Team(organization_id=org.id, name="Product", description="Product direction and delivery"), Team(organization_id=org.id, name="Operations", description="Planning and delivery support")
     db.add_all([product, platform]); db.flush()
     projects = [
-      Project(organization_id=org.id, team_id=product.id, name="Product Launch", code="LAUNCH", description="Prepare the next product release.", status="active", health="at_risk", owner_id=users[0].id, color="#22c55e", due_date=datetime.utcnow()+timedelta(days=19)),
-      Project(organization_id=org.id, team_id=platform.id, name="AI Workspace", code="AIW", description="Safe and observable AI actions across the product.", status="active", health="on_track", owner_id=users[0].id, color="#38bdf8", due_date=datetime.utcnow()+timedelta(days=41)),
-      Project(organization_id=org.id, team_id=product.id, name="Mobile Experience", code="MOB", description="Core workflows for the field team.", status="planning", health="on_track", owner_id=users[0].id, color="#f59e0b", due_date=datetime.utcnow()+timedelta(days=63)),
+      Project(organization_id=org.id, team_id=product.id, name="Product Launch", code="LAUNCH", description="Prepare the next product release.", status="active", health="at_risk", owner_id=users[0].id, color="#22c55e", due_date=utcnow_naive()+timedelta(days=19)),
+      Project(organization_id=org.id, team_id=platform.id, name="AI Workspace", code="AIW", description="Safe and observable AI actions across the product.", status="active", health="on_track", owner_id=users[0].id, color="#38bdf8", due_date=utcnow_naive()+timedelta(days=41)),
+      Project(organization_id=org.id, team_id=product.id, name="Mobile Experience", code="MOB", description="Core workflows for the field team.", status="planning", health="on_track", owner_id=users[0].id, color="#f59e0b", due_date=utcnow_naive()+timedelta(days=63)),
     ]
     db.add_all(projects); db.flush()
     task_data = [
@@ -153,7 +154,7 @@ def _bootstrap(db: Session, *, demo_content: bool):
       (projects[2], "Validate offline mode", "todo", "medium", users[0], 20), (projects[2], "Map field workflows", "backlog", "low", users[0], 28),
     ]
     for pos, (project, title, status, priority, assignee, days) in enumerate(task_data):
-        db.add(Task(project_id=project.id, title=title, status=status, priority=priority, assignee_id=assignee.id, reporter_id=users[0].id, due_date=datetime.utcnow()+timedelta(days=days), position=pos, labels=["launch"] if project == projects[0] else ["ai"]))
+        db.add(Task(project_id=project.id, title=title, status=status, priority=priority, assignee_id=assignee.id, reporter_id=users[0].id, due_date=utcnow_naive()+timedelta(days=days), position=pos, labels=["launch"] if project == projects[0] else ["ai"]))
     db.add_all([
       Notification(user_id=users[0].id, title="Product Launch needs attention", body="Two high priority tasks are due this week.", href=f"project:{projects[0].id}"),
       Notification(user_id=users[0].id, title="A task was completed", body="Design tool confirmation policy is complete.", href=f"project:{projects[1].id}"),

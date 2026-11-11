@@ -21,7 +21,7 @@ test("high-priority task creation opens the acceptance and review rubric fields"
   await signIn(page.context(), account.token);
   await page.goto(`/projects/${project.id}`);
   await page.getByRole("button", { name: "New task" }).click();
-  await page.getByLabel("Title").fill("High-impact task");
+  await page.getByLabel("Title", { exact: true }).fill("High-impact task");
   await page.getByLabel("Priority", { exact: true }).selectOption("high");
   const dialog = page.getByRole("dialog", { name: /New task in/ });
   await expect(page.getByLabel("Acceptance criteria, one per line")).toBeVisible();

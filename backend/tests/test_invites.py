@@ -14,6 +14,7 @@ from sqlalchemy import select
 from app.database import SessionLocal
 from app.main import app
 from app.models import Invite, User
+from app.time_utils import utcnow_naive
 from app.tokens import hash_token
 
 from conftest import link_token
@@ -95,7 +96,7 @@ def test_an_expired_invite_is_refused(outbox):
         token, created = invite(c, headers, outbox, address("stale"))
         with SessionLocal() as db:
             row = db.scalar(select(Invite).where(Invite.id == created["id"]))
-            row.expires_at = datetime.utcnow() - timedelta(minutes=1)
+            row.expires_at = utcnow_naive() - timedelta(minutes=1)
             db.commit()
         assert c.get(f"/api/auth/invites/{token}/preview").status_code == 404
         assert c.post("/api/auth/accept-invite", json={

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
+from .time_utils import utcnow_naive
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -150,7 +151,7 @@ def record_terms_acceptance(user: User, accepted: bool) -> None:
     requires the box whenever terms are published), so record it there, per version."""
     if accepted:
         from .privacy import CURRENT_TOS_VERSION
-        user.tos_accepted_at = datetime.utcnow()
+        user.tos_accepted_at = utcnow_naive()
         user.tos_version = CURRENT_TOS_VERSION
 
 
@@ -192,7 +193,7 @@ def reset_password(data: ResetPassword, db: Session = Depends(get_db)):
     user.session_epoch = (user.session_epoch or 0) + 1
     # Reaching the inbox proves the address, so a reset also settles verification.
     if user.email_verified_at is None:
-        user.email_verified_at = datetime.utcnow()
+        user.email_verified_at = utcnow_naive()
     invalidate_auth_tokens(db, user.id, PASSWORD_RESET)
     log(db, user.organization_id, user.id, "user", user.id, "password_reset_completed")
     db.commit()
@@ -235,7 +236,7 @@ def verify_email(data: TokenOnly, db: Session = Depends(get_db)):
     if not user or not user.active:
         raise HTTPException(400, GENERIC_TOKEN_ERROR)
     if user.email_verified_at is None:
-        user.email_verified_at = datetime.utcnow()
+        user.email_verified_at = utcnow_naive()
         log(db, user.organization_id, user.id, "user", user.id, "email_verified")
     db.commit()
     return {"detail": "Your email address is confirmed.", "email": user.email}
@@ -272,11 +273,11 @@ def create_invite(data: InviteIn, user: User = Depends(human_admin), db: Session
     for pending in db.scalars(select(Invite).where(
             Invite.organization_id == user.organization_id, func.lower(Invite.email) == address,
             Invite.accepted_at.is_(None), Invite.revoked_at.is_(None))).all():
-        pending.revoked_at = datetime.utcnow()  # re-inviting replaces the outstanding link
+        pending.revoked_at = utcnow_naive()  # re-inviting replaces the outstanding link
     raw, token_hash = mint()
     invite = Invite(organization_id=user.organization_id, email=address, role=data.role,
                     token_hash=token_hash, invited_by=user.id,
-                    expires_at=datetime.utcnow() + INVITE_TTL)
+                    expires_at=utcnow_naive() + INVITE_TTL)
     db.add(invite)
     db.flush()
     organization = db.get(Organization, user.organization_id)
@@ -309,7 +310,7 @@ def revoke_invite(invite_id: str, user: User = Depends(human_admin), db: Session
         raise HTTPException(404, "Invite not found")
     if invite.accepted_at is not None:
         raise HTTPException(409, "That invitation has already been accepted.")
-    invite.revoked_at = datetime.utcnow()
+    invite.revoked_at = utcnow_naive()
     log(db, user.organization_id, user.id, "invite", invite.id, "revoked")
     db.commit()
 
@@ -340,10 +341,10 @@ def accept_invite(data: AcceptInvite, response: Response, db: Session = Depends(
     user = User(organization_id=invite.organization_id, name=data.name.strip(), email=invite.email,
                 password_hash=hash_password(data.password), role=invite.role,
                 avatar="".join(part[0] for part in data.name.split() if part)[:2].upper() or "EA",
-                email_verified_at=datetime.utcnow())
+                email_verified_at=utcnow_naive())
     record_terms_acceptance(user, data.accept_terms)
     db.add(user)
-    invite.accepted_at = datetime.utcnow()
+    invite.accepted_at = utcnow_naive()
     db.flush()
     log(db, invite.organization_id, user.id, "user", user.id, "invite_accepted")
     db.commit()
@@ -388,7 +389,7 @@ def onboarding(user: User = Depends(current_user), db: Session = Depends(get_db)
 def complete_onboarding(user: User = Depends(human_admin), db: Session = Depends(get_db)):
     organization = db.get(Organization, user.organization_id)
     if organization.onboarded_at is None:
-        organization.onboarded_at = datetime.utcnow()
+        organization.onboarded_at = utcnow_naive()
         log(db, organization.id, user.id, "organization", organization.id, "onboarded")
         db.commit()
     return {"complete": True}

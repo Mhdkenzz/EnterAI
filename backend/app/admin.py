@@ -16,6 +16,7 @@ from . import secrets_store
 from .ai.config import AISettings
 from .agent_access import BASE_AGENT_TOOLS, VALID_PERMISSIONS, allowed_agent_tools, grants_for, tool_catalog
 from .knowledge_access import document_is_visible, visible_project_ids
+from .time_utils import utcnow_naive
 
 router = APIRouter(prefix='/api/admin', tags=['admin'])
 
@@ -309,7 +310,7 @@ def grant_agent_access(agent_id: str, data: AgentAccessGrantIn, user: User = Dep
         db.add(grant)
         action = 'agent_access_granted'
     elif grant.revoked_at is not None:
-        grant.granted_by, grant.created_at = user.id, datetime.utcnow()
+        grant.granted_by, grant.created_at = user.id, utcnow_naive()
         grant.reason, grant.revoked_by, grant.revoked_at = data.reason, None, None
         action = 'agent_access_granted'
     else:
@@ -335,7 +336,7 @@ def revoke_agent_access(agent_id: str, grant_id: str, user: User = Depends(human
         raise HTTPException(404, 'Access grant not found')
     if grant.revoked_at is not None:
         raise HTTPException(409, 'Access grant is already revoked')
-    grant.revoked_by, grant.revoked_at = user.id, datetime.utcnow()
+    grant.revoked_by, grant.revoked_at = user.id, utcnow_naive()
     audit(db, user.organization_id, user.id, 'agent', agent.id, 'agent_access_revoked',
           resource_type=grant.resource_type, permission=grant.permission,
           resource_id=grant.resource_id if grant.resource_type in {'project', 'document'} else None,

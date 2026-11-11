@@ -10,7 +10,7 @@ from .models import AgentAccessGrant, Project, ProjectDocument, Task, User
 BASE_AGENT_TOOLS = frozenset({
     "get_projects", "get_tasks", "get_my_tasks", "get_comments", "search",
     "search_documents", "search_knowledge", "log_progress", "mark_task_complete",
-    "raise_blocker",
+    "raise_blocker", "suggest_next_step",
 })
 VALID_PERMISSIONS = {"project": {"read", "write"}, "document": {"read"}, "tool": {"use"}}
 NEVER_AGENT_TOOLS = frozenset({"get_activity", "get_assignable_agents"})

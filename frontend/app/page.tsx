@@ -625,12 +625,21 @@ export default function EnterAI() {
     ) : (
       <ProjectView
         project={project}
+        currentUserId={user?.id}
         tasks={tasks}
         open={openTask}
         update={changeTask}
         edit={() => setEditProject(project)}
         create={() => { setAgentsLoading(true); setTaskForm(true); }}
         ai={() => openAI(project)}
+        coordinationChanged={async () => {
+          if (!project) return;
+          const fresh = await api<Project>("/projects/" + project.id);
+          setProject(fresh);
+          setProjects((all) => all.map((item) => item.id === fresh.id ? fresh : item));
+          setTasks(await api<Task[]>("/projects/" + project.id + "/tasks"));
+          await refresh();
+        }}
         canManage={user?.kind === "human" && (user?.role === "admin" || user?.role === "manager")}
         canApproveCompletion={user?.kind === "human" && (user?.role === "admin" || user?.role === "manager" || project?.owner?.id === user.id)}
         approveCompletion={async () => {
@@ -871,6 +880,13 @@ export default function EnterAI() {
             setTasks((x) => [...x, t]);
             setTaskForm(false);
             await refresh();
+            try {
+              const freshProject = await api<Project>("/projects/" + project.id);
+              setProject(freshProject);
+              setProjects((all) => all.map((item) => item.id === freshProject.id ? freshProject : item));
+            } catch {
+              setError("Task created, but milestone progress could not refresh. Reload the project to see the latest totals.");
+            }
           }}
         />
       )}
@@ -893,6 +909,7 @@ export default function EnterAI() {
           qaReviewers={user?.kind === "human" && ["admin", "manager"].includes(user.role) ? agents : []}
           canManageQA={user?.kind === "human" && ["admin", "manager"].includes(user.role)}
           canRecordEvidence={user?.kind === "human"}
+          canManageMilestones={user?.kind === "human" && (["admin", "manager"].includes(user.role) || project?.owner?.id === user.id)}
           onTaskUpdate={setTask}
           openTask={openTask}
           tasksChanged={async (projectId: string) => {

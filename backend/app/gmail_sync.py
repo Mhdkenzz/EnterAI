@@ -25,6 +25,7 @@ from .gmail_api import (
 from .models import InboundMessage, InboundPlan, IntegrationConnection, Notification, User
 from .request_planning import triage_inbound_message
 from .services import log
+from .time_utils import utcnow_naive
 from .slack_api import SlackProviderError, SlackReauthorizationRequired, refresh_connection_access_token
 from . import notion_api, notion_sync
 
@@ -122,7 +123,7 @@ def _inbound_from_gmail(connection: IntegrationConnection, message: dict) -> Inb
     try:
         received_at = datetime.fromtimestamp(int(message.get("internalDate", "0")) / 1000, timezone.utc).replace(tzinfo=None)
     except (ValueError, TypeError, OverflowError):
-        received_at = datetime.utcnow()
+        received_at = utcnow_naive()
     body = _message_body(message)
     if not body:
         body = "(This email did not contain readable text.)"
@@ -223,7 +224,7 @@ def _sync_one(db: Session, connection: IntegrationConnection) -> int:
     if not connection.history_cursor:
         profile = get_profile(access_token)
         connection.history_cursor = profile["historyId"]
-        connection.last_sync_at = datetime.utcnow()
+        connection.last_sync_at = utcnow_naive()
         connection.last_error = None
         db.commit()
         return 0
@@ -232,7 +233,7 @@ def _sync_one(db: Session, connection: IntegrationConnection) -> int:
     except GmailHistoryExpired:
         inserted, cursor = _recover_expired_cursor(db, connection, access_token)
         connection.history_cursor = cursor
-        connection.last_sync_at = datetime.utcnow()
+        connection.last_sync_at = utcnow_naive()
         connection.last_error = None
         db.commit()
         return inserted
@@ -242,7 +243,7 @@ def _sync_one(db: Session, connection: IntegrationConnection) -> int:
         if message:
             inserted += int(_insert_message(db, connection, message))
     connection.history_cursor = cursor
-    connection.last_sync_at = datetime.utcnow()
+    connection.last_sync_at = utcnow_naive()
     connection.last_error = None
     db.commit()
     return inserted

@@ -91,6 +91,42 @@ function TaskSelect({ label, value, tone, options, onSave, searchable = false }:
   );
 }
 
+type NorthStarDraft = { goal: string; metric: string; unit: string; baseline: string; current: string; target: string };
+function projectNorthStarPayload(value: NorthStarDraft) {
+  const active = !!(value.goal.trim() || value.metric.trim() || value.target.trim());
+  if (!active) return { north_star_goal: null, success_metric: null, metric_unit: null, baseline_value: null, current_value: null, target_value: null };
+  if (!value.goal.trim() || !value.metric.trim() || !value.unit.trim() || !value.baseline.trim() || !value.current.trim() || !value.target.trim())
+    throw new Error("Complete the goal, metric, unit, baseline, current value, and target to set a measurable north star.");
+  const baseline_value = Number(value.baseline), current_value = Number(value.current), target_value = Number(value.target);
+  if (![baseline_value, current_value, target_value].every(Number.isFinite) || baseline_value === target_value)
+    throw new Error("Enter finite metric values and make the target different from the baseline.");
+  return { north_star_goal: value.goal.trim(), success_metric: value.metric.trim(), metric_unit: value.unit.trim(), baseline_value, current_value, target_value };
+}
+
+function NorthStarFields({ value, onChange }: { value: NorthStarDraft; onChange: (value: NorthStarDraft) => void }) {
+  const set = (key: keyof NorthStarDraft, next: string) => onChange({ ...value, [key]: next });
+  return <section aria-label="Project north-star goal" className="rounded-xl border border-blue-200 bg-blue-50/40 p-4">
+    <h3 className="text-sm font-semibold text-ink">North-star goal and success measure</h3>
+    <p className="mt-1 text-xs text-slate-500">State the project outcome and how the team will measure it. Values can be updated as results change.</p>
+    <label className="mt-3 block text-xs text-slate-600">Outcome
+      <textarea aria-label="North-star outcome" className={cn(field, "mt-1 min-h-16")} value={value.goal} onChange={(event) => set("goal", event.target.value)} placeholder="What measurable outcome should this project achieve?" />
+    </label>
+    <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <label className="block text-xs text-slate-600">Success metric
+        <input aria-label="Success metric" className={cn(field, "mt-1")} value={value.metric} onChange={(event) => set("metric", event.target.value)} placeholder="e.g. weekly active users" />
+      </label>
+      <label className="block text-xs text-slate-600">Unit
+        <input aria-label="Metric unit" className={cn(field, "mt-1")} value={value.unit} onChange={(event) => set("unit", event.target.value)} placeholder="users, %, hours…" />
+      </label>
+    </div>
+    <div className="mt-3 grid grid-cols-3 gap-2">
+      {(["baseline", "current", "target"] as const).map((key) => <label key={key} className="block text-xs capitalize text-slate-600">{key} value
+        <input aria-label={`Metric ${key} value`} type="number" step="any" className={cn(field, "mt-1")} value={value[key]} onChange={(event) => set(key, event.target.value)} />
+      </label>)}
+    </div>
+  </section>;
+}
+
 export function ProjectForm({ teams, close, create }: any) {
   const [name, setName] = useState(""),
     [code, setCode] = useState(""),
@@ -101,6 +137,7 @@ export function ProjectForm({ teams, close, create }: any) {
     [draft, setDraft] = useState<any>(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState("");
+  const [northStar, setNorthStar] = useState({ goal: "", metric: "", unit: "count", baseline: "0", current: "0", target: "" });
   const { saving, run, failure } = useSubmit();
   async function read(file?: File) {
     if (!file) return;
@@ -137,6 +174,7 @@ export function ProjectForm({ teams, close, create }: any) {
                 team_id: team || null,
                 health,
                 color: "#38bdf8",
+                ...projectNorthStarPayload(northStar),
                 source_document_ids: doc ? [doc] : [],
               }),
             );
@@ -193,6 +231,7 @@ export function ProjectForm({ teams, close, create }: any) {
             onChange={(e) => setDescription(e.target.value)}
           />
         </label>
+        <NorthStarFields value={northStar} onChange={setNorthStar} />
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-xs text-zinc-400">
             Team
@@ -233,6 +272,12 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
     [description, setDescription] = useState(project.description || ""),
     [health, setHealth] = useState(project.health),
     [team, setTeam] = useState(teams.find((t: any) => t.name === project.team)?.id || "");
+  const [northStar, setNorthStar] = useState({
+    goal: project.north_star?.goal || "", metric: project.north_star?.metric || "", unit: project.north_star?.unit || "count",
+    baseline: project.north_star?.baseline == null ? "0" : String(project.north_star.baseline),
+    current: project.north_star?.current == null ? "0" : String(project.north_star.current),
+    target: project.north_star?.target == null ? "" : String(project.north_star.target),
+  });
   const { saving, run, failure } = useSubmit();
   return (
     <Modal title="Edit project" close={close}>
@@ -247,6 +292,7 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
               description,
               health,
               team_id: team || null,
+              ...projectNorthStarPayload(northStar),
             }),
           );
         }}
@@ -274,6 +320,7 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
             onChange={(e) => setDescription(e.target.value)}
           />
         </label>
+        <NorthStarFields value={northStar} onChange={setNorthStar} />
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-xs text-zinc-400">
             Team
@@ -312,6 +359,7 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
   const [title, setTitle] = useState(""),
     [description, setDescription] = useState(""),
     [priority, setPriority] = useState("medium"),
+    [milestoneId, setMilestoneId] = useState(""),
     [assignee, setAssignee] = useState(currentUserId || ""),
     [assigneeSearch, setAssigneeSearch] = useState(""),
     [dueDate, setDueDate] = useState(""),
@@ -330,6 +378,7 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
           if (!agentsLoading && title.trim())
             run(() => create({
               title: title.trim(), description, priority, assignee_id: assignee || null,
+              milestone_id: milestoneId || null,
               due_date: dueDate ? dueDate + "T00:00:00" : null,
               qa_required: qaRequired || humanApproval,
               requires_human_approval: humanApproval,
@@ -374,6 +423,12 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
             <span className="mt-1 block text-[11px] text-zinc-500">Every task needs an owner. New tasks are assigned to you unless you choose someone else.</span>
           </div>
         </div>
+        {!!project.milestones?.length && <label className="block text-xs text-zinc-400">Milestone
+          <select aria-label="Milestone" className={field} value={milestoneId} onChange={(event) => setMilestoneId(event.target.value)}>
+            <option value="">No milestone</option>
+            {project.milestones.map((milestone: any) => <option key={milestone.id} value={milestone.id}>{milestone.title}</option>)}
+          </select>
+        </label>}
         <label className="block text-xs text-zinc-400">
           Due date
           <input type="date" className={field} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
@@ -507,6 +562,7 @@ export function Drawer({
   tasksChanged,
   canManageQA = false,
   canRecordEvidence = false,
+  canManageMilestones = false,
   qaReviewers = [],
   onTaskUpdate,
 }: any) {
@@ -527,7 +583,8 @@ export function Drawer({
     [qaRequired, setQaRequired] = useState(!!task.qa_required),
     [humanApprovalRequired, setHumanApprovalRequired] = useState(!!task.requires_human_approval),
     [peerReviewerId, setPeerReviewerId] = useState(""),
-    [peerDecision, setPeerDecision] = useState("");
+    [peerDecision, setPeerDecision] = useState(""),
+    [milestones, setMilestones] = useState<any[]>([]);
   const { saving, run, failure } = useSubmit();
   useEffect(() => {
     setQaCriteria((task.acceptance_criteria || []).join("\n"));
@@ -553,7 +610,10 @@ export function Drawer({
       .then(setSiblings)
       .catch(() => {});
   useEffect(() => {
+    let live = true;
     loadSiblings();
+    api<any>("/projects/" + task.project_id).then((project) => live && setMilestones(project.milestones || [])).catch(() => live && setMilestones([]));
+    return () => { live = false; };
   }, [task.id]);
   const subtasks = siblings.filter((t) => t.parent_id === task.id);
   const parent = task.parent_id ? siblings.find((t) => t.id === task.parent_id) : null;
@@ -680,7 +740,10 @@ export function Drawer({
             <X className="text-zinc-500" />
           </button>
         </div>
-        {task.status === "blocked" && task.blocked_reason && <p className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-sm text-rose-800">{task.blocked_reason}</p>}
+        {task.status === "blocked" && task.blocked_reason && <div className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2.5 text-sm text-rose-800">
+          <p className="font-semibold">{task.escalation_category === "strategic_decision" ? "Strategic decision needed" : task.escalation_category === "priority_conflict" ? "Priority conflict needs a human" : task.escalation_category === "dependency" ? "Dependency blocker" : task.escalation_category === "access" ? "Access needed" : task.escalation_category === "external_wait" ? "Waiting on an external step" : "Blocked"}</p>
+          <p className="mt-1">{task.blocked_reason}</p>
+        </div>}
         <input
           aria-label="Task title"
           defaultValue={task.title}
@@ -713,6 +776,9 @@ export function Drawer({
               if (!error) setAccountabilityRevision((value) => value + 1);
               return error;
             }} />
+          {!!milestones.length && (canManageMilestones ? <TaskSelect label="Milestone" value={task.milestone_id || ""}
+            options={[{ value: "", label: "No milestone" }, ...milestones.map((milestone: any) => ({ value: milestone.id, label: `${milestone.title} · ${milestone.status.replace("_", " ")}` }))]}
+            onSave={(milestone_id) => update(task, { milestone_id: milestone_id || null })} /> : <div className="text-xs text-slate-500"><span className="block">Milestone</span><span className="mt-2 block font-medium text-ink">{task.milestone_title || "Not linked"}</span></div>)}
           <label className="text-xs text-zinc-500">
             Due date
             <input

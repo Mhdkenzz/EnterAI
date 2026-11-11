@@ -11,6 +11,7 @@ from app.database import SessionLocal
 from app.hierarchy import MAX_HIERARCHY_AGENTS, desired_counts
 from app.main import _issue_confirmation, app
 from app.models import AgentAccessGrant, AgentMessage, AuditEvent, Organization, User
+from app.time_utils import utcnow_naive
 
 
 def _admin_headers_and_org():
@@ -45,7 +46,7 @@ def test_ceo_chat_bootstraps_a_persistent_ceo_without_configured_reports_and_cou
             assert second.json()["id"] == first.json()["id"]
             assert [a["hierarchy_level"] for a in client.get("/api/agents", headers=headers).json()] == ["ceo"]
 
-            since = datetime.utcnow() + timedelta(days=1)
+            since = utcnow_naive() + timedelta(days=1)
             message = AgentMessage(
                 agent_id=first.json()["id"], author_id=None, role="agent", body="Unread reply",
                 created_at=since + timedelta(seconds=1),

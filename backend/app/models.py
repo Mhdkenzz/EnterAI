@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from uuid import uuid4
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from .database import Base
@@ -91,6 +91,12 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(180))
     code: Mapped[str] = mapped_column(String(16))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    north_star_goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    success_metric: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    metric_unit: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    baseline_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    current_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_value: Mapped[float | None] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="active")
     health: Mapped[str] = mapped_column(String(20), default="on_track")
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", name="fk_projects_owner_id_users", use_alter=True), nullable=True)
@@ -109,6 +115,20 @@ class ProjectDocument(Base):
     content_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     extracted_text: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+
+class ProjectMilestone(Base):
+    __tablename__ = "project_milestones"
+    __table_args__ = (Index("ix_project_milestones_project", "project_id", "created_at"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(180))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
 
 
 class AgentAccessGrant(Base):
@@ -135,10 +155,12 @@ class Task(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", name="fk_tasks_project_id_projects"), index=True)
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id"), nullable=True)
+    milestone_id: Mapped[str | None] = mapped_column(ForeignKey("project_milestones.id", ondelete="SET NULL"), nullable=True, index=True)
     title: Mapped[str] = mapped_column(String(240))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(30), default="todo")
     blocked_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    escalation_category: Mapped[str | None] = mapped_column(String(32), nullable=True)
     priority: Mapped[str] = mapped_column(String(20), default="medium")
     assignee_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     reporter_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
@@ -160,6 +182,26 @@ class Task(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+
+
+class AgentNextStep(Base):
+    __tablename__ = "agent_next_steps"
+    __table_args__ = (Index("ix_agent_next_steps_org_project_status", "organization_id", "project_id", "status"),)
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=uid)
+    organization_id: Mapped[str] = mapped_column(ForeignKey("organizations.id", ondelete="CASCADE"), index=True)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    source_task_id: Mapped[str] = mapped_column(ForeignKey("tasks.id", ondelete="CASCADE"), index=True)
+    milestone_id: Mapped[str | None] = mapped_column(ForeignKey("project_milestones.id", ondelete="SET NULL"), nullable=True)
+    agent_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(240))
+    description: Mapped[str] = mapped_column(Text, default="")
+    rationale: Mapped[str] = mapped_column(Text)
+    priority: Mapped[str] = mapped_column(String(20), default="medium")
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    created_task_id: Mapped[str | None] = mapped_column(ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 class TaskDependency(Base):
     """A task may begin only after its prerequisite task is complete."""

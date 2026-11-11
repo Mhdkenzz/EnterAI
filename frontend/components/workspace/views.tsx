@@ -20,13 +20,13 @@ import {
   Trash2,
   Users,
 } from "lucide-react";
-import { API_BASE } from "@/lib/api";
+import { API_BASE, api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { states, when, Avatar, Health, Row, describeActivity, field, Modal, assigneeName } from "@/components/workspace/shared";
-import type { Doc, Project, Task, InboxNotice, InboundMessage, InboundPlan } from "@/lib/types";
+import type { AgentNextStep, Doc, Project, ProjectMilestone, Task, InboxNotice, InboundMessage, InboundPlan } from "@/lib/types";
 
 export function Home({ data, activity, project, task, toggle, all, ai }: any) {
   const tasks: Task[] = data?.my_tasks || [];
@@ -545,14 +545,53 @@ export function ProjectView({
   reopen,
   archive,
   remove,
+  coordinationChanged,
+  currentUserId,
 }: any) {
   const [mode, setMode] = useState("board");
+  const [milestoneTitle, setMilestoneTitle] = useState("");
+  const [milestoneDue, setMilestoneDue] = useState("");
+  const [coordinationError, setCoordinationError] = useState("");
+  const [stepSaving, setStepSaving] = useState<string | null>(null);
+  const [nextSteps, setNextSteps] = useState<AgentNextStep[]>([]);
+  useEffect(() => {
+    let live = true;
+    const load = () => {
+      if (!project?.id) return;
+      api<AgentNextStep[]>(`/projects/${project.id}/next-steps`).then((rows) => live && setNextSteps(rows)).catch(() => live && setNextSteps([]));
+    };
+    load();
+    const timer = window.setInterval(load, 15000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [project?.id]);
   if (!project) return <p className="text-zinc-500">Choose a project.</p>;
   // Subtasks live inside their parent (the task drawer); the board and list show
   // top-level work with a count, so a checklist does not flood the columns.
   const topLevel = tasks.filter((t: Task) => !t.parent_id);
   const subtaskCount = (t: Task) => tasks.filter((x: Task) => x.parent_id === t.id).length;
   const archived = project.status === "archived";
+  async function addMilestone(event: FormEvent) {
+    event.preventDefault();
+    if (!milestoneTitle.trim()) return;
+    setCoordinationError("");
+    try {
+      await api<ProjectMilestone>(`/projects/${project.id}/milestones`, {
+        method: "POST", body: JSON.stringify({ title: milestoneTitle.trim(), due_date: milestoneDue ? `${milestoneDue}T00:00:00` : null }),
+      });
+      setMilestoneTitle(""); setMilestoneDue("");
+      await coordinationChanged?.();
+    } catch (error: any) { setCoordinationError(error?.message || "Could not add the milestone."); }
+  }
+  async function reviewNextStep(step: AgentNextStep, outcome: "approve" | "reject") {
+    if (stepSaving) return;
+    setStepSaving(step.id); setCoordinationError("");
+    try {
+      await api(`/projects/${project.id}/next-steps/${step.id}/${outcome}`, { method: "POST" });
+      setNextSteps((rows) => rows.filter((row) => row.id !== step.id));
+      coordinationChanged?.();
+    } catch (error: any) { setCoordinationError(error?.message || "Could not review this suggestion."); }
+    finally { setStepSaving(null); }
+  }
   return (
     <>
       {project.status === "review" && (
@@ -646,6 +685,51 @@ export function ProjectView({
           </Button>
         </div>
       </div>
+      <div className="mb-5 grid gap-4 xl:grid-cols-2">
+        <Card className="p-4">
+          <div className="flex items-start justify-between gap-3">
+            <div><h2 className="text-sm font-semibold text-ink">North-star goal</h2>
+              {project.north_star ? <p className="mt-2 text-sm leading-6 text-slate-700">{project.north_star.goal}</p> : <p className="mt-2 text-sm text-slate-500">Set a measurable outcome so the team can align work and progress.</p>}
+            </div>
+            <Button type="button" size="sm" variant="outline" onClick={edit}>{project.north_star ? "Edit goal" : "Set goal"}</Button>
+          </div>
+          {project.north_star && <div className="mt-4 rounded-lg bg-blue-50 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+              <span className="font-semibold text-blue-950">{project.north_star.metric}</span>
+              <span className="text-blue-900">{project.north_star.current} / {project.north_star.target} {project.north_star.unit}</span>
+            </div>
+            <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600" style={{ width: `${project.north_star.progress ?? 0}%` }} /></div>
+            <p className="mt-1 text-[11px] text-blue-800">Baseline {project.north_star.baseline} {project.north_star.unit} · {project.north_star.progress ?? 0}% of the way to target</p>
+          </div>}
+        </Card>
+        <Card className="p-4">
+          <div className="flex items-center justify-between gap-3"><div><h2 className="text-sm font-semibold text-ink">Milestones</h2><p className="mt-1 text-xs text-slate-500">Connect work and owners to near-term outcomes.</p></div></div>
+          <div className="mt-3 space-y-2">
+            {(project.milestones || []).map((milestone: ProjectMilestone) => <div key={milestone.id} className="rounded-lg border border-line px-3 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2"><span className="text-sm font-medium text-ink">{milestone.title}</span><span className={cn("rounded-full px-2 py-0.5 text-[10px] font-semibold", milestone.status === "completed" ? "bg-emerald-100 text-emerald-800" : milestone.status === "blocked" ? "bg-rose-100 text-rose-800" : "bg-slate-100 text-slate-700")}>{milestone.status.replace("_", " ")}</span></div>
+              <p className="mt-1 text-[11px] text-slate-500">{milestone.progress}% · {milestone.completed_task_count}/{milestone.task_count} tasks complete{milestone.blocked_task_count ? ` · ${milestone.blocked_task_count} blocked` : ""}{milestone.due_date ? ` · due ${new Date(milestone.due_date).toLocaleDateString()}` : ""}</p>
+              {!!milestone.tasks?.length && <ul className="mt-2 space-y-1 border-t border-line/70 pt-2">{milestone.tasks.map((item) => <li key={item.id} className="flex flex-wrap items-center justify-between gap-x-3 text-[11px] text-slate-600"><span>{item.title} · {item.priority}</span><span>{item.assignee_name ? `${item.assignee_kind === "agent" ? "AI · " : ""}${item.assignee_name}` : "Unassigned"} · {item.status.replace("_", " ")}</span></li>)}</ul>}
+            </div>)}
+            {!project.milestones?.length && <p className="text-xs text-slate-500">No milestones yet. Add one to group tasks around a deliverable.</p>}
+          </div>
+          {(canManage || project.owner?.id === currentUserId) && !archived && <form className="mt-3 grid gap-2 sm:grid-cols-[1fr_10rem_auto]" onSubmit={addMilestone}>
+            <input aria-label="New milestone title" className={field} placeholder="Milestone title" value={milestoneTitle} onChange={(event) => setMilestoneTitle(event.target.value)} />
+            <input aria-label="Milestone due date" type="date" className={field} value={milestoneDue} onChange={(event) => setMilestoneDue(event.target.value)} />
+            <Button type="submit" size="sm" disabled={!milestoneTitle.trim()}><Plus size={14} /> Add milestone</Button>
+          </form>}
+        </Card>
+      </div>
+      {!!nextSteps.length && <Card className="mb-5 border-amber-200 p-4">
+        <h2 className="text-sm font-semibold text-ink">Agent suggestions for next steps</h2>
+        <p className="mt-1 text-xs text-slate-500">Agents can surface useful follow-up work. A human reviews each suggestion before it becomes a task.</p>
+        <div className="mt-3 space-y-3">{nextSteps.map((step) => <div key={step.id} className="rounded-lg border border-amber-200 bg-amber-50/50 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><p className="text-sm font-semibold text-ink">{step.title}</p><p className="mt-1 text-xs text-slate-600">Suggested by {step.agent_name} while working on “{step.source_task_title}” · {step.priority} priority{step.milestone_title ? ` · ${step.milestone_title}` : ""}</p></div>
+            {(canManage || project.owner?.id === currentUserId) && <div className="flex gap-2"><Button type="button" size="sm" disabled={!!stepSaving} onClick={() => reviewNextStep(step, "approve")}>Approve as task</Button><Button type="button" size="sm" variant="outline" disabled={!!stepSaving} onClick={() => reviewNextStep(step, "reject")}>Dismiss</Button></div>}
+          </div><p className="mt-2 text-xs text-slate-700">{step.description}</p><p className="mt-1 text-xs text-slate-500">Why now: {step.rationale}</p>
+        </div>)}</div>
+        {coordinationError && <p role="alert" className="mt-2 text-xs text-red-700">{coordinationError}</p>}
+      </Card>}
+      {coordinationError && !nextSteps.length && <p role="alert" className="mb-3 text-xs text-red-700">{coordinationError}</p>}
       <Card className="mb-5 p-4">
         <div className="flex flex-wrap items-center gap-3">
           <span className="grid h-8 w-8 place-items-center rounded-lg bg-blue-50 text-blue-700"><FileText size={16} /></span>

@@ -23,15 +23,31 @@ export type Project = {
   team?: string;
   due_date?: string;
   documents?: Doc[];
+  north_star?: { goal: string; metric: string; unit: string; baseline: number; current: number; target: number; progress: number | null } | null;
+  milestones?: ProjectMilestone[];
+};
+export type ProjectMilestone = {
+  id: string; project_id: string; title: string; description?: string | null; due_date?: string | null;
+  status: "planned" | "in_progress" | "blocked" | "completed"; progress: number;
+  task_count: number; completed_task_count: number; blocked_task_count: number; created_at: string;
+  tasks?: { id: string; title: string; status: string; priority: string; assignee_name?: string | null; assignee_kind?: string | null }[];
+};
+export type AgentNextStep = {
+  id: string; project_id: string; source_task_id: string; source_task_title: string; agent_id: string; agent_name: string;
+  milestone_id?: string | null; milestone_title?: string | null; title: string; description: string; rationale: string;
+  priority: string; status: "pending" | "approved" | "rejected"; created_task_id?: string | null; created_at: string;
 };
 export type Task = {
   id: string;
   project_id: string;
   parent_id?: string | null;
+  milestone_id?: string | null;
+  milestone_title?: string | null;
   title: string;
   description?: string;
   status: string;
   blocked_reason?: string | null;
+  escalation_category?: string | null;
   priority: string;
   labels: string[];
   depends_on?: { id: string; title: string; status: string }[];
