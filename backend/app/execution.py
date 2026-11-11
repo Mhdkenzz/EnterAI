@@ -112,9 +112,11 @@ def _stepped_recently(bind, agent_id: str, cooldown_seconds: float) -> bool:
 def _eligible_agents(db: Session) -> list[User]:
     queued_task = select(Task.id).where(
         Task.assignee_id == User.id, Task.status.notin_(["done", "blocked", "review"]),
+        Task.agent_job_state.is_(None),
     ).exists()
     active_current_task = select(Task.id).where(
         Task.id == User.current_task_id, Task.status.notin_(["done", "blocked", "review"]),
+        Task.agent_job_state.is_(None),
     ).exists()
     return db.scalars(
         select(User).join(Organization, User.organization_id == Organization.id).where(
@@ -128,13 +130,14 @@ def _eligible_agents(db: Session) -> list[User]:
 
 def _claim_next_task(db: Session, agent: User) -> Task | None:
     task = db.get(Task, agent.current_task_id) if agent.current_task_id else None
-    if task and task.assignee_id == agent.id and task.status not in {"done", "blocked", "review"}:
+    if task and task.assignee_id == agent.id and task.status not in {"done", "blocked", "review"} and task.agent_job_state is None:
         if not unmet_dependency_ids(db, task.id):
             return task
     agent.current_task_id = None
     priority_order = case((Task.priority == "high", 0), (Task.priority == "medium", 1), else_=2)
     candidates = db.scalars(select(Task).where(
         Task.assignee_id == agent.id, Task.status.notin_(["done", "blocked", "review"]),
+        Task.agent_job_state.is_(None),
     ).order_by(priority_order, Task.position, Task.created_at, Task.id)).all()
     task = next((candidate for candidate in candidates if not unmet_dependency_ids(db, candidate.id)), None)
     if task:
@@ -186,6 +189,12 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
         return
     except CopilotProviderError as error:
         from .copilot import AgentAccessDenied
+        # A concurrent human control may have changed the task while the provider
+        # call was running. Do not let that stale failure overwrite the new state.
+        from .copilot import _fresh_agent_task_state
+        still_runnable, _, _ = _fresh_agent_task_state(db, agent.id, task.id)
+        if not still_runnable:
+            return
         if isinstance(error, AgentAccessDenied):
             reason = "This task is blocked because the agent needs additional access to continue. A workspace administrator must review and grant the specific tool or resource permission."
             task.status = "blocked"
@@ -228,7 +237,7 @@ def _run_agent_step(db: Session, agent: User, service: CopilotService) -> None:
     outcome = result.get("outcome")
     made_progress = bool(
         result.get("progress_made") or result.get("progress_notes") or result.get("workspace_change")
-        or outcome in {"completed", "proposed", "blocked", "succeeded"}
+        or outcome in {"completed", "proposed", "blocked", "succeeded", "interrupted", "paused", "cancelled"}
     )
     no_progress = outcome in {"narrated", "inconclusive"} and not made_progress
     if no_progress:
@@ -363,7 +372,7 @@ def run_execution_tick(db: Session | None = None, service: CopilotService | None
                         # otherwise the UI says working while the scheduler retries forever.
                         failed_agent = db.get(User, agent_id)
                         failed_task = db.get(Task, failed_agent.current_task_id) if failed_agent and failed_agent.current_task_id else None
-                        if failed_agent and failed_task and failed_task.assignee_id == failed_agent.id and failed_task.status not in {"done", "blocked", "review"}:
+                        if failed_agent and failed_task and failed_task.assignee_id == failed_agent.id and failed_task.status not in {"done", "blocked", "review"} and failed_task.agent_job_state is None:
                             failed_agent.consecutive_task_failures += 1
                             failed_agent.last_execution_at = utcnow_naive()
                             if failed_agent.consecutive_task_failures >= MAX_CONSECUTIVE_FAILURES:

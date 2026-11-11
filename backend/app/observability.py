@@ -38,7 +38,7 @@ _SAFE_TOOL_NAMES = {
     'search', 'search_documents', 'search_knowledge', 'get_direct_reports',
     'create_task', 'update_task', 'add_comment', 'create_project', 'update_project',
     'create_team', 'delegate_task', 'log_progress', 'mark_task_complete',
-    'raise_blocker', 'delegate_subtask', 'enter_ai_cli', 'repo_context',
+    'raise_blocker', 'delegate_subtask', 'suggest_next_step', 'enter_ai_cli', 'repo_context',
     'repo_search', 'repo_read', 'repo_status', 'repo_tree', 'repo_check',
     'repo_propose_patch', 'repo_apply_patch', 'unknown_tool',
     'direct_api_request',
@@ -144,7 +144,17 @@ def legacy_detail(detail):
             result[key] = legacy_detail(value)
         elif key in enums:
             result[key] = value if value in enums[key] else '[redacted]'
-        elif key == 'tool' and value in {'create_task', 'update_task', 'create_project', 'update_project', 'add_comment', 'create_team', 'delegate_task'}:
+        elif key == 'tool' and value in {
+            'get_projects', 'get_tasks', 'get_my_tasks', 'get_teams', 'get_users', 'get_assignable_agents',
+            'get_notifications', 'get_activity', 'get_comments', 'search', 'search_documents', 'search_knowledge',
+            'get_direct_reports', 'create_task', 'update_task', 'add_comment', 'create_project', 'update_project',
+            'create_team', 'delegate_task', 'log_progress', 'mark_task_complete', 'raise_blocker',
+            'delegate_subtask', 'suggest_next_step', 'enter_ai_cli', 'repo_context', 'repo_search', 'repo_read',
+            'repo_status', 'repo_tree', 'repo_check', 'repo_propose_patch', 'repo_apply_patch', 'unknown_tool',
+            'direct_api_request',
+        }:
+            result[key] = value
+        elif key == 'outcome' and value in {'succeeded', 'failed', 'narrated', 'proposed', 'completed', 'inconclusive', 'started', 'paused', 'interrupted', 'cancelled', 'review', 'blocked'}:
             result[key] = value
         elif value is None or isinstance(value, (bool, int, float)):
             result[key] = value
@@ -188,7 +198,9 @@ def safe_detail(detail):
             result[key] = value
         elif key == 'model' and isinstance(value, str) and re.fullmatch(r'[A-Za-z0-9._:/-]{1,200}', value):
             result[key] = value
-        elif key == 'outcome' and value in ('succeeded', 'failed', 'narrated', 'proposed', 'completed', 'inconclusive', 'started'):
+        elif key == 'outcome' and value in ('succeeded', 'failed', 'narrated', 'proposed', 'completed', 'inconclusive', 'started', 'paused', 'interrupted', 'cancelled', 'review', 'blocked'):
+            result[key] = value
+        elif key == 'directive_chars' and isinstance(value, int) and 0 <= value <= 2000:
             result[key] = value
         elif key == 'provider_mode' and value in ('deterministic', 'tool_calling'):
             result[key] = value
@@ -238,7 +250,8 @@ def execution_run(tools):
     try:
         with Session(bind=tools.db.get_bind()) as ledger, audit_context(*attribution):
             ledger.add(run)
-            audit(ledger, run.organization_id, run.agent_id, 'execution_run', run.id, 'execution_started', outcome='started')
+            audit(ledger, run.organization_id, run.agent_id, 'execution_run', run.id, 'execution_started',
+                  outcome='started', task_id=tools.scope_task_id, project_id=tools.scope_project_id)
             ledger.commit()
             ledger.refresh(run)
             ledger.expunge(run)
@@ -250,7 +263,8 @@ def execution_run(tools):
         finally:
             with Session(bind=tools.db.get_bind()) as ledger, audit_context(*attribution):
                 ledger.merge(run)
-                audit(ledger, run.organization_id, run.agent_id, 'execution_run', run.id, 'execution_finished', outcome=run.outcome)
+                audit(ledger, run.organization_id, run.agent_id, 'execution_run', run.id, 'execution_finished',
+                      outcome=run.outcome, task_id=tools.scope_task_id, project_id=tools.scope_project_id)
                 ledger.commit()
     finally:
         _run_id.reset(token)
@@ -281,7 +295,9 @@ def tool_attribution(tools):
 
 def tool_audit(tools, entity_type, action, **detail):
     with Session(bind=tools.db.get_bind()) as ledger, audit_context(*tool_attribution(tools)):
-        audit(ledger, tools.user.organization_id, tools.user.id, entity_type, tools.user.id, action, **detail)
+        task_id = tools.scope_task_id
+        audit(ledger, tools.user.organization_id, tools.user.id, entity_type, task_id or tools.user.id, action,
+              task_id=task_id, project_id=tools.scope_project_id, **detail)
         ledger.commit()
 
 
@@ -351,7 +367,8 @@ def provider_call(tools, mode, invoke, *, provider=None, model=None, round_numbe
             ledger.add(call); ledger.flush()
             call_id = call.id
             audit(ledger, call.organization_id, actor_id, 'provider_call', call.id,
-                  'call_failed' if failed else 'call_succeeded', outcome='failed' if failed else 'succeeded', provider_mode=mode)
+                  'call_failed' if failed else 'call_succeeded', outcome='failed' if failed else 'succeeded',
+                  provider_mode=mode, task_id=tools.scope_task_id, project_id=tools.scope_project_id)
             ledger.commit()
         logger.info('provider_call', extra={'event': 'provider_call', 'source': source,
             'provider_mode': mode, 'failed': failed, 'outcome': 'failed' if failed else 'succeeded',

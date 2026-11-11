@@ -1,5 +1,6 @@
 "use client";
 import {
+  Activity,
   ChevronLeft,
   ChevronRight,
   Circle,
@@ -30,6 +31,7 @@ export function Sidebar({ collapsed, mobile, view, user, notices, newRequests = 
     ...(user?.kind === "human" ? [[PlugZap, "Integrations"] as const] : []),
     [Users, "Teams"],
     [GitBranch, "Agents"],
+    ...(user?.kind === "human" ? [[Activity, "Agent work"] as const] : []),
     ...(user?.kind === "human" ? [[Shield, "Settings"] as const] : []),
     ...(user?.role === "admin" && user?.kind === "human" ? [[Settings2, "Admin"] as const] : []),
   ] as const;

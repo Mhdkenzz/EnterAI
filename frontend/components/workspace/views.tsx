@@ -2,6 +2,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import {
   Archive,
+  Activity,
   ArrowUpRight,
   CheckCircle2,
   ChevronLeft,
@@ -15,6 +16,11 @@ import {
   ListTodo,
   MessageSquareText,
   Plus,
+  Pause,
+  Play,
+  RotateCcw,
+  Send,
+  XCircle,
   Search,
   Sparkles,
   Trash2,
@@ -145,6 +151,151 @@ export function Home({ data, activity, project, task, toggle, all, ai }: any) {
         {!activity.length && <p className="px-5 py-6 text-sm text-zinc-500">Activity will appear here as work moves forward.</p>}
       </Card>
     </>
+  );
+}
+
+type AgentWorkItem = {
+  id: string; project_id: string; project_name: string; title: string; status: string;
+  task_status: string; priority: string; agent: { id: string; name: string; title?: string };
+  blocked_reason?: string | null; escalation_category?: string | null;
+  waiting_on_dependencies: boolean; updated_at?: string | null; completed_at?: string | null;
+  can_control: boolean;
+};
+type ActivityEvent = {
+  id: string; action: string; summary: string; description?: string; created_at: string;
+  actor?: { name?: string; title?: string } | null; task_title?: string | null; project_name?: string | null;
+};
+type TeamDigest = {
+  generated_at: string; period_days: number;
+  completed_work: { task_id: string; title: string; project_name: string; agent_name: string; completed_at: string }[];
+  decisions: { id: string; title: string; body: string; project_name: string; created_at: string }[];
+  blockers: { task_id: string; title: string; project_name: string; agent_name: string; reason?: string | null; updated_at: string }[];
+};
+
+const jobTone: Record<string, "blue" | "green" | "amber" | "red" | "default"> = {
+  active: "blue", queued: "default", blocked: "red", awaiting_approval: "amber",
+  completed: "green", paused: "amber", cancelled: "default",
+};
+const jobLabel: Record<string, string> = {
+  active: "Active", queued: "Queued", blocked: "Blocked", awaiting_approval: "Awaiting approval",
+  completed: "Completed", paused: "Paused", cancelled: "Cancelled",
+};
+
+export function AgentWorkView({ isAdmin, users = [], agents = [], openTask }: { isAdmin: boolean; users: any[]; agents: any[]; openTask: (task: any) => void }) {
+  const [jobs, setJobs] = useState<AgentWorkItem[]>([]);
+  const [events, setEvents] = useState<ActivityEvent[]>([]);
+  const [digest, setDigest] = useState<TeamDigest | null>(null);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [directives, setDirectives] = useState<Record<string, string>>({});
+  const [reassignTo, setReassignTo] = useState<Record<string, string>>({});
+  const [period, setPeriod] = useState(7);
+  async function load() {
+    try {
+      const [nextJobs, nextEvents, nextDigest] = await Promise.all([
+        api<AgentWorkItem[]>("/agent-work"), api<ActivityEvent[]>("/activity?limit=100"),
+        api<TeamDigest>("/team-digest?days=" + period),
+      ]);
+      setJobs(nextJobs); setEvents(nextEvents); setDigest(nextDigest); setMessage("");
+    } catch (error: any) { setMessage(error.message || "Could not load agent work."); }
+  }
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => { void load(); }, 15000);
+    return () => window.clearInterval(timer);
+  }, [period]);
+  async function control(job: AgentWorkItem, action: string, extra: Record<string, string> = {}) {
+    if (action === "cancel" && !window.confirm("Cancel “" + job.title + "”?")) return;
+    setBusy(job.id); setMessage("");
+    try {
+      await api("/tasks/" + job.id + "/agent-control", { method: "POST", body: JSON.stringify({ action, ...extra }) });
+      await load();
+    } catch (error: any) { setMessage(error.message || "Could not update this agent job."); }
+    finally { setBusy(""); }
+  }
+  async function inspectJob(job: AgentWorkItem) {
+    try { openTask(await api<Task>("/tasks/" + job.id)); }
+    catch (error: any) { setMessage(error.message || "Could not open this task."); }
+  }
+  const counts = ["queued", "active", "blocked", "awaiting_approval", "completed"].map((status) =>
+    ({ status, count: jobs.filter((job) => job.status === status).length }));
+  return (
+    <div>
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+        <div><p className="page-kicker mb-2">Team operations</p><h1 className="page-title">Agent work</h1>
+          <p className="page-description mt-2">See what agents are doing, review their activity, and manage jobs.</p></div>
+        <Button variant="outline" onClick={() => void load()}><RotateCcw size={15} /> Refresh</Button>
+      </div>
+      {message && <p role="alert" className="mb-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{message}</p>}
+      <div className="mb-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        {counts.map(({ status, count }) => <Card key={status} className="p-4">
+          <p className="text-xs font-medium text-zinc-500">{jobLabel[status]}</p><p className="mt-1 text-2xl font-bold text-ink">{count}</p>
+        </Card>)}
+      </div>
+      <div className="grid gap-5 xl:grid-cols-[1.3fr_.7fr]">
+        <div className="space-y-5">
+          <Card>
+            <div className="border-b border-line px-5 py-4"><h2 className="text-sm font-semibold text-ink">Agent jobs</h2>
+              <p className="mt-1 text-xs text-zinc-500">Updates automatically every 15 seconds.</p></div>
+            {!jobs.length ? <p className="px-5 py-8 text-sm text-zinc-500">No agent jobs in the projects you can access.</p> :
+              <div className="divide-y divide-line/70">{jobs.map((job) => <article key={job.id} className="p-5">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0"><div className="flex flex-wrap items-center gap-2"><button className="text-left text-sm font-semibold text-ink hover:text-accent hover:underline" onClick={() => void inspectJob(job)}>{job.title}</button>
+                    <Badge tone={jobTone[job.status] || "default"}>{jobLabel[job.status] || job.status}</Badge></div>
+                    <p className="mt-1 text-xs text-zinc-500">{job.agent.name} · {job.project_name}{job.waiting_on_dependencies ? " · Waiting on dependencies" : ""}</p>
+                    {job.blocked_reason && <p className="mt-2 text-xs text-rose-700">{job.blocked_reason}</p>}
+                    <p className="mt-2 text-[11px] text-slate-400">Updated {job.updated_at ? new Date(job.updated_at).toLocaleString() : "—"}</p>
+                  </div>
+                  {job.can_control && job.status !== "completed" && <div className="flex flex-wrap gap-2">
+                    {job.status === "paused" ? <Button size="sm" variant="outline" disabled={busy === job.id} onClick={() => control(job, "resume")}><Play size={14} /> Resume</Button> :
+                      !["blocked", "awaiting_approval", "cancelled"].includes(job.status) && <Button size="sm" variant="outline" disabled={busy === job.id} onClick={() => control(job, "pause")}><Pause size={14} /> Pause</Button>}
+                    {job.status !== "cancelled" && <Button size="sm" variant="ghost" disabled={busy === job.id} onClick={() => control(job, "cancel")}><XCircle size={14} /> Cancel</Button>}
+                  </div>}
+                </div>
+                {job.can_control && !["completed", "cancelled"].includes(job.status) && <div className="mt-4 grid gap-3 md:grid-cols-2">
+                  {job.status !== "awaiting_approval" && <form className="flex gap-2" onSubmit={(e: FormEvent) => { e.preventDefault(); const instructions = directives[job.id] || ""; if (instructions.trim()) void control(job, "redirect", { instructions }); }}>
+                    <input aria-label={"Redirect " + job.title} className="min-w-0 flex-1 rounded-lg border border-line px-3 py-2 text-xs text-ink" placeholder="Redirect with clear next steps" value={directives[job.id] || ""} onChange={(e) => setDirectives((all) => ({ ...all, [job.id]: e.target.value }))} />
+                    <Button size="sm" variant="outline" disabled={busy === job.id || (directives[job.id] || "").trim().length < 8} aria-label={"Send redirect for " + job.title}><Send size={14} /></Button>
+                  </form>}
+                  <form className="flex gap-2" onSubmit={(e: FormEvent) => { e.preventDefault(); if (reassignTo[job.id]) void control(job, "reassign", { assignee_id: reassignTo[job.id] }); }}>
+                    <select aria-label={"Reassign " + job.title} className="min-w-0 flex-1 rounded-lg border border-line bg-white px-3 py-2 text-xs text-ink" value={reassignTo[job.id] || ""} onChange={(e) => setReassignTo((all) => ({ ...all, [job.id]: e.target.value }))}>
+                      <option value="">Reassign owner…</option>{users.filter((u: any) => u.kind === "human" && u.active !== false).map((u: any) => <option key={u.id} value={u.id}>{u.name}</option>)}
+                      {isAdmin && agents.filter((a: any) => a.id !== job.agent.id && !a.retired_at).map((a: any) => <option key={a.id} value={a.id}>Agent: {a.name}</option>)}
+                    </select><Button size="sm" variant="outline" disabled={busy === job.id || !reassignTo[job.id]}>Assign</Button>
+                  </form>
+                </div>}
+              </article>)}</div>}
+          </Card>
+          <Card>
+            <div className="flex items-center gap-2 border-b border-line px-5 py-4"><Activity size={16} className="text-accent" /><div><h2 className="text-sm font-semibold text-ink">Shared activity</h2>
+              <p className="mt-1 text-xs text-zinc-500">Agent actions, results, changes and failures with timestamps.</p></div></div>
+            {!events.length ? <p className="px-5 py-6 text-sm text-zinc-500">Agent activity will appear here as work moves forward.</p> :
+              <div className="max-h-[520px] divide-y divide-line/60 overflow-auto">{events.map((event) => <div key={event.id} className="px-5 py-3">
+                <p className="text-sm text-ink"><span className="font-semibold">{event.actor?.name || "Enter AI"}</span> {event.summary}</p>
+                {(event.task_title || event.project_name) && <p className="mt-1 text-xs text-zinc-500">{[event.task_title, event.project_name].filter(Boolean).join(" · ")}</p>}
+                {event.description && <p className="mt-1 line-clamp-2 text-xs text-zinc-600">{event.description}</p>}
+                <time className="mt-1 block text-[10px] text-slate-400" dateTime={event.created_at}>{new Date(event.created_at).toLocaleString()}</time>
+              </div>)}</div>}
+          </Card>
+        </div>
+        <Card className="h-fit">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-5 py-4">
+            <div><h2 className="text-sm font-semibold text-ink">Team digest</h2><p className="mt-1 text-xs text-zinc-500">Completed work, decisions and blockers.</p></div>
+            <select aria-label="Digest period" className="rounded-lg border border-line bg-white px-2 py-1.5 text-xs text-ink" value={period} onChange={(e) => setPeriod(Number(e.target.value))}>
+              <option value={1}>24 hours</option><option value={7}>7 days</option><option value={14}>14 days</option><option value={30}>30 days</option>
+            </select>
+          </div>
+          <div className="space-y-5 p-5">
+            <section><h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Completed work</h3>
+              {digest?.completed_work.length ? digest.completed_work.map((item) => <p key={item.task_id} className="mb-2 text-xs text-zinc-700"><b>{item.title}</b><span className="block text-zinc-500">{item.agent_name} · {item.project_name}</span></p>) : <p className="text-xs text-zinc-400">No agent tasks completed in this period.</p>}</section>
+            <section><h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Decisions</h3>
+              {digest?.decisions.length ? digest.decisions.map((item) => <div key={item.id} className="mb-2 text-xs"><b className="text-zinc-700">{item.title}</b><p className="text-zinc-500">{item.project_name} · {item.body}</p></div>) : <p className="text-xs text-zinc-400">No decisions recorded in this period.</p>}</section>
+            <section><h3 className="mb-2 text-xs font-bold uppercase tracking-wide text-slate-500">Open blockers</h3>
+              {digest?.blockers.length ? digest.blockers.map((item) => <p key={item.task_id} className="mb-2 text-xs text-rose-700"><b>{item.title}</b><span className="block">{item.agent_name} · {item.project_name}{item.reason ? " · " + item.reason : ""}</span></p>) : <p className="text-xs text-zinc-400">No open agent blockers.</p>}</section>
+          </div>
+        </Card>
+      </div>
+    </div>
   );
 }
 export function Portfolio({ projects: all, open, create }: any) {

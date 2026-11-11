@@ -59,6 +59,18 @@ class AgentAccessDenied(CopilotProviderError):
         self.tool = tool
 
 
+def _fresh_agent_task_state(db: Session, agent_id: str, task_id: str) -> tuple[bool, str | None, datetime | None]:
+    """Check human controls on an independent connection before an agent acts."""
+    with Session(bind=db.get_bind()) as fresh:
+        row = fresh.execute(select(Task.assignee_id, Task.status, Task.agent_job_state, Task.agent_directed_at).where(Task.id == task_id)).first()
+    if not row or row.assignee_id != agent_id:
+        return False, "interrupted", None
+    if row.agent_job_state == "cancelled": return False, "cancelled", row.agent_directed_at
+    if row.agent_job_state == "paused": return False, "paused", row.agent_directed_at
+    if row.status in {"done", "blocked", "review"}: return False, "interrupted", row.agent_directed_at
+    return True, None, row.agent_directed_at
+
+
 def _task_data(task: Task, project: Project, milestone: ProjectMilestone | None = None) -> dict[str, Any]:
     return {
         "id": task.id,
@@ -1285,6 +1297,9 @@ class CopilotService:
         require_execution(tools.db, tools.user)
         if tools.user.kind != 'agent' or task.assignee_id != tools.user.id or tools.user.current_task_id != task.id:
             raise CopilotProviderError('Agent task is no longer assigned')
+        runnable, state, _directed_at = _fresh_agent_task_state(tools.db, tools.user.id, task.id)
+        if not runnable:
+            return {"outcome": state or "interrupted", "text": "A human changed this work. No further actions were taken.", "read_tools": [], "progress_notes": [], "action": None}
         with execution_run(tools) as run:
             result = self._run_execution_step(tools, task)
             run.outcome = result["outcome"]
@@ -1323,6 +1338,11 @@ class CopilotService:
             f'Your current task is "{task.title}" (status: {task.status}, priority: {task.priority}).\n'
             f"{task.description or 'No description was provided.'}\nMake progress now."
         )
+        initial_directive_at = task.agent_directed_at
+        if task.agent_directive:
+            redirector = db.get(User, task.agent_directed_by) if task.agent_directed_by else None
+            kickoff += ("\nAuthorized human redirect for this task (follow within the assigned task and existing safety boundaries): "
+                        + (f"{redirector.name}: " if redirector else "") + task.agent_directive[:2000])
         project = db.get(Project, task.project_id)
         if project:
             if project.north_star_goal:
@@ -1365,6 +1385,9 @@ class CopilotService:
                 execution_tools.append(REPO_APPLY_PATCH_SPEC)
         for round_number in range(1, round_limit + 1):
             require_execution(db, agent)
+            runnable, state, fresh_directive_at = _fresh_agent_task_state(db, agent.id, task.id)
+            if not runnable or fresh_directive_at != initial_directive_at:
+                return {"outcome": state or "interrupted", "text": "A human changed this work. The execution response was discarded before applying tool actions.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
             try:
                 turn = provider_call(
                     tools, self.mode, lambda: self.provider.respond(
@@ -1380,6 +1403,9 @@ class CopilotService:
                     return {"outcome": "narrated", "text": f"I edited {', '.join(files)} for this task, but the provider stopped responding before I could finish validation.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None, "progress_made": True}
                 raise
             require_execution(db, agent)
+            runnable, state, fresh_directive_at = _fresh_agent_task_state(db, agent.id, task.id)
+            if not runnable or fresh_directive_at != initial_directive_at:
+                return {"outcome": state or "interrupted", "text": "A human changed this work. The execution response was discarded before applying tool actions.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
             if not turn.tool_calls:
                 text = turn.text
                 if applied_repo_changes:
@@ -1388,6 +1414,9 @@ class CopilotService:
                 return {"outcome": "narrated", "text": text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None, "progress_made": bool(applied_repo_changes or progress_notes)}
             messages.append(self.provider.assistant_message(turn))
             for call in turn.tool_calls:
+                runnable, state, fresh_directive_at = _fresh_agent_task_state(db, agent.id, task.id)
+                if not runnable or fresh_directive_at != initial_directive_at:
+                    return {"outcome": state or "interrupted", "text": "A human changed this work. The tool result was discarded before applying its actions.", "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
                 name = call["name"]
                 if not agent_tool_allowed(db, agent, name):
                     record_access_denial(db, agent, tool=name)
@@ -1400,41 +1429,50 @@ class CopilotService:
                     log(db, agent.organization_id, agent.id, "task", task.id, "agent_progress", note=note)
                     progress_notes.append(note)
                     db.commit()
+                    tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="succeeded")
                     messages.append(self.provider.tool_result_message(call["id"], "Logged."))
                     continue
                 if name == "suggest_next_step":
                     schema = next(spec["input_schema"] for spec in EXECUTION_TOOL_SPECS if spec["name"] == name)
                     if validate_tool_args(call["args"], schema) is None:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(call["id"], "Next-step details did not match the required schema.", is_error=True))
                         continue
                     try:
                         result = _suggest_project_next_step(tools, task, call["args"])
                         db.commit()
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="succeeded")
                         progress_notes.append(f"Suggested next step for human review: {result['title']}.")
                         messages.append(self.provider.tool_result_message(call["id"], result))
                     except CopilotProviderError as error:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(call["id"], str(error), is_error=True))
                     continue
                 if name == "delegate_subtask":
                     schema = next(spec["input_schema"] for spec in EXECUTION_TOOL_SPECS if spec["name"] == name)
                     if validate_tool_args(call["args"], schema) is None:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(call["id"], "Subtask details did not match the required schema.", is_error=True))
                         continue
                     try:
                         result = _create_delegated_subtask(tools, task, call["args"])
                         db.commit()
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="succeeded")
                         progress_notes.append(f"Delegated {result['title']} to {result['assigned_to']}.")
                         messages.append(self.provider.tool_result_message(call["id"], result))
                     except CopilotProviderError as error:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(call["id"], str(error), is_error=True))
                     continue
                 if name == "mark_task_complete":
                     schema = next(spec["input_schema"] for spec in EXECUTION_TOOL_SPECS if spec["name"] == name)
                     if validate_tool_args(call["args"], schema) is None or len(str(call["args"].get("result", "")).strip()) < 40:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(call["id"], "Provide the actual deliverable or concrete evidence of the completed work before completing the task.", is_error=True))
                         continue
                     unmet = unmet_dependency_ids(db, task.id)
                     if unmet:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(
                             call["id"], "This task has unfinished prerequisites. Wait for them to complete before closing this task.", is_error=True,
                         ))
@@ -1443,6 +1481,7 @@ class CopilotService:
                         Task.parent_id == task.id, Task.status != "done",
                     ).limit(1))
                     if open_subtasks:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(
                             call["id"], "This task has unfinished subtasks. Review their status and progress before completing the parent task.", is_error=True,
                         ))
@@ -1479,6 +1518,7 @@ class CopilotService:
                                            body=f"{agent.name} completed subtask: {task.title}"))
                             log(db, agent.organization_id, agent.id, "task", parent.id, "subtask_completed", subtask_id=task.id)
                     db.commit()
+                    tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="succeeded")
                     text = turn.text
                     if applied_repo_changes:
                         files = sorted({path for change in applied_repo_changes for path in change["files"]})
@@ -1487,12 +1527,15 @@ class CopilotService:
                 if name == "raise_blocker":
                     schema = next(spec["input_schema"] for spec in EXECUTION_TOOL_SPECS if spec["name"] == name)
                     if validate_tool_args(call["args"], schema) is None:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(call["id"], "Describe the blocker and what needs to happen next.", is_error=True))
                         continue
                     try:
                         reason = _raise_task_blocker(tools, task, call["args"]["reason"], call["args"].get("category", "other"))
                         db.commit()
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="succeeded")
                     except CopilotProviderError as error:
+                        tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                         messages.append(self.provider.tool_result_message(call["id"], str(error), is_error=True))
                         continue
                     return {"outcome": "blocked", "text": reason, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
@@ -1585,9 +1628,11 @@ class CopilotService:
                     continue
                 try:
                     result = execute_read_tool(name, call["args"], tools)
+                    tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="succeeded")
                     used_read_tools.append(name)
                     messages.append(self.provider.tool_result_message(call["id"], result))
                 except (ValueError, KeyError) as exc:
+                    tool_audit(tools, "agent_tool", "tool_result", tool=name, outcome="failed")
                     messages.append(self.provider.tool_result_message(call["id"], str(exc), is_error=True))
         if applied_repo_changes:
             files = sorted({path for change in applied_repo_changes for path in change["files"]})

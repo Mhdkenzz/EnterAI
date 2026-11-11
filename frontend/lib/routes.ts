@@ -12,6 +12,7 @@ const VIEW_PATHS: [string, string][] = [
   ["Integrations", "/integrations"],
   ["Teams", "/teams"],
   ["Agents", "/agents"],
+  ["Agent work", "/agent-work"],
   ["AI", "/ai"],
   ["Settings", "/settings"],
   ["Admin", "/admin"],

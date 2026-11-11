@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 import { AuthScreens } from "@/components/workspace/auth-screens";
 import { Sidebar } from "@/components/workspace/sidebar";
 import { Onboarding, VerifyBanner } from "@/components/workspace/onboarding";
-import { Home, Portfolio, Work, InboxView, RequestsView, Teams, ProjectView } from "@/components/workspace/views";
+import { Home, Portfolio, Work, InboxView, RequestsView, Teams, ProjectView, AgentWorkView } from "@/components/workspace/views";
 import { AI, AI_GREETING, Command } from "@/components/workspace/assistant";
 import { routeToUrl, urlToRoute, type Route } from "@/lib/routes";
 import { ProjectForm, ProjectEditForm, TaskForm, TeamForm, Drawer } from "@/components/workspace/forms";
@@ -230,6 +230,7 @@ export default function EnterAI() {
       } else {
         setView(route.view);
         if (route.view === "Agents") loadAgents();
+        if (route.view === "Agent work" && user?.role === "admin") loadAgents();
         if (route.view === "AI") setScopedProject(null);
       }
       if (route.taskId) await openTask(await api<Task>("/tasks/" + route.taskId));
@@ -370,6 +371,7 @@ export default function EnterAI() {
     setView(next);
     setMobile(false);
     if (next === "Agents") loadAgents();
+    if (next === "Agent work" && user?.role === "admin") loadAgents();
     if (next === "Requests") loadInboundMessages();
   };
   async function loadInboundMessages() {
@@ -608,6 +610,8 @@ export default function EnterAI() {
         approveProposal={approveAgentProposal}
         rejectProposal={rejectAgentProposal}
       />
+    ) : view === "Agent work" ? (
+      user?.kind === "human" ? <AgentWorkView isAdmin={user.role === "admin"} users={users} agents={agents} openTask={openTask} /> : <p role="alert">Human workspace access is required.</p>
     ) : view === "AI" ? (
       <AI
         project={scopedProject}

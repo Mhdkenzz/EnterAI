@@ -12,7 +12,7 @@ from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, ValidationError
-from sqlalchemy import delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from .auth import CONFIRMATION_SECRET, CSRF_HEADER, SESSION_COOKIE, clear_session_cookie, revoke_session_token, create_token, current_user, hash_password, set_session_cookie, verify_password
@@ -193,6 +193,11 @@ class ProjectUpdate(BaseModel):
     north_star_goal: str | None = Field(default=None, max_length=2000); success_metric: str | None = Field(default=None, max_length=180); metric_unit: str | None = Field(default=None, max_length=60); baseline_value: float | None = None; current_value: float | None = None; target_value: float | None = None
 class MilestoneIn(BaseModel): title: str = Field(min_length=1, max_length=180); description: str | None = Field(default=None, max_length=2000); due_date: datetime | None = None
 class MilestoneUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=180); description: str | None = Field(default=None, max_length=2000); due_date: datetime | None = None
+class AgentControlIn(BaseModel):
+    action: Literal["pause", "resume", "redirect", "reassign", "cancel"]
+    reason: str | None = Field(default=None, max_length=2000)
+    instructions: str | None = Field(default=None, max_length=2000)
+    assignee_id: str | None = None
 class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; milestone_id: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "done"] = "todo"; priority: Literal["low", "medium", "high"] = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []; depends_on: list[str] = Field(default_factory=list); qa_required: bool = False; requires_human_approval: bool = False; acceptance_criteria: list[str] = Field(default_factory=list, max_length=20); review_rubric: list[str] = Field(default_factory=list, max_length=20)
 class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "blocked", "done"] | None = None; priority: Literal["low", "medium", "high"] | None = None; assignee_id: str | None = None; milestone_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None; depends_on: list[str] | None = None; qa_required: bool | None = None; requires_human_approval: bool | None = None; acceptance_criteria: list[str] | None = Field(default=None, max_length=20); review_rubric: list[str] | None = Field(default=None, max_length=20); qa_evidence: list[str] | None = Field(default=None, max_length=50)
 class QAPeerReviewRequest(BaseModel): reviewer_agent_id: str
@@ -321,7 +326,44 @@ def task_out(t: Task, db: Session):
     dependencies = list_dependencies(db, t.id)
     reviewer = db.get(User, t.peer_review_agent_id) if t.peer_review_agent_id else None
     milestone = db.get(ProjectMilestone, t.milestone_id) if t.milestone_id else None
-    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"milestone_id":t.milestone_id,"milestone_title":milestone.title if milestone else None,"title":t.title,"description":t.description,"status":t.status,"blocked_reason":t.blocked_reason,"escalation_category":t.escalation_category,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"depends_on":[{"id":dependency.id,"title":dependency.title,"status":dependency.status} for dependency in dependencies],"due_date":t.due_date,"labels":t.labels,"qa_required":t.qa_required,"requires_human_approval":t.requires_human_approval,"acceptance_criteria":t.acceptance_criteria or [],"review_rubric":t.review_rubric or [],"qa_evidence":t.qa_evidence or [],"qa_checks":t.qa_checks or [],"qa_checked_at":t.qa_checked_at,"peer_review_status":t.peer_review_status,"peer_review_agent":user_out(reviewer) if reviewer else None,"peer_review_task_id":t.peer_review_task_id,"peer_review_summary":t.peer_review_summary,"peer_review_decision":t.peer_review_decision,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
+    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"milestone_id":t.milestone_id,"milestone_title":milestone.title if milestone else None,"title":t.title,"description":t.description,"status":t.status,"blocked_reason":t.blocked_reason,"escalation_category":t.escalation_category,"agent_job_state":t.agent_job_state,"agent_job_reason":t.agent_job_reason,"agent_job_changed_at":t.agent_job_changed_at,"agent_directive":t.agent_directive,"agent_directed_at":t.agent_directed_at,"agent_directed_by":t.agent_directed_by,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"depends_on":[{"id":dependency.id,"title":dependency.title,"status":dependency.status} for dependency in dependencies],"due_date":t.due_date,"labels":t.labels,"qa_required":t.qa_required,"requires_human_approval":t.requires_human_approval,"acceptance_criteria":t.acceptance_criteria or [],"review_rubric":t.review_rubric or [],"qa_evidence":t.qa_evidence or [],"qa_checks":t.qa_checks or [],"qa_checked_at":t.qa_checked_at,"peer_review_status":t.peer_review_status,"peer_review_agent":user_out(reviewer) if reviewer else None,"peer_review_task_id":t.peer_review_task_id,"peer_review_summary":t.peer_review_summary,"peer_review_decision":t.peer_review_decision,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
+
+
+def agent_job_status(task: Task) -> str:
+    if task.agent_job_state == "cancelled": return "cancelled"
+    if task.agent_job_state == "paused": return "paused"
+    if task.status == "done": return "completed"
+    if task.status == "review": return "awaiting_approval"
+    if task.status == "blocked": return "blocked"
+    if task.status == "in_progress": return "active"
+    return "queued"
+
+
+def _activity_actor(db: Session, actor_id: str | None, organization_id: str) -> dict[str, Any] | None:
+    if not actor_id: return None
+    actor = db.scalar(select(User).where(User.id == actor_id, User.organization_id == organization_id))
+    if not actor: return None
+    return {"id": actor.id, "name": actor.name, "avatar": actor.avatar, "kind": actor.kind, "title": actor.title}
+
+
+def _activity_summary(entity_type: str, action: str, detail: dict[str, Any]) -> str:
+    known = {
+        "agent_claimed": "claimed a task", "agent_started": "started work", "agent_progress": "recorded progress",
+        "agent_completed": "completed work", "agent_submitted_for_review": "submitted work for approval",
+        "agent_blocked": "reported a blocker", "agent_action_proposed": "proposed an action for approval",
+        "agent_job_paused": "paused an agent job", "agent_job_resumed": "resumed an agent job",
+        "agent_job_redirected": "redirected an agent job", "agent_job_reassigned": "reassigned an agent job",
+        "agent_job_cancelled": "cancelled an agent job", "task_priority_changed": "changed task priority",
+        "task_reassigned": "reassigned a task", "task_completed": "completed a task",
+        "execution_started": "started an execution step", "execution_finished": "finished an execution step",
+        "call_succeeded": "completed an AI provider call", "call_failed": "AI provider call failed",
+        "tool_result": "used a tool", "created": "created a record", "updated": "updated a record",
+    }
+    if action == "tool_result" and detail.get("tool"):
+        tool = str(detail["tool"]).replace("_", " ")
+        outcome = detail.get("outcome")
+        return f"used {tool}" + (" · failed" if outcome == "failed" else "")
+    return known.get(action, action.replace("_", " "))
 def notify(db, recipient_id: str | None, actor: User, title: str, body: str | None = None, href: str | None = None) -> None:
     """Tell a person about something someone else did to their work. Never the actor
     themselves, and never an agent (agents have no inbox to read)."""
@@ -1916,8 +1958,272 @@ def reject_inbound_plan(
 # Housekeeping that belongs in the audit log, not the team's activity feed.
 FEED_EXCLUDED_ACTIONS = ("logged_in", "read", "password_reset_requested")
 @app.get("/api/activity")
-def activity(user:User=Depends(current_user),db:Session=Depends(get_db)):
-    return [{"id":a.id,"action":a.action,"entity_type":a.entity_type,"detail":legacy_detail(a.detail or {}),"created_at":a.created_at,"actor":user_out(db.get(User,a.actor_id)) if a.actor_id else None} for a in db.scalars(select(Activity).where(Activity.organization_id==user.organization_id,Activity.action.notin_(FEED_EXCLUDED_ACTIONS)).order_by(Activity.created_at.desc()).limit(50)).all()]
+def activity(limit: int = Query(default=100, ge=1, le=200), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """Shared, timestamped work history built from product activity and agent audit events."""
+    activity_scope = [
+        Activity.organization_id == user.organization_id,
+        Activity.action.notin_(FEED_EXCLUDED_ACTIONS),
+    ]
+    audit_scope = [
+        AuditEvent.organization_id == user.organization_id,
+        AuditEvent.source == "agent",
+    ]
+    visible_projects = visible_project_ids(db, user)
+    visible_tasks = select(Task.id).where(task_is_visible(db, user))
+    activity_scope.append(or_(
+        and_(Activity.entity_type == "task", Activity.entity_id.in_(visible_tasks)),
+        and_(Activity.entity_type == "project", Activity.entity_id.in_(visible_projects)),
+        Activity.detail["task_id"].as_string().in_(visible_tasks),
+        Activity.detail["project_id"].as_string().in_(visible_projects),
+        and_(
+            Activity.entity_type.notin_(["task", "project"]),
+            Activity.detail["task_id"].as_string().is_(None),
+            Activity.detail["project_id"].as_string().is_(None),
+        ),
+    ))
+    comment_scope = [
+        Task.project_id.in_(visible_projects), User.kind == "agent",
+    ]
+    if user.kind == "agent":
+        # Agent sessions can only see activity attached to their own assigned
+        # tasks, their own audit events, and their own work updates.
+        own_task_ids = select(Task.id).where(Task.assignee_id == user.id, task_is_visible(db, user))
+        activity_scope.append(or_(
+            and_(Activity.entity_type == "task", Activity.entity_id.in_(own_task_ids)),
+            Activity.detail["task_id"].as_string().in_(own_task_ids),
+        ))
+        audit_scope.append(and_(
+            AuditEvent.actor_id == user.id,
+            or_(
+                AuditEvent.detail["task_id"].as_string().in_(own_task_ids),
+                and_(AuditEvent.entity_type != "task", AuditEvent.detail["task_id"].as_string().is_(None)),
+            ),
+        ))
+        comment_scope.extend([Comment.author_id == user.id, Task.id.in_(own_task_ids)])
+    else:
+        audit_scope.append(or_(
+            AuditEvent.detail["task_id"].as_string().in_(visible_tasks),
+            AuditEvent.detail["project_id"].as_string().in_(visible_projects),
+        ))
+    product_events = db.scalars(select(Activity).where(*activity_scope).order_by(Activity.created_at.desc()).limit(limit)).all()
+    agent_events = db.scalars(select(AuditEvent).where(*audit_scope).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
+    agent_comments = db.scalars(select(Comment).join(Task, Task.id == Comment.task_id).join(
+        User, User.id == Comment.author_id,
+    ).where(*comment_scope).order_by(Comment.created_at.desc()).limit(limit)).all()
+
+    task_ids = set()
+    actor_ids = set()
+    for item in product_events:
+        if item.entity_type == "task": task_ids.add(item.entity_id)
+        task_ids.update(value for key, value in (item.detail or {}).items() if key == "task_id" and isinstance(value, str))
+        if item.actor_id: actor_ids.add(item.actor_id)
+    for item in agent_events:
+        details = item.detail or {}
+        task_id = details.get("task_id") or (item.entity_id if item.entity_type == "task" else None)
+        if isinstance(task_id, str): task_ids.add(task_id)
+        if item.actor_id: actor_ids.add(item.actor_id)
+    for item in agent_comments:
+        task_ids.add(item.task_id); actor_ids.add(item.author_id)
+    tasks = db.scalars(select(Task).where(Task.id.in_(task_ids), task_is_visible(db, user))).all() if task_ids else []
+    task_map = {item.id: item for item in tasks}
+    project_ids = {item.project_id for item in tasks}
+    projects = db.scalars(select(Project).where(
+        Project.id.in_(project_ids), Project.organization_id == user.organization_id,
+    )).all() if project_ids else []
+    project_map = {item.id: item for item in projects}
+    actors = db.scalars(select(User).where(
+        User.id.in_(actor_ids), User.organization_id == user.organization_id,
+    )).all() if actor_ids else []
+    actor_map = {item.id: {"id": item.id, "name": item.name, "avatar": item.avatar, "kind": item.kind, "title": item.title} for item in actors}
+
+    events: list[dict[str, Any]] = []
+    for item in product_events:
+        detail = legacy_detail(item.detail or {})
+        task_id = item.entity_id if item.entity_type == "task" else detail.get("task_id")
+        task = task_map.get(task_id)
+        project = project_map.get(task.project_id) if task else project_map.get(detail.get("project_id"))
+        events.append({"id": f"activity:{item.id}", "action": item.action, "entity_type": item.entity_type,
+            "detail": detail, "summary": _activity_summary(item.entity_type, item.action, detail),
+            "created_at": item.created_at, "actor": actor_map.get(item.actor_id),
+            "task_id": task.id if task else None, "task_title": task.title if task else None,
+            "project_id": project.id if project else None, "project_name": project.name if project else None})
+    for item in agent_events:
+        detail = item.detail or {}
+        task_id = detail.get("task_id") or (item.entity_id if item.entity_type == "task" else None)
+        task = task_map.get(task_id)
+        project_id = detail.get("project_id") or (task.project_id if task else None)
+        project = project_map.get(project_id)
+        if item.entity_type == "task":
+            continue  # Product Activity already contains the human-readable task event.
+        safe = legacy_detail(detail)
+        events.append({"id": f"audit:{item.id}", "action": item.action, "entity_type": item.entity_type,
+            "detail": safe, "summary": _activity_summary(item.entity_type, item.action, safe),
+            "created_at": item.created_at, "actor": actor_map.get(item.actor_id),
+            "task_id": task.id if task else None, "task_title": task.title if task else None,
+            "project_id": project.id if project else None, "project_name": project.name if project else None})
+    for item in agent_comments:
+        task = task_map.get(item.task_id)
+        if not task: continue
+        project = project_map.get(task.project_id)
+        events.append({"id": f"comment:{item.id}", "action": "agent_work_update", "entity_type": "task",
+            "detail": {}, "summary": "shared a work update", "description": item.body[:600],
+            "created_at": item.created_at, "actor": actor_map.get(item.author_id),
+            "task_id": task.id, "task_title": task.title,
+            "project_id": project.id if project else None, "project_name": project.name if project else None})
+    events.sort(key=lambda item: item["created_at"], reverse=True)
+    return events[:limit]
+
+
+@app.get("/api/agent-work")
+def agent_work(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "Human workspace access is required")
+    rows = db.execute(select(Task, Project, User).join(Project, Project.id == Task.project_id).join(
+        User, User.id == Task.assignee_id,
+    ).where(
+        task_is_visible(db, user), Project.organization_id == user.organization_id, User.kind == "agent",
+    ).order_by(Task.updated_at.desc()).limit(300)).all()
+    milestone_ids = {task.milestone_id for task, _, _ in rows if task.milestone_id}
+    milestone_map = {item.id: item.title for item in db.scalars(
+        select(ProjectMilestone).where(ProjectMilestone.id.in_(milestone_ids))
+    ).all()} if milestone_ids else {}
+    task_ids = [task.id for task, _, _ in rows]
+    waiting_task_ids = set(db.scalars(
+        select(TaskDependency.task_id).join(Task, Task.id == TaskDependency.depends_on_task_id)
+        .where(TaskDependency.task_id.in_(task_ids), Task.status != "done")
+    ).all()) if task_ids else set()
+    status_order = {"active": 0, "blocked": 1, "awaiting_approval": 2, "queued": 3,
+                    "paused": 4, "cancelled": 5, "completed": 6}
+    result = []
+    for task, project, agent in rows:
+        can_control = user.role in {"admin", "manager"} or project.owner_id == user.id
+        result.append({"id": task.id, "project_id": project.id, "project_name": project.name,
+            "title": task.title, "status": agent_job_status(task), "task_status": task.status,
+            "priority": task.priority, "agent": {"id": agent.id, "name": agent.name, "title": agent.title,
+                "hierarchy_level": agent.hierarchy_level},
+            "milestone_id": task.milestone_id, "milestone_title": milestone_map.get(task.milestone_id),
+            "blocked_reason": task.blocked_reason or task.agent_job_reason,
+            "escalation_category": task.escalation_category,
+            "waiting_on_dependencies": task.id in waiting_task_ids,
+            "updated_at": task.updated_at, "completed_at": task.completed_at,
+            "agent_job_changed_at": task.agent_job_changed_at, "can_control": can_control})
+    result.sort(key=lambda item: (status_order.get(item["status"], 9), item["updated_at"] or datetime.min), reverse=False)
+    return result
+
+
+@app.get("/api/team-digest")
+def team_digest(days: int = Query(default=7, ge=1, le=30), user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if user.kind != "human" or not user.active:
+        raise HTTPException(403, "Human workspace access is required")
+    since = utcnow_naive() - timedelta(days=days)
+    project_scope = visible_project_ids(db, user)
+    completed = db.execute(select(Task, Project, User).join(Project, Project.id == Task.project_id).join(
+        User, User.id == Task.assignee_id,
+    ).where(
+        Task.project_id.in_(project_scope), Project.organization_id == user.organization_id,
+        User.kind == "agent", Task.status == "done", Task.completed_at >= since,
+    ).order_by(Task.completed_at.desc()).limit(30)).all()
+    decisions = db.execute(select(Decision, Project).join(Project, Project.id == Decision.project_id).where(
+        Decision.organization_id == user.organization_id, Decision.project_id.in_(project_scope),
+        Decision.created_at >= since,
+    ).order_by(Decision.created_at.desc()).limit(30)).all()
+    blockers = db.execute(select(Task, Project, User).join(Project, Project.id == Task.project_id).join(
+        User, User.id == Task.assignee_id,
+    ).where(
+        Task.project_id.in_(project_scope), Project.organization_id == user.organization_id,
+        User.kind == "agent", Task.status == "blocked",
+    ).order_by(Task.updated_at.desc()).limit(30)).all()
+    return {"generated_at": utcnow_naive(), "period_days": days,
+        "completed_work": [{"task_id": task.id, "title": task.title, "project_id": project.id,
+            "project_name": project.name, "agent_name": agent.name, "completed_at": task.completed_at}
+            for task, project, agent in completed],
+        "decisions": [{"id": item.id, "title": item.title, "body": item.body[:800],
+            "project_id": project.id, "project_name": project.name, "created_at": item.created_at}
+            for item, project in decisions],
+        "blockers": [{"task_id": task.id, "title": task.title, "project_id": project.id,
+            "project_name": project.name, "agent_name": agent.name, "reason": task.blocked_reason,
+            "category": task.escalation_category, "updated_at": task.updated_at}
+            for task, project, agent in blockers],
+    }
+
+
+@app.post("/api/tasks/{task_id}/agent-control")
+def control_agent_job(task_id: str, data: AgentControlIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db, user)))
+    if not task: raise HTTPException(404, "Task not found")
+    project = ensure_knowledge_project(db, user, task.project_id)
+    _require_project_lead(project, user)
+    if task.assignee_id is None or (db.get(User, task.assignee_id) and db.get(User, task.assignee_id).kind != "agent"):
+        raise HTTPException(409, "This task is not assigned to an AI agent")
+    if task.status == "done":
+        raise HTTPException(409, "Completed work cannot be changed through agent controls")
+    now = utcnow_naive()
+    before_assignee = task.assignee_id
+    detail: dict[str, Any] = {"project_id": project.id}
+    if data.action == "pause":
+        if task.status in {"blocked", "review"} or task.agent_job_state == "cancelled":
+            raise HTTPException(409, "Blocked, awaiting-approval, or cancelled work cannot be paused")
+        task.agent_job_state = "paused"
+        task.agent_job_reason = " ".join((data.reason or "Paused by a human for review.").split())[:2000]
+        action = "agent_job_paused"
+        db.add(Comment(task_id=task.id, author_id=user.id, body=f"Agent job paused by {user.name}. {task.agent_job_reason}"))
+    elif data.action == "resume":
+        if task.agent_job_state != "paused":
+            raise HTTPException(409, "Only a paused agent job can be resumed")
+        if task.status in {"blocked", "review", "done"}:
+            raise HTTPException(409, "Resolve the blocker or approval state before resuming agent work")
+        task.agent_job_state = None
+        task.agent_job_reason = None
+        action = "agent_job_resumed"
+        db.add(Comment(task_id=task.id, author_id=user.id, body=f"Agent job resumed by {user.name}."))
+    elif data.action == "redirect":
+        instructions = " ".join((data.instructions or "").split())
+        if len(instructions) < 8:
+            raise HTTPException(422, "Enter clear instructions for the agent's next execution step")
+        if task.agent_job_state == "cancelled":
+            raise HTTPException(409, "Cancelled work cannot be redirected")
+        if task.status == "review":
+            raise HTTPException(409, "This task is awaiting human approval; review the proposal before redirecting it")
+        task.agent_directive = instructions
+        task.agent_directed_at = now
+        task.agent_directed_by = user.id
+        if task.status == "blocked":
+            task.status = "todo"
+            task.blocked_reason = None
+            task.escalation_category = None
+        action = "agent_job_redirected"
+        detail["directive_chars"] = len(instructions)
+        db.add(Comment(task_id=task.id, author_id=user.id, body=f"Human redirect for the agent: {instructions}"))
+    elif data.action == "reassign":
+        if not data.assignee_id:
+            raise HTTPException(422, "Choose a new task owner")
+        assignee = ensure_org_assignee(db, user, data.assignee_id)
+        if assignee and assignee.kind == "agent":
+            ensure_agent_has_no_active_conflict(db, assignee.id, task.id)
+        task.assignee_id = data.assignee_id
+        task.agent_job_state = None
+        task.agent_job_reason = None
+        sync_agent_task_pointers(db, task, before_assignee)
+        if assignee and assignee.kind == "agent": assignee.consecutive_task_failures = 0
+        action = "agent_job_reassigned"
+        detail.update({"from_assignee_id": before_assignee, "to_assignee_id": data.assignee_id,
+                       "assignment_reason": "human_reassignment"})
+        db.add(Comment(task_id=task.id, author_id=user.id, body=f"Work reassigned by {user.name} to {assignee.name if assignee else 'the selected owner'}."))
+    else:
+        if task.agent_job_state == "cancelled":
+            raise HTTPException(409, "This agent job is already cancelled")
+        task.agent_job_state = "cancelled"
+        task.agent_job_reason = " ".join((data.reason or "Cancelled by a human.").split())[:2000]
+        current_agent = db.get(User, before_assignee)
+        if current_agent and current_agent.current_task_id == task.id:
+            current_agent.current_task_id = None
+        action = "agent_job_cancelled"
+        db.add(Comment(task_id=task.id, author_id=user.id, body=f"Agent job cancelled by {user.name}. {task.agent_job_reason}"))
+    task.agent_job_changed_at = now
+    task.agent_job_changed_by = user.id
+    log(db, user.organization_id, user.id, "task", task.id, action, **detail)
+    db.commit(); db.refresh(task)
+    return {"task": task_out(task, db), "status": agent_job_status(task)}
 @app.get("/api/search")
 def search(q:str=Query(min_length=1, max_length=200),user:User=Depends(current_user),db:Session=Depends(get_db)):
     """Search authorized workspace knowledge and return bounded, timestamped citations."""
