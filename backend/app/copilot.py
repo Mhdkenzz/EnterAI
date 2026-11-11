@@ -732,7 +732,7 @@ EXECUTION_SYSTEM_PROMPT = (
 EXECUTION_TOOL_SPECS: list[dict[str, Any]] = [
     {"name": "log_progress", "description": "Record a progress note as a comment on your current task. Use this to narrate concrete work as you do it.",
      "input_schema": {"type": "object", "properties": {"note": {"type": "string"}}, "required": ["note"], "additionalProperties": False}},
-    {"name": "mark_task_complete", "description": "Mark your current task as done after finishing it. Include the actual deliverable or concrete evidence and its location; do not claim external work without tool evidence.",
+    {"name": "mark_task_complete", "description": "Submit your completed work with the actual deliverable or concrete evidence and its location. Tasks with a QA or human-approval gate are sent to review instead of being marked done; do not claim external work without tool evidence.",
      "input_schema": {"type": "object", "properties": {"result": {"type": "string", "minLength": 40, "maxLength": 4000}}, "required": ["result"], "additionalProperties": False}},
     {"name": "raise_blocker", "description": "Pause your current task when a real dependency, missing access, unclear decision, or external wait prevents progress. Explain the blocker and what a person needs to do; the task moves to Blocked and workspace admins are notified.",
      "input_schema": {"type": "object", "properties": {"reason": {"type": "string", "minLength": 8, "maxLength": 2000}}, "required": ["reason"], "additionalProperties": False}},
@@ -1325,11 +1325,27 @@ class CopilotService:
                         ))
                         continue
                     before_status = task.status
+                    is_peer_review = task.parent_id is not None and "qa_peer_review" in (task.labels or [])
+                    gated_delivery = not is_peer_review and (task.qa_required or task.requires_human_approval)
                     db.add(Comment(task_id=task.id, author_id=agent.id, body="Completed work:\n" + call["args"]["result"].strip()))
-                    task.status = "done"
-                    task.completed_at = datetime.utcnow()
+                    task.status = "done" if not gated_delivery else "review"
+                    task.completed_at = datetime.utcnow() if task.status == "done" else None
+                    if gated_delivery:
+                        task.qa_evidence = [*(task.qa_evidence or []), call["args"]["result"].strip()[:2000]][-50:]
+                    if is_peer_review and task.parent_id:
+                        parent_task = db.get(Task, task.parent_id)
+                        if parent_task and parent_task.peer_review_task_id == task.id:
+                            parent_task.peer_review_status = "submitted"
+                            parent_task.peer_review_summary = call["args"]["result"].strip()[:2000]
+                            parent_task.qa_checks = []
+                            parent_task.qa_checked_at = None
+                            log(db, agent.organization_id, agent.id, "task", parent_task.id,
+                                "task_peer_review_submitted", reviewer_agent_id=agent.id,
+                                review_task_id=task.id)
                     sync_agent_task_pointers(db, task, task.assignee_id)
-                    log(db, agent.organization_id, agent.id, "task", task.id, "agent_completed", from_status=before_status)
+                    log(db, agent.organization_id, agent.id, "task", task.id,
+                        "agent_completed" if task.status == "done" else "agent_submitted_for_review",
+                        from_status=before_status, to_status=task.status)
                     project = db.get(Project, task.project_id)
                     if project:
                         advance_project_to_completion_review(db, project, agent.id)
@@ -1344,7 +1360,7 @@ class CopilotService:
                     if applied_repo_changes:
                         files = sorted({path for change in applied_repo_changes for path in change["files"]})
                         text = (text + "\n\n" if text else "") + f"Changed files: {', '.join(files)}."
-                    return {"outcome": "completed", "text": text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
+                    return {"outcome": "completed" if task.status == "done" else "review", "text": text, "read_tools": used_read_tools, "progress_notes": progress_notes, "action": None}
                 if name == "raise_blocker":
                     schema = next(spec["input_schema"] for spec in EXECUTION_TOOL_SPECS if spec["name"] == name)
                     if validate_tool_args(call["args"], schema) is None:

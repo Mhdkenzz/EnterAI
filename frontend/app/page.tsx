@@ -890,6 +890,10 @@ export default function EnterAI() {
           task={task}
           users={users}
           agents={user?.role === "admin" && user?.kind === "human" ? agents : []}
+          qaReviewers={user?.kind === "human" && ["admin", "manager"].includes(user.role) ? agents : []}
+          canManageQA={user?.kind === "human" && ["admin", "manager"].includes(user.role)}
+          canRecordEvidence={user?.kind === "human"}
+          onTaskUpdate={setTask}
           openTask={openTask}
           tasksChanged={async (projectId: string) => {
             if (project?.id === projectId) setTasks(await api<Task[]>("/projects/" + projectId + "/tasks"));

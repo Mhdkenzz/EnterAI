@@ -29,6 +29,7 @@ from .request_planning import InboundPlanProposal, create_inbound_plan
 from .storage import get_storage
 from .indexing import index_document
 from .task_dependencies import list_dependencies, replace_dependencies, unmet_dependency_ids
+from .quality import run_task_quality_checks
 from .knowledge_access import document_is_visible, is_workspace_manager, task_is_visible, visible_project_ids
 from .deployment_config import is_deployment_environment, migration_revision_status, validate_deployment_configuration
 from .ratelimit import OpenRouterRateLimitExceeded
@@ -185,8 +186,10 @@ class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); passw
 class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200); accept_terms: bool = False
 class ProjectIn(BaseModel): name: str; code: str; description: str | None = None; team_id: str | None = None; health: str = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
 class ProjectUpdate(BaseModel): name: str | None = None; code: str | None = None; description: str | None = None; status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: str | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
-class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "done"] = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []; depends_on: list[str] = Field(default_factory=list)
-class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "blocked", "done"] | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None; depends_on: list[str] | None = None
+class TaskIn(BaseModel): project_id: str; title: str = Field(min_length=1, max_length=240); description: str | None = None; parent_id: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "done"] = "todo"; priority: str = "medium"; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] = []; depends_on: list[str] = Field(default_factory=list); qa_required: bool = False; requires_human_approval: bool = False; acceptance_criteria: list[str] = Field(default_factory=list, max_length=20); review_rubric: list[str] = Field(default_factory=list, max_length=20)
+class TaskUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=240); description: str | None = None; status: Literal["backlog", "todo", "in_progress", "review", "blocked", "done"] | None = None; priority: str | None = None; assignee_id: str | None = None; due_date: datetime | None = None; labels: list[str] | None = None; depends_on: list[str] | None = None; qa_required: bool | None = None; requires_human_approval: bool | None = None; acceptance_criteria: list[str] | None = Field(default=None, max_length=20); review_rubric: list[str] | None = Field(default=None, max_length=20); qa_evidence: list[str] | None = Field(default=None, max_length=50)
+class QAPeerReviewRequest(BaseModel): reviewer_agent_id: str
+class QAPeerReviewDecision(BaseModel): outcome: Literal["approved", "changes_requested"]; summary: str = Field(min_length=8, max_length=2000)
 class CommentIn(BaseModel): body: str = Field(min_length=1)
 class TeamIn(BaseModel): name: str; description: str | None = None
 class AIRequest(BaseModel): message: str = Field(min_length=1, max_length=4000); project_id: str | None = None
@@ -222,7 +225,8 @@ def project_out(p: Project, db: Session):
 def task_out(t: Task, db: Session):
     assignee = db.get(User,t.assignee_id) if t.assignee_id else None
     dependencies = list_dependencies(db, t.id)
-    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"title":t.title,"description":t.description,"status":t.status,"blocked_reason":t.blocked_reason,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"depends_on":[{"id":dependency.id,"title":dependency.title,"status":dependency.status} for dependency in dependencies],"due_date":t.due_date,"labels":t.labels,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
+    reviewer = db.get(User, t.peer_review_agent_id) if t.peer_review_agent_id else None
+    return {"id":t.id,"project_id":t.project_id,"parent_id":t.parent_id,"title":t.title,"description":t.description,"status":t.status,"blocked_reason":t.blocked_reason,"priority":t.priority,"assignee":user_out(assignee) if assignee else None,"depends_on":[{"id":dependency.id,"title":dependency.title,"status":dependency.status} for dependency in dependencies],"due_date":t.due_date,"labels":t.labels,"qa_required":t.qa_required,"requires_human_approval":t.requires_human_approval,"acceptance_criteria":t.acceptance_criteria or [],"review_rubric":t.review_rubric or [],"qa_evidence":t.qa_evidence or [],"qa_checks":t.qa_checks or [],"qa_checked_at":t.qa_checked_at,"peer_review_status":t.peer_review_status,"peer_review_agent":user_out(reviewer) if reviewer else None,"peer_review_task_id":t.peer_review_task_id,"peer_review_summary":t.peer_review_summary,"peer_review_decision":t.peer_review_decision,"completed_at":t.completed_at,"created_at":t.created_at,"updated_at":t.updated_at}
 def notify(db, recipient_id: str | None, actor: User, title: str, body: str | None = None, href: str | None = None) -> None:
     """Tell a person about something someone else did to their work. Never the actor
     themselves, and never an agent (agents have no inbox to read)."""
@@ -609,11 +613,23 @@ def create_task(data: TaskIn,user:User=Depends(current_user),db:Session=Depends(
         p.status = "active"
         log(db, user.organization_id, user.id, "project", p.id, "completion_review_reopened", reason="task_added")
     assignee_id = data.assignee_id or user.id
+    high_impact = data.priority.lower() == "high"
+    if high_impact and (not data.qa_required or not data.requires_human_approval):
+        data = data.model_copy(update={"qa_required": True, "requires_human_approval": True})
+    if data.qa_required or data.requires_human_approval:
+        if not data.acceptance_criteria or not data.review_rubric:
+            raise HTTPException(422, "Add acceptance criteria and a review rubric before enabling the QA gate")
+        if data.status == "done":
+            raise HTTPException(409, "Create gated tasks in review only after delivering evidence and passing QA")
+    for value in [*data.acceptance_criteria, *data.review_rubric]:
+        if not value.strip() or len(value) > 500:
+            raise HTTPException(422, "QA criteria and rubric items must contain 1–500 characters")
     assignee = ensure_org_assignee(db,user,assignee_id)
     if data.status == "in_progress" and assignee.kind == "agent":
         ensure_agent_has_no_active_conflict(db, assignee.id, "__new_task__")
     ensure_task_parent(db,p,data.parent_id)
     values=data.model_dump(); dependency_ids=values.pop("depends_on")
+    values["qa_required"] = data.qa_required or data.requires_human_approval
     values["assignee_id"] = assignee_id
     t=Task(**values,reporter_id=user.id); db.add(t); db.flush()
     try: replace_dependencies(db,t,dependency_ids)
@@ -663,7 +679,7 @@ def task_accountability(task_id: str, user: User = Depends(current_user), db: Se
         "actor": person(row.actor_id), "initiator": person(row.initiator_id),
         "created_at": row.created_at.isoformat(),
         "detail": {key: value for key, value in (row.detail or {}).items()
-                   if key in {"from_status", "to_status", "assignment_changed", "assignee_id",
+                   if key in {"from_status", "to_status", "assignment_changed", "assignee_id", "outcome", "passed",
                               "from_assignee_id", "to_assignee_id", "assignment_reason", "tool",
                               "agent_id", "reviewed_by_id", "approved_by_id"}},
     } for row in rows]
@@ -671,11 +687,12 @@ def task_accountability(task_id: str, user: User = Depends(current_user), db: Se
                              if event["action"] in {"created", "created_from_inbound_plan", "subtask_delegated", "delegated_to_agent", "task_reassigned"}
                              or event["detail"].get("assignment_changed")), None)
     execution_event = next((event for event in reversed(events)
-                            if event["action"] in {"agent_claimed", "agent_started", "agent_progress", "agent_completed", "agent_blocked", "agent_action_proposed", "task_started", "task_completed"}), None)
+                            if event["action"] in {"agent_claimed", "agent_started", "agent_progress", "agent_completed", "agent_submitted_for_review", "agent_blocked", "agent_action_proposed", "task_started", "task_completed"}), None)
     review_event = next((event for event in reversed(events)
-                         if event["action"] in {"agent_action_approved", "agent_action_rejected", "task_reviewed", "task_review_approved"}), None)
+                         if event["action"] in {"agent_action_approved", "agent_action_rejected", "task_reviewed", "task_review_approved", "task_peer_review_decided"}), None)
     approval_event = next((event for event in reversed(events)
-                           if event["action"] in {"agent_action_approved", "task_review_approved"}), None)
+                           if event["action"] in {"agent_action_approved", "task_review_approved"}
+                           or (event["action"] == "task_peer_review_decided" and event["detail"].get("outcome") == "approved")), None)
     return {
         "requested_by": person(task.reporter_id), "owner": person(task.assignee_id),
         "assigned_by": assignment_event["actor"] if assignment_event else None,
@@ -691,6 +708,27 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
     p=ensure_knowledge_project(db,user,t.project_id)
     if p.status == "completed" and data.model_fields_set:
         raise HTTPException(409, "Reopen the completed project before changing its tasks")
+    changes = data.model_dump(exclude_unset=True)
+    qa_admin_fields = {"qa_required", "requires_human_approval", "acceptance_criteria", "review_rubric"}
+    if qa_admin_fields.intersection(changes) and (user.kind != "human" or user.role not in {"admin", "manager"}):
+        raise HTTPException(403, "Only a human manager or administrator can change the task QA plan")
+    if "qa_evidence" in changes and user.kind != "human":
+        raise HTTPException(403, "A human must record delivery evidence")
+    for key in ("acceptance_criteria", "review_rubric", "qa_evidence"):
+        values = changes.get(key)
+        if values is not None and any(not value.strip() or len(value) > 2000 for value in values):
+            raise HTTPException(422, "QA items must contain 1–2,000 characters")
+    if changes.get("priority", t.priority).lower() == "high":
+        changes["qa_required"] = True
+        changes["requires_human_approval"] = True
+    if changes.get("requires_human_approval"):
+        changes["qa_required"] = True
+    next_qa_required = changes.get("qa_required", t.qa_required)
+    next_requires_human_approval = changes.get("requires_human_approval", t.requires_human_approval)
+    next_criteria = changes.get("acceptance_criteria", t.acceptance_criteria or [])
+    next_rubric = changes.get("review_rubric", t.review_rubric or [])
+    if (next_qa_required or next_requires_human_approval) and (not next_criteria or not next_rubric):
+        raise HTTPException(422, "Add acceptance criteria and a review rubric before enabling the QA gate")
     if "assignee_id" in data.model_fields_set:
         if data.assignee_id is None:
             previous_assignee = db.get(User, t.assignee_id) if t.assignee_id else None
@@ -705,7 +743,6 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
                 if t.status == "in_progress":
                     raise HTTPException(409, "Pause this agent's task before reassigning it. Its current work must be reviewed by a human first.")
     before, before_assignee_id = t.status, t.assignee_id
-    changes = data.model_dump(exclude_unset=True)
     next_assignee_id = changes.get("assignee_id", t.assignee_id)
     next_status = changes.get("status", t.status)
     next_assignee = db.get(User, next_assignee_id) if next_assignee_id else None
@@ -713,9 +750,27 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
         ensure_agent_has_no_active_conflict(db, next_assignee.id, t.id)
     if data.status == "done" and before == "blocked":
         raise HTTPException(409, "Resolve the blocker and reopen this task before completing it")
+    if data.status == "done" and user.kind == "agent":
+        raise HTTPException(403, "Agents must submit completed work through the review workflow")
     dependency_ids = changes.pop("depends_on", None)
     dependency_detail = {}
+    qa_changed = bool(set(changes) & {
+        "title", "description", "labels", "qa_required", "requires_human_approval",
+        "acceptance_criteria", "review_rubric", "qa_evidence",
+    }) or dependency_ids is not None
     for key,value in changes.items(): setattr(t,key,value)
+    if t.requires_human_approval:
+        t.qa_required = True
+    if qa_changed:
+        t.qa_checks = []
+        t.qa_checked_at = None
+    if (set(changes) & {"title", "description", "labels", "acceptance_criteria", "review_rubric", "qa_evidence"}
+            or dependency_ids is not None):
+        t.peer_review_status = "not_requested"
+        t.peer_review_agent_id = None
+        t.peer_review_task_id = None
+        t.peer_review_summary = None
+        t.peer_review_decision = None
     if data.status == "blocked" and before != "blocked":
         t.blocked_reason = f"Marked blocked by {user.name}."
         db.add(Comment(task_id=t.id, author_id=user.id, body=f"Blocked: {t.blocked_reason}"))
@@ -746,6 +801,13 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
                 "dependencies_added": len(next_dependency_ids - previous_dependency_ids),
                 "dependencies_removed": len(previous_dependency_ids - next_dependency_ids),
             }
+    if data.status == "done" and (t.priority.lower() == "high" or t.qa_required or t.requires_human_approval):
+        if user.kind != "human":
+            raise HTTPException(403, "A human must approve gated task delivery")
+        if not t.qa_checked_at or not t.qa_checks or any(not item.get("passed") for item in t.qa_checks):
+            raise HTTPException(409, "Run and pass the QA checks before approving delivery")
+        if t.peer_review_agent_id and t.peer_review_status != "approved":
+            raise HTTPException(409, "The independent agent review must be approved before delivery")
     if data.status == "done" and unmet_dependency_ids(db,t.id): raise HTTPException(409,"Complete prerequisite tasks before marking this task done")
     if p.status == "completed" and data.status is not None and data.status != "done":
         raise HTTPException(409, "Reopen the completed project before reopening a task")
@@ -783,6 +845,115 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
         log(db, user.organization_id, user.id, "task", t.id, "task_reviewed",
             from_status=before, to_status="review", reviewed_by_id=user.id)
     db.commit(); return task_out(t,db)
+
+
+@app.post("/api/tasks/{task_id}/qa/run")
+def run_task_qa(task_id: str, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db, user)))
+    if not task:
+        raise HTTPException(404, "Task not found")
+    ensure_knowledge_project(db, user, task.project_id)
+    require_manager(user)
+    checks = run_task_quality_checks(db, task)
+    task.qa_checks = checks
+    task.qa_checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    passed = all(item["passed"] for item in checks)
+    log(db, user.organization_id, user.id, "task", task.id, "task_qa_checked",
+        passed=passed, checks=[{"name": item["name"], "passed": item["passed"]} for item in checks])
+    db.commit()
+    return task_out(task, db)
+
+
+@app.post("/api/tasks/{task_id}/qa/peer-review")
+def request_task_peer_review(task_id: str, data: QAPeerReviewRequest,
+                             user: User = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db, user)))
+    if not task:
+        raise HTTPException(404, "Task not found")
+    project = ensure_knowledge_project(db, user, task.project_id)
+    require_manager(user)
+    if not (task.qa_required or task.requires_human_approval):
+        raise HTTPException(409, "Enable the QA gate before requesting an independent review")
+    if task.status != "review":
+        raise HTTPException(409, "Submit the task for review before requesting a peer review")
+    if not task.acceptance_criteria or not task.review_rubric or not task.qa_evidence:
+        raise HTTPException(409, "Save acceptance criteria, a review rubric, and work evidence first")
+    reviewer = db.scalar(select(User).where(
+        User.id == data.reviewer_agent_id, User.organization_id == user.organization_id,
+        User.kind == "agent", User.active.is_(True), User.retired_at.is_(None),
+    ))
+    if not reviewer:
+        raise HTTPException(404, "Active reviewer agent not found")
+    if reviewer.id == task.assignee_id:
+        raise HTTPException(422, "The peer reviewer must be a different agent from the task owner")
+    if task.peer_review_status == "pending" and task.peer_review_task_id:
+        existing = db.get(Task, task.peer_review_task_id)
+        if existing and existing.status not in {"done", "blocked"}:
+            raise HTTPException(409, "A peer review is already in progress")
+    review = Task(
+        project_id=task.project_id, parent_id=task.id,
+        title=f"Independent review: {task.title}"[:240],
+        description=(
+            "Review the completed work for the parent task against the acceptance criteria and rubric. "
+            "Do not change the parent deliverable. Record concrete findings, cite evidence, and recommend "
+            "approval or changes in your completion report. A human will make the final decision.\n\n"
+            f"Parent task: {task.title}\n\nAcceptance criteria:\n- " + "\n- ".join(task.acceptance_criteria) +
+            "\n\nReview rubric:\n- " + "\n- ".join(task.review_rubric) +
+            "\n\nSubmitted evidence:\n- " + "\n- ".join(task.qa_evidence)
+        )[:12000],
+        status="todo", priority="high", assignee_id=reviewer.id, reporter_id=user.id,
+        labels=["qa_peer_review"],
+    )
+    db.add(review)
+    db.flush()
+    task.peer_review_agent_id = reviewer.id
+    task.peer_review_task_id = review.id
+    task.peer_review_status = "pending"
+    task.peer_review_summary = None
+    task.peer_review_decision = None
+    task.qa_checks = []
+    task.qa_checked_at = None
+    log(db, user.organization_id, user.id, "task", task.id, "task_peer_review_requested",
+        reviewer_agent_id=reviewer.id, review_task_id=review.id)
+    log(db, user.organization_id, user.id, "task", review.id, "task_peer_review_assigned",
+        parent_task_id=task.id, reviewer_agent_id=reviewer.id)
+    notify(db, reviewer.id, user, f"Independent review requested: {task.title}", project.name, f"project:{project.id}")
+    db.commit()
+    return {"task": task_out(task, db), "review_task": task_out(review, db)}
+
+
+@app.post("/api/tasks/{task_id}/qa/peer-review/decision")
+def decide_task_peer_review(task_id: str, data: QAPeerReviewDecision,
+                            user: User = Depends(current_user), db: Session = Depends(get_db)):
+    task = db.scalar(select(Task).where(Task.id == task_id, task_is_visible(db, user)))
+    if not task:
+        raise HTTPException(404, "Task not found")
+    ensure_knowledge_project(db, user, task.project_id)
+    require_manager(user)
+    review = db.get(Task, task.peer_review_task_id) if task.peer_review_task_id else None
+    if task.peer_review_status != "submitted" or not review or review.status != "done":
+        raise HTTPException(409, "The independent agent must submit its review before a decision")
+    task.peer_review_status = data.outcome
+    task.peer_review_decision = data.summary.strip()
+    task.qa_checks = []
+    task.qa_checked_at = None
+    if data.outcome == "changes_requested":
+        task.status = "in_progress"
+        task.completed_at = None
+        if task.assignee_id:
+            owner = db.get(User, task.assignee_id)
+            if owner and owner.kind == "agent":
+                owner.current_task_id = task.id
+        db.add(Comment(task_id=task.id, author_id=user.id,
+                       body=f"Peer review requested changes: {data.summary.strip()}"))
+    log(db, user.organization_id, user.id, "task", task.id, "task_peer_review_decided",
+        outcome=data.outcome, reviewer_agent_id=task.peer_review_agent_id)
+    notify(db, task.assignee_id, user, f"Peer review {data.outcome.replace('_', ' ')}: {task.title}",
+           data.summary.strip(), f"project:{task.project_id}")
+    db.commit()
+    return task_out(task, db)
+
+
 def detach_task_references(db, task):
     """PostgreSQL enforces the foreign keys SQLite ignores, so every row pointing at
     this task has to be resolved before the DELETE or the request fails outright.

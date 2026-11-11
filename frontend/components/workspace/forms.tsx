@@ -314,7 +314,12 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
     [priority, setPriority] = useState("medium"),
     [assignee, setAssignee] = useState(currentUserId || ""),
     [assigneeSearch, setAssigneeSearch] = useState(""),
-    [dueDate, setDueDate] = useState("");
+    [dueDate, setDueDate] = useState(""),
+    [qaRequired, setQaRequired] = useState(false),
+    [humanApproval, setHumanApproval] = useState(false),
+    [qaDetailsOpen, setQaDetailsOpen] = useState(false),
+    [criteriaText, setCriteriaText] = useState(""),
+    [rubricText, setRubricText] = useState("Meets the acceptance criteria\nEvidence is accurate and traceable\nNo unresolved blockers or hidden issues");
   const { saving, run, failure } = useSubmit();
   return (
     <Modal title={"New task in " + project.name} close={close}>
@@ -323,7 +328,14 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
         onSubmit={(e) => {
           e.preventDefault();
           if (!agentsLoading && title.trim())
-            run(() => create({ title: title.trim(), description, priority, assignee_id: assignee || null, due_date: dueDate ? dueDate + "T00:00:00" : null }));
+            run(() => create({
+              title: title.trim(), description, priority, assignee_id: assignee || null,
+              due_date: dueDate ? dueDate + "T00:00:00" : null,
+              qa_required: qaRequired || humanApproval,
+              requires_human_approval: humanApproval,
+              acceptance_criteria: criteriaText.split("\n").map((item) => item.trim()).filter(Boolean),
+              review_rubric: rubricText.split("\n").map((item) => item.trim()).filter(Boolean),
+            }));
         }}
       >
         <label className="block text-xs text-zinc-400">
@@ -339,19 +351,19 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
           />
         </label>
         <div className="grid gap-3 sm:grid-cols-2">
-          <label className="text-xs text-zinc-400">
-            Priority
-            <select className={cn(field, "task-select")} data-tone={`priority-${priority}`} value={priority} onChange={(e) => setPriority(e.target.value)}>
+          <div className="text-xs text-zinc-400">
+            <label htmlFor="new-task-priority">Priority</label>
+            <select id="new-task-priority" className={cn(field, "task-select")} data-tone={`priority-${priority}`} value={priority} onChange={(e) => { setPriority(e.target.value); if (e.target.value === "high") { setQaRequired(true); setHumanApproval(true); setQaDetailsOpen(true); } }}>
               <option value="low">Low</option>
               <option value="medium">Medium</option>
               <option value="high">High</option>
             </select>
-          </label>
+          </div>
           <div className="text-xs text-zinc-400">
             <label htmlFor="new-task-assignee">Assignee</label>
             {agentsLoading && <span role="status">Loading AI agents…</span>}
             <input className={field} aria-label="Search assignees" placeholder="Search people or agents" value={assigneeSearch} onChange={(e) => setAssigneeSearch(e.target.value)} />
-            <select id="new-task-assignee" className={field} value={assignee} onChange={(e) => setAssignee(e.target.value)}>
+            <select id="new-task-assignee" className={field} value={assignee} onChange={(e) => { setAssignee(e.target.value); if (agents.some((agent: Agent) => agent.id === e.target.value)) { setQaRequired(true); setQaDetailsOpen(true); } }}>
               {users.filter((u: User) => u.id === assignee || u.name.toLowerCase().includes(assigneeSearch.toLowerCase())).map((u: User) => (
                 <option key={u.id} value={u.id}>
                   {u.name}
@@ -366,6 +378,27 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
           Due date
           <input type="date" className={field} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
         </label>
+        <details open={qaDetailsOpen} onToggle={(e) => setQaDetailsOpen(e.currentTarget.open)} className="rounded-lg border border-line p-3">
+          <summary className="cursor-pointer text-sm font-semibold text-ink">Delivery QA (optional)</summary>
+          <div className="mt-3 space-y-3">
+            <label className="flex items-start gap-2 text-xs text-slate-600">
+              <input type="checkbox" checked={qaRequired} onChange={(e) => setQaRequired(e.target.checked)} />
+              <span>Require acceptance criteria, evidence, automated checks, and human review before delivery.</span>
+            </label>
+            <label className="flex items-start gap-2 text-xs text-slate-600">
+              <input type="checkbox" checked={humanApproval} onChange={(e) => { setHumanApproval(e.target.checked); if (e.target.checked) setQaRequired(true); }} />
+              <span>Require explicit human approval. Use for high-impact or sensitive work.</span>
+            </label>
+            {(qaRequired || humanApproval) && <>
+              <label className="block text-xs text-slate-600">Acceptance criteria, one per line
+                <textarea required className={cn(field, "mt-1 min-h-20")} value={criteriaText} onChange={(e) => setCriteriaText(e.target.value)} />
+              </label>
+              <label className="block text-xs text-slate-600">Review rubric, one per line
+                <textarea required className={cn(field, "mt-1 min-h-20")} value={rubricText} onChange={(e) => setRubricText(e.target.value)} />
+              </label>
+            </>}
+          </div>
+        </details>
         {failure}
         <div className="flex justify-end gap-2">
           <Button type="button" variant="ghost" onClick={close}>
@@ -440,6 +473,7 @@ const accountabilityActionLabels: Record<string, string> = {
   agent_started: "Work started",
   agent_progress: "Progress recorded",
   agent_completed: "Agent submitted completed work",
+  agent_submitted_for_review: "Agent submitted gated work for human review",
   task_completed: "Task marked complete",
   agent_action_proposed: "Agent requested human approval",
   agent_action_approved: "Human approved the proposed action",
@@ -448,6 +482,10 @@ const accountabilityActionLabels: Record<string, string> = {
   task_started: "Work started",
   task_reviewed: "Human reviewed the task",
   task_review_approved: "Human reviewed and approved the task",
+  task_qa_checked: "Automated QA checks completed",
+  task_peer_review_requested: "Independent agent review requested",
+  task_peer_review_submitted: "Independent agent review submitted",
+  task_peer_review_decided: "Human decided the peer review",
   updated: "Task details updated",
 };
 
@@ -467,6 +505,10 @@ export function Drawer({
   deleted,
   openTask,
   tasksChanged,
+  canManageQA = false,
+  canRecordEvidence = false,
+  qaReviewers = [],
+  onTaskUpdate,
 }: any) {
   const [body, setBody] = useState(""),
     [uploading, setUploading] = useState(false),
@@ -478,8 +520,24 @@ export function Drawer({
     [decisionError, setDecisionError] = useState(""),
     [accountability, setAccountability] = useState<TaskAccountability | null>(null),
     [accountabilityError, setAccountabilityError] = useState(""),
-    [accountabilityRevision, setAccountabilityRevision] = useState(0);
+    [accountabilityRevision, setAccountabilityRevision] = useState(0),
+    [qaCriteria, setQaCriteria] = useState((task.acceptance_criteria || []).join("\n")),
+    [qaRubric, setQaRubric] = useState((task.review_rubric || []).join("\n")),
+    [qaEvidence, setQaEvidence] = useState((task.qa_evidence || []).join("\n")),
+    [qaRequired, setQaRequired] = useState(!!task.qa_required),
+    [humanApprovalRequired, setHumanApprovalRequired] = useState(!!task.requires_human_approval),
+    [peerReviewerId, setPeerReviewerId] = useState(""),
+    [peerDecision, setPeerDecision] = useState("");
   const { saving, run, failure } = useSubmit();
+  useEffect(() => {
+    setQaCriteria((task.acceptance_criteria || []).join("\n"));
+    setQaRubric((task.review_rubric || []).join("\n"));
+    setQaEvidence((task.qa_evidence || []).join("\n"));
+    setQaRequired(!!task.qa_required);
+    setHumanApprovalRequired(!!task.requires_human_approval);
+    setPeerDecision("");
+  }, [task.id, task.acceptance_criteria, task.review_rubric, task.qa_evidence,
+    task.qa_required, task.requires_human_approval]);
   const closeRef = useRef(close);
   closeRef.current = close;
   useEffect(() => {
@@ -554,6 +612,56 @@ export function Drawer({
     } finally {
       setDecisionSaving(null);
     }
+  }
+  const qaItems = (value: string) => value.split("\n").map((item) => item.trim()).filter(Boolean);
+  const qaPlanSaved = task.qa_required === (qaRequired || humanApprovalRequired)
+    && task.requires_human_approval === humanApprovalRequired
+    && JSON.stringify(task.acceptance_criteria || []) === JSON.stringify(qaItems(qaCriteria))
+    && JSON.stringify(task.review_rubric || []) === JSON.stringify(qaItems(qaRubric))
+    && JSON.stringify(task.qa_evidence || []) === JSON.stringify(qaItems(qaEvidence));
+  async function saveQaPlan() {
+    await run(async () => {
+      const error = await update(task, {
+        qa_required: qaRequired || humanApprovalRequired,
+        requires_human_approval: humanApprovalRequired,
+        acceptance_criteria: qaItems(qaCriteria), review_rubric: qaItems(qaRubric),
+        qa_evidence: qaItems(qaEvidence),
+      });
+      if (error) throw new Error(error);
+      await tasksChanged(task.project_id);
+    });
+  }
+  async function saveEvidence() {
+    await run(async () => {
+      const error = await update(task, { qa_evidence: qaItems(qaEvidence) });
+      if (error) throw new Error(error);
+      await tasksChanged(task.project_id);
+    });
+  }
+  async function runQaChecks() {
+    await run(async () => {
+      const next = await api<Task>(`/tasks/${task.id}/qa/run`, { method: "POST" });
+      onTaskUpdate?.(next);
+      await tasksChanged(task.project_id);
+    });
+  }
+  async function requestPeerReview() {
+    await run(async () => {
+      const result = await api<{ task: Task; review_task: Task }>(`/tasks/${task.id}/qa/peer-review`, {
+        method: "POST", body: JSON.stringify({ reviewer_agent_id: peerReviewerId }),
+      });
+      onTaskUpdate?.(result.task);
+      await tasksChanged(task.project_id);
+    });
+  }
+  async function decidePeerReview(outcome: "approved" | "changes_requested") {
+    await run(async () => {
+      const next = await api<Task>(`/tasks/${task.id}/qa/peer-review/decision`, {
+        method: "POST", body: JSON.stringify({ outcome, summary: peerDecision }),
+      });
+      onTaskUpdate?.(next);
+      await tasksChanged(task.project_id);
+    });
   }
   return (
     <div className="fixed inset-0 z-30 bg-black/45" onMouseDown={close}>
@@ -688,6 +796,72 @@ export function Drawer({
             <span className="mt-1 block text-[11px] font-medium text-amber-700">Blocked until all prerequisites are complete.</span>
           )}
         </label>
+        <section aria-label="Quality assurance before delivery" className="mt-5 rounded-xl border border-line bg-white p-4">
+          <h3 className="text-sm font-semibold text-ink">Quality assurance before delivery</h3>
+          <p className="mt-1 text-xs leading-5 text-slate-500">Set the acceptance criteria and review rubric, attach evidence, run consistency checks, and record an independent review before delivery.</p>
+          {canManageQA ? <>
+            <label className="mt-3 flex items-start gap-2 text-xs text-slate-600">
+              <input type="checkbox" checked={qaRequired} onChange={(e) => setQaRequired(e.target.checked)} />
+              <span>Require QA checks and human review before this task can be completed.</span>
+            </label>
+            <label className="mt-2 flex items-start gap-2 text-xs text-slate-600">
+              <input type="checkbox" checked={humanApprovalRequired} onChange={(e) => { setHumanApprovalRequired(e.target.checked); if (e.target.checked) setQaRequired(true); }} />
+              <span>Require explicit human approval for high-impact or sensitive work.</span>
+            </label>
+            <label className="mt-3 block text-xs text-slate-600">Acceptance criteria, one per line
+              <textarea aria-label="Acceptance criteria" className={cn(field, "mt-1 min-h-20")} value={qaCriteria} onChange={(e) => setQaCriteria(e.target.value)} placeholder="The delivered work meets the agreed scope" />
+            </label>
+            <label className="mt-3 block text-xs text-slate-600">Review rubric, one per line
+              <textarea aria-label="Review rubric" className={cn(field, "mt-1 min-h-20")} value={qaRubric} onChange={(e) => setQaRubric(e.target.value)} placeholder="Meets each acceptance criterion" />
+            </label>
+          </> : <div className="mt-3 space-y-2 text-xs text-slate-600">
+            <p>{task.qa_required ? "QA gate required" : "QA gate not required"}{task.requires_human_approval ? " · Human approval required" : ""}</p>
+            <p><strong>Acceptance criteria:</strong> {(task.acceptance_criteria || []).join(" · ") || "Not set"}</p>
+            <p><strong>Review rubric:</strong> {(task.review_rubric || []).join(" · ") || "Not set"}</p>
+          </div>}
+          <label className="mt-3 block text-xs text-slate-600">Delivery evidence, one item per line
+            <textarea aria-label="Delivery evidence" className={cn(field, "mt-1 min-h-20")} value={qaEvidence} onChange={(e) => setQaEvidence(e.target.value)} placeholder="Test output, artifact link, decision, or validation result" />
+          </label>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {canRecordEvidence && <Button type="button" size="sm" variant="outline" disabled={saving} onClick={saveEvidence}>Save evidence</Button>}
+            {canManageQA && <>
+              <Button type="button" size="sm" variant="outline" disabled={saving} onClick={saveQaPlan}>Save QA plan</Button>
+              <Button type="button" size="sm" disabled={saving || !(qaRequired || humanApprovalRequired) || !qaPlanSaved} onClick={runQaChecks}>Run QA checks</Button>
+            </>}
+          </div>
+          {failure}
+          {task.qa_checked_at && <div role="region" aria-label="QA check results" className="mt-3 rounded-lg border border-line bg-slate-50 p-3">
+            <p className="text-xs font-semibold text-ink">Checks run {new Date(task.qa_checked_at).toLocaleString()}</p>
+            <ul className="mt-2 space-y-1">
+              {(task.qa_checks || []).map((check: NonNullable<Task["qa_checks"]>[number]) => <li key={check.name} className={cn("text-xs", check.passed ? "text-emerald-800" : "text-rose-800")}>
+                {check.passed ? "Passed" : "Needs attention"} · {check.name.replaceAll("_", " ")} — {check.detail}
+              </li>)}
+            </ul>
+          </div>}
+          {canManageQA && task.qa_required && task.status === "review" && <div className="mt-3 rounded-lg border border-line p-3">
+            <h4 className="text-xs font-semibold text-ink">Independent agent review</h4>
+            <p className="mt-1 text-xs text-slate-500">A different agent receives the criteria, rubric, and submitted evidence. A human still decides whether to approve its recommendation.</p>
+            <p className="mt-2 text-xs text-slate-600">Status: {(task.peer_review_status || "not_requested").replaceAll("_", " ")}{task.peer_review_agent ? ` · ${task.peer_review_agent.name}` : ""}</p>
+            {task.peer_review_summary && <p className="mt-2 whitespace-pre-wrap rounded bg-slate-50 p-2 text-xs text-slate-700">Reviewer report: {task.peer_review_summary}</p>}
+            {task.peer_review_status === "submitted" ? <>
+              <label className="mt-2 block text-xs text-slate-600">Human decision note
+                <textarea aria-label="Peer review decision note" className={cn(field, "mt-1 min-h-16")} value={peerDecision} onChange={(e) => setPeerDecision(e.target.value)} />
+              </label>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Button type="button" size="sm" disabled={saving || peerDecision.trim().length < 8} onClick={() => decidePeerReview("approved")}>Approve peer review</Button>
+                <Button type="button" size="sm" variant="outline" disabled={saving || peerDecision.trim().length < 8} onClick={() => decidePeerReview("changes_requested")}>Request changes</Button>
+              </div>
+            </> : task.peer_review_status !== "approved" && <div className="mt-2 flex gap-2">
+              <select aria-label="Independent reviewer agent" className={cn(field, "min-w-0 flex-1")} value={peerReviewerId} onChange={(e) => setPeerReviewerId(e.target.value)}>
+                <option value="">Choose a different agent</option>
+                {qaReviewers.filter((agent: Agent) => agent.id !== task.assignee?.id).map((agent: Agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}
+              </select>
+              <Button type="button" size="sm" disabled={saving || !peerReviewerId} onClick={requestPeerReview}>Request review</Button>
+            </div>}
+            {task.peer_review_decision && <p role="status" className="mt-2 text-xs text-slate-600">Human decision: {task.peer_review_decision}</p>}
+          </div>}
+          {task.requires_human_approval && task.status === "review" && <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">This work needs explicit human approval. Run passing QA checks, review the evidence, then mark the task done.</p>}
+        </section>
         {parent && (
           <p className="mt-4 text-xs text-zinc-400">
             Subtask of{" "}

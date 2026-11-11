@@ -37,6 +37,18 @@ export type Task = {
   depends_on?: { id: string; title: string; status: string }[];
   due_date?: string;
   assignee?: User;
+  qa_required?: boolean;
+  requires_human_approval?: boolean;
+  acceptance_criteria?: string[];
+  review_rubric?: string[];
+  qa_evidence?: string[];
+  qa_checks?: { name: string; passed: boolean; detail: string; checked_at: string }[];
+  qa_checked_at?: string | null;
+  peer_review_status?: "not_requested" | "pending" | "submitted" | "approved" | "changes_requested";
+  peer_review_agent?: User | null;
+  peer_review_task_id?: string | null;
+  peer_review_summary?: string | null;
+  peer_review_decision?: string | null;
 };
 export type AccountabilityPerson = Pick<User, "id" | "name" | "kind" | "role" | "title"> & { hierarchy_level?: string | null };
 export type AccountabilityEvent = {

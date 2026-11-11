@@ -98,7 +98,7 @@ test("the AI confirmation shows where a task will land and can be rejected", asy
   const { project } = await workspace(page);
   await page.goto("/ai");
   await page.getByPlaceholder("Ask about work or propose a task").fill(`create task Book the venue for ${project.name}`);
-  await page.getByRole("button", { name: "Send message" }).click();
+  await page.getByRole("button", { name: "Send message", exact: true }).click();
   await expect(page.getByText(project.name, { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Reject" }).click();
   await expect(page.getByText("Rejected. Nothing was changed.")).toBeVisible();

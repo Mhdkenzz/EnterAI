@@ -204,6 +204,36 @@ def test_log_progress_executes_immediately_as_a_task_comment_and_agent_message()
         db.close()
 
 
+def test_agent_submits_gated_work_for_qa_and_human_approval():
+    headers, org, db = _admin_headers_and_org()
+    try:
+        with TestClient(app) as client:
+            agent, task = _agent_with_task(client, headers, db)
+            task.qa_required = True
+            task.requires_human_approval = True
+            task.acceptance_criteria = ["The requested behavior is delivered"]
+            task.review_rubric = ["Evidence supports the outcome"]
+            db.commit()
+            provider = _ScriptedProvider([
+                ProviderTurn(text=None, tool_calls=[{
+                    "id": "qa-complete", "name": "mark_task_complete",
+                    "args": {"result": "Implemented the requested behavior and verified the outcome against the acceptance criteria."},
+                }]),
+            ])
+            assert run_execution_tick(db, _service_with(provider)) == 1
+            db.refresh(task)
+            assert task.status == "review"
+            assert task.completed_at is None
+            assert task.qa_evidence and "verified the outcome" in task.qa_evidence[-1]
+
+            checks = client.post(f"/api/tasks/{task.id}/qa/run", headers=headers)
+            assert checks.status_code == 200, checks.text
+            approved = client.patch(f"/api/tasks/{task.id}", headers=headers, json={"status": "done"})
+            assert approved.status_code == 200, approved.text
+    finally:
+        db.close()
+
+
 def test_delegation_persists_before_the_next_provider_turn(monkeypatch):
     def fail_loudly(_bind, _org, _agent, error):
         raise error
