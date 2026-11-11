@@ -358,6 +358,10 @@ export default function EnterAI() {
     try {
       await api("/notifications/" + n.id + "/read", { method: "PATCH" });
       setNotices((all) => all.map((x) => (x.id === n.id ? { ...x, read: true } : x)));
+      if (!n.read) setQueueSummary((current: any) => ({
+        ...current,
+        unread_notifications: Math.max(0, (current.unread_notifications || 0) - 1),
+      }));
       const id = n.href?.startsWith("project:") ? n.href.slice(8) : n.href?.match(/projects\/([^/]+)/)?.[1];
       const p = projects.find((x) => x.id === id);
       if (n.href === "requests") nav("Requests");

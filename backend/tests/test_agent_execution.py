@@ -92,7 +92,7 @@ def test_provider_rate_limit_pauses_without_blocking_the_task():
             agent, task = _agent_with_task(client, headers, db)
         service = _service_with(RateLimitedProvider([]))
         for _ in range(MAX_CONSECUTIVE_FAILURES + 1):
-            run_execution_tick(db, service, cooldown_seconds=0)
+            run_execution_tick(db, service, cooldown_seconds=0, only_agent_id=agent.id)
         db.refresh(agent)
         db.refresh(task)
         assert agent.consecutive_task_failures == 0
@@ -166,7 +166,7 @@ def test_execution_tick_is_a_noop_under_the_deterministic_default():
         with TestClient(app) as client:
             agent, task = _agent_with_task(client, headers, db)
         db.refresh(agent)
-        stepped = run_execution_tick(db)  # no `service` override -> real CopilotService() -> deterministic by default
+        stepped = run_execution_tick(db, only_agent_id=agent.id)  # real CopilotService() -> deterministic by default
         assert stepped == 0
         db.refresh(agent)
         assert agent.last_execution_at is None
@@ -185,7 +185,7 @@ def test_log_progress_executes_immediately_as_a_task_comment_and_agent_message()
             ProviderTurn(text=None, tool_calls=[{"id": "c1", "name": "log_progress", "args": {"note": "Reviewed the requirements."}}]),
             ProviderTurn(text="Made a first pass; will continue next cycle.", tool_calls=[]),
         ])
-        stepped = run_execution_tick(db, _service_with(provider))
+        stepped = run_execution_tick(db, _service_with(provider), only_agent_id=agent.id)
         assert stepped == 1
 
         db.refresh(agent)
@@ -220,14 +220,13 @@ def test_agent_submits_gated_work_for_qa_and_human_approval():
                     "args": {"result": "Implemented the requested behavior and verified the outcome against the acceptance criteria."},
                 }]),
             ])
-            assert run_execution_tick(db, _service_with(provider)) == 1
+            assert run_execution_tick(db, _service_with(provider), only_agent_id=agent.id) == 1
             db.refresh(task)
             assert task.status == "review"
             assert task.completed_at is None
             assert task.qa_evidence and "verified the outcome" in task.qa_evidence[-1]
-
-            checks = client.post(f"/api/tasks/{task.id}/qa/run", headers=headers)
-            assert checks.status_code == 200, checks.text
+            assert task.qa_checked_at is not None
+            assert task.qa_checks and all(item["passed"] for item in task.qa_checks)
             approved = client.patch(f"/api/tasks/{task.id}", headers=headers, json={"status": "done"})
             assert approved.status_code == 200, approved.text
     finally:
@@ -248,7 +247,7 @@ def test_delegation_persists_before_the_next_provider_turn(monkeypatch):
             ProviderTurn(text=None, tool_calls=[{"id": "delegate", "name": "delegate_subtask", "args": {"agent_id": report.id, "title": "Prepare checklist", "description": "Draft the checklist for review.", "priority": "medium"}}]),
             ProviderTurn(text="Delegated the checklist.", tool_calls=[]),
         ])
-        assert run_execution_tick(db, _service_with(provider)) == 1
+        assert run_execution_tick(db, _service_with(provider), only_agent_id=agent.id) == 1
         db.expire_all()
         child = db.scalar(select(Task).where(Task.parent_id == task.id, Task.title == "Prepare checklist"))
         assert child is not None and child.assignee_id == report.id
@@ -269,12 +268,12 @@ def test_unexpected_execution_failures_eventually_block_the_task():
             def run_execution_step(self, tools, assigned_task):
                 raise RuntimeError("failure")
         for _ in range(MAX_CONSECUTIVE_FAILURES):
-            assert run_execution_tick(db, BrokenService(), cooldown_seconds=0) == 1
+            assert run_execution_tick(db, BrokenService(), cooldown_seconds=0, only_agent_id=agent.id) == 1
         db.refresh(task)
         db.refresh(agent)
         assert task.status == "blocked"
         assert agent.current_task_id == task.id
-        assert run_execution_tick(db, BrokenService(), cooldown_seconds=0) == 0
+        assert run_execution_tick(db, BrokenService(), cooldown_seconds=0, only_agent_id=agent.id) == 0
     finally:
         with TestClient(app) as client:
             _reset_hierarchy(client, headers)
@@ -288,7 +287,8 @@ def test_manager_can_read_several_reports_before_completing():
             agent, task = _agent_with_task(client, headers, db)
         turns = [ProviderTurn(text=None, tool_calls=[{"id": str(i), "name": "get_comments", "args": {"task_id": task.id}}]) for i in range(5)]
         turns.append(ProviderTurn(text="Reviewed.", tool_calls=[{"id": "done", "name": "mark_task_complete", "args": {"result": "Reviewed the team reports and reconciled the schedule, budget, and next steps."}}]))
-        assert run_execution_tick(db, _service_with(_ScriptedProvider(turns)), cooldown_seconds=0) == 1
+        assert run_execution_tick(db, _service_with(_ScriptedProvider(turns)), cooldown_seconds=0,
+                                  only_agent_id=agent.id) == 1
         db.refresh(task)
         assert task.status == "done"
     finally:
@@ -303,7 +303,7 @@ def test_agent_can_raise_blocker_without_deadlocking_audit():
         with TestClient(app) as client:
             agent, task = _agent_with_task(client, headers, db)
         provider = _ScriptedProvider([ProviderTurn(text=None, tool_calls=[{"id": "block", "name": "raise_blocker", "args": {"reason": "A required approval is missing; an administrator must provide it."}}])])
-        assert run_execution_tick(db, _service_with(provider), cooldown_seconds=0) == 1
+        assert run_execution_tick(db, _service_with(provider), cooldown_seconds=0, only_agent_id=agent.id) == 1
         db.refresh(task)
         assert task.status == "blocked"
         assert "approval" in task.blocked_reason
@@ -325,7 +325,7 @@ def test_agent_resumes_with_its_own_recorded_progress():
                 self.initial = messages[0]["content"]
                 return super().respond(system, messages, role, extra_tools)
         provider = CapturingProvider([ProviderTurn(text="Continuing later.", tool_calls=[])])
-        assert run_execution_tick(db, _service_with(provider), cooldown_seconds=0) == 1
+        assert run_execution_tick(db, _service_with(provider), cooldown_seconds=0, only_agent_id=agent.id) == 1
         assert "Prepared the schedule for the next step." in provider.initial
         assert "untrusted task data" in provider.initial
     finally:
@@ -375,7 +375,7 @@ def test_completion_without_a_result_does_not_finish_the_task():
             ProviderTurn(text=None, tool_calls=[{"id": "c1", "name": "mark_task_complete", "args": {}}]),
             ProviderTurn(text="I still need to produce the deliverable.", tool_calls=[]),
         ])
-        assert run_execution_tick(db, _service_with(provider)) == 1
+        assert run_execution_tick(db, _service_with(provider), only_agent_id=agent.id) == 1
         db.refresh(task)
         assert task.status != "done"
     finally:
@@ -392,7 +392,7 @@ def test_mark_task_complete_finishes_the_task_and_moves_the_agents_pointers():
         provider = _ScriptedProvider([
             ProviderTurn(text="Done.", tool_calls=[{"id": "c1", "name": "mark_task_complete", "args": {"result": "Drafted the release checklist: verify rollout, monitor errors, and prepare rollback steps."}}]),
         ])
-        stepped = run_execution_tick(db, _service_with(provider))
+        stepped = run_execution_tick(db, _service_with(provider), only_agent_id=agent.id)
         assert stepped == 1
 
         db.refresh(agent)
@@ -418,14 +418,14 @@ def test_a_proposed_write_during_execution_mints_a_confirmation_instead_of_execu
         provider = _ScriptedProvider([
             ProviderTurn(text="I'll also file a follow-up task.", tool_calls=[{"id": "c1", "name": "create_task", "args": {"project_id": project["id"], "title": "Follow-up from autonomous work"}}]),
         ])
-        stepped = run_execution_tick(db, _service_with(provider))
+        stepped = run_execution_tick(db, _service_with(provider), only_agent_id=agent.id)
         assert stepped == 1
 
         titles = [t.title for t in db.scalars(select(Task)).all()]
         assert "Follow-up from autonomous work" not in titles  # never executes without confirmation
         db.refresh(task)
         assert task.status == "review"
-        assert run_execution_tick(db, _service_with(_ScriptedProvider([]))) == 0
+        assert run_execution_tick(db, _service_with(_ScriptedProvider([])), only_agent_id=agent.id) == 0
 
         with TestClient(app) as client:
             history = client.get(f"/api/agents/{agent.id}/messages", headers=headers).json()
@@ -460,7 +460,7 @@ def test_rejecting_an_execution_proposal_pauses_its_task():
         provider = _ScriptedProvider([
             ProviderTurn(text="I can add a follow-up.", tool_calls=[{"id": "c1", "name": "create_task", "args": {"project_id": project["id"], "title": "Rejected follow-up"}}]),
         ])
-        assert run_execution_tick(db, _service_with(provider)) == 1
+        assert run_execution_tick(db, _service_with(provider), only_agent_id=agent.id) == 1
         with TestClient(app) as client:
             proposals = client.get("/api/agent-proposals", headers=headers).json()
             proposal = next(p for p in proposals if p["task_id"] == task.id)
@@ -521,7 +521,7 @@ def test_circuit_breaker_stops_polling_an_agent_after_repeated_provider_failures
         # otherwise skip these deliberately back-to-back ticks; the circuit breaker
         # is what is under test here, not the tick spacing.
         for _ in range(MAX_CONSECUTIVE_FAILURES):
-            assert run_execution_tick(db, service, cooldown_seconds=0) == 1
+            assert run_execution_tick(db, service, cooldown_seconds=0, only_agent_id=agent.id) == 1
         db.refresh(agent)
         db.refresh(task)
         assert agent.consecutive_task_failures == MAX_CONSECUTIVE_FAILURES
@@ -529,7 +529,7 @@ def test_circuit_breaker_stops_polling_an_agent_after_repeated_provider_failures
         assert task.blocked_reason and "failed repeatedly" in task.blocked_reason
         calls_before = provider.calls
 
-        assert run_execution_tick(db, service, cooldown_seconds=0) == 0  # circuit breaker excludes it now
+        assert run_execution_tick(db, service, cooldown_seconds=0, only_agent_id=agent.id) == 0  # circuit breaker excludes it now
         assert provider.calls == calls_before  # never even attempted
 
         with TestClient(app) as client:
@@ -557,13 +557,13 @@ def test_repeated_narration_without_progress_blocks_the_task_for_human_review():
         ])
         service = _service_with(provider)
         for _ in range(MAX_CONSECUTIVE_FAILURES):
-            assert run_execution_tick(db, service, cooldown_seconds=0) == 1
+            assert run_execution_tick(db, service, cooldown_seconds=0, only_agent_id=agent.id) == 1
         db.refresh(agent)
         db.refresh(task)
         assert task.status == "blocked"
         assert task.blocked_reason and "without recording progress" in task.blocked_reason
         assert agent.consecutive_task_failures == MAX_CONSECUTIVE_FAILURES
-        assert run_execution_tick(db, service, cooldown_seconds=0) == 0
+        assert run_execution_tick(db, service, cooldown_seconds=0, only_agent_id=agent.id) == 0
         assert provider.calls == MAX_CONSECUTIVE_FAILURES
     finally:
         with TestClient(app) as client:
@@ -579,7 +579,7 @@ def test_daily_call_limit_skips_an_agent_that_has_exhausted_it():
         for _ in range(execution.DAILY_CALL_LIMIT):
             execution._daily_limiter.allow(agent.id)
         provider = _FailingProvider()  # would raise if ever called
-        stepped = run_execution_tick(db, _service_with(provider))
+        stepped = run_execution_tick(db, _service_with(provider), only_agent_id=agent.id)
         assert stepped == 0
         assert provider.calls == 0
         db.refresh(agent)

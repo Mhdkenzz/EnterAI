@@ -48,6 +48,15 @@ test("views have real URLs: deep links, refresh and Back all work", async ({ pag
   await expect(page).toHaveURL(/\/inbox$/);
 });
 
+test("opening an inbox notification updates the navigation unread count", async ({ page }) => {
+  await workspace(page); // Task creation sends the owner an unread assignment notification.
+  await page.goto("/inbox");
+  await expect(page.getByText("1 unread", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: /assigned you/ }).click();
+  await expect(page.getByRole("button", { name: /Inbox, 0 unread notifications/ })).toBeVisible();
+  await expect(page.getByText("0 unread", { exact: true })).toBeVisible();
+});
+
 test("cards move between columns by drag and drop and by the keyboard buttons", async ({ page, isMobile }) => {
   test.skip(isMobile, "drag and drop is a pointer interaction; the buttons are covered on desktop");
   const { project } = await workspace(page);

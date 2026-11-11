@@ -3,7 +3,7 @@ import hashlib
 import re
 import secrets
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 from typing import Any, Callable, Literal
 import jwt
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
@@ -11,7 +11,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.openapi.utils import get_openapi
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
-from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, ValidationError
+from pydantic import AnyHttpUrl, BaseModel, EmailStr, Field, ValidationError, field_validator
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -30,7 +30,7 @@ from .request_planning import InboundPlanProposal, create_inbound_plan
 from .storage import get_storage
 from .indexing import index_document
 from .task_dependencies import list_dependencies, replace_dependencies, unmet_dependency_ids
-from .quality import run_task_quality_checks
+from .quality import record_task_quality_checks
 from .knowledge_access import document_is_visible, is_workspace_manager, task_is_visible, visible_project_ids
 from .deployment_config import is_deployment_environment, migration_revision_status, validate_deployment_configuration
 from .ratelimit import OpenRouterRateLimitExceeded
@@ -186,10 +186,10 @@ app.add_middleware(
 class SignIn(BaseModel): email: str = Field(min_length=3, max_length=255); password: str = Field(max_length=200)
 class Register(BaseModel): organization_name: str = Field(min_length=2, max_length=160); name: str = Field(min_length=1, max_length=160); email: EmailStr; password: str = Field(min_length=8, max_length=200); accept_terms: bool = False
 class ProjectIn(BaseModel):
-    name: str = Field(min_length=1, max_length=180); code: str = Field(min_length=1, max_length=16); description: str | None = None; team_id: str | None = None; health: Literal["on_track", "at_risk", "off_track"] = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; source_document_ids: list[str] = []
+    name: str = Field(min_length=1, max_length=180); code: str = Field(min_length=1, max_length=16); description: str | None = None; team_id: str | None = None; health: Literal["on_track", "at_risk", "off_track"] = "on_track"; color: str = "#22c55e"; due_date: datetime | None = None; launch_date: date | None = None; launch_freeze_rule: str | None = Field(default=None, max_length=2000); source_document_ids: list[str] = []
     north_star_goal: str | None = Field(default=None, max_length=2000); success_metric: str | None = Field(default=None, max_length=180); metric_unit: str | None = Field(default=None, max_length=60); baseline_value: float | None = None; current_value: float | None = None; target_value: float | None = None
 class ProjectUpdate(BaseModel):
-    name: str | None = Field(default=None, min_length=1, max_length=180); code: str | None = Field(default=None, min_length=1, max_length=16); description: str | None = None; status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: Literal["on_track", "at_risk", "off_track"] | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=180); code: str | None = Field(default=None, min_length=1, max_length=16); description: str | None = None; status: Literal["planning", "active", "on_hold", "completed", "archived"] | None = None; health: Literal["on_track", "at_risk", "off_track"] | None = None; color: str | None = None; team_id: str | None = None; due_date: datetime | None = None; launch_date: date | None = None; launch_freeze_rule: str | None = Field(default=None, max_length=2000)
     north_star_goal: str | None = Field(default=None, max_length=2000); success_metric: str | None = Field(default=None, max_length=180); metric_unit: str | None = Field(default=None, max_length=60); baseline_value: float | None = None; current_value: float | None = None; target_value: float | None = None
 class MilestoneIn(BaseModel): title: str = Field(min_length=1, max_length=180); description: str | None = Field(default=None, max_length=2000); due_date: datetime | None = None
 class MilestoneUpdate(BaseModel): title: str | None = Field(default=None, min_length=1, max_length=180); description: str | None = Field(default=None, max_length=2000); due_date: datetime | None = None
@@ -215,8 +215,15 @@ class InboundMessageCreate(BaseModel):
     sender: str | None = Field(default=None, max_length=500)
     subject: str | None = Field(default=None, max_length=500)
     body: str = Field(min_length=1, max_length=50000)
-    source_url: AnyHttpUrl | None = Field(default=None, max_length=2000)
+    source_url: AnyHttpUrl | None = None
     received_at: datetime | None = None
+
+    @field_validator("source_url", mode="before")
+    @classmethod
+    def validate_source_url_length(cls, value):
+        if value is not None and len(str(value)) > 2000:
+            raise ValueError("source_url must be at most 2000 characters")
+        return value
 class InboundMessageStatus(BaseModel):
     status: Literal["new", "ignored"]
 class InboundPlanEdit(BaseModel):
@@ -320,7 +327,7 @@ def project_out(p: Project, db: Session):
         north_star = {"goal": p.north_star_goal, "metric": p.success_metric, "unit": p.metric_unit,
                       "baseline": p.baseline_value, "current": p.current_value, "target": p.target_value,
                       "progress": _metric_progress(p)}
-    return {"id":p.id,"name":p.name,"code":p.code,"description":p.description,"status":p.status,"health":p.health,"color":p.color,"due_date":p.due_date,"owner":user_out(owner) if owner else None,"team":team.name if team else None,"progress":round(done/total*100) if total else 0,"task_count":total,"documents":[{"id":d.id,"file_name":d.file_name,"created_at":d.created_at} for d in documents],"north_star":north_star,"milestones":[milestone_out(m,db) for m in milestones]}
+    return {"id":p.id,"name":p.name,"code":p.code,"description":p.description,"status":p.status,"health":p.health,"color":p.color,"due_date":p.due_date,"launch_date":p.launch_date,"launch_freeze_rule":p.launch_freeze_rule,"owner":user_out(owner) if owner else None,"team":team.name if team else None,"progress":round(done/total*100) if total else 0,"task_count":total,"documents":[{"id":d.id,"file_name":d.file_name,"created_at":d.created_at} for d in documents],"north_star":north_star,"milestones":[milestone_out(m,db) for m in milestones]}
 def task_out(t: Task, db: Session):
     assignee = db.get(User,t.assignee_id) if t.assignee_id else None
     dependencies = list_dependencies(db, t.id)
@@ -1029,10 +1036,20 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
         raise HTTPException(403, "Agents must submit completed work through the review workflow")
     dependency_ids = changes.pop("depends_on", None)
     dependency_detail = {}
-    qa_changed = bool(set(changes) & {
+    qa_fields = {
         "title", "description", "labels", "qa_required", "requires_human_approval",
         "acceptance_criteria", "review_rubric", "qa_evidence",
-    }) or dependency_ids is not None
+    }
+    # A high-priority task reasserts its required approval flags on every update.
+    # Only invalidate a completed QA run when an input actually changed; otherwise
+    # a status-only completion request would erase its own passing checks.
+    qa_changed = any(
+        key in changes and changes[key] != getattr(t, key)
+        for key in qa_fields
+    )
+    if dependency_ids is not None:
+        previous_dependency_ids = {dependency.id for dependency in list_dependencies(db, t.id)}
+        qa_changed = qa_changed or previous_dependency_ids != set(dependency_ids)
     for key,value in changes.items(): setattr(t,key,value)
     if t.requires_human_approval:
         t.qa_required = True
@@ -1078,6 +1095,12 @@ def update_task(task_id:str,data:TaskUpdate,user:User=Depends(current_user),db:S
                 "dependencies_added": len(next_dependency_ids - previous_dependency_ids),
                 "dependencies_removed": len(previous_dependency_ids - next_dependency_ids),
             }
+    if t.status == "review" and (t.priority.lower() == "high" or t.qa_required or t.requires_human_approval) \
+            and (data.status == "review" or qa_changed):
+        checks = record_task_quality_checks(db, t)
+        log(db, user.organization_id, user.id, "task", t.id, "task_qa_checked",
+            automated=True, passed=all(item["passed"] for item in checks),
+            checks=[{"name": item["name"], "passed": item["passed"]} for item in checks])
     if data.status == "done" and (t.priority.lower() == "high" or t.qa_required or t.requires_human_approval):
         if user.kind != "human":
             raise HTTPException(403, "A human must approve gated task delivery")
@@ -1139,9 +1162,7 @@ def run_task_qa(task_id: str, user: User = Depends(current_user), db: Session = 
         raise HTTPException(404, "Task not found")
     ensure_knowledge_project(db, user, task.project_id)
     require_manager(user)
-    checks = run_task_quality_checks(db, task)
-    task.qa_checks = checks
-    task.qa_checked_at = datetime.now(timezone.utc).replace(tzinfo=None)
+    checks = record_task_quality_checks(db, task)
     passed = all(item["passed"] for item in checks)
     log(db, user.organization_id, user.id, "task", task.id, "task_qa_checked",
         passed=passed, checks=[{"name": item["name"], "passed": item["passed"]} for item in checks])
@@ -1231,6 +1252,11 @@ def decide_task_peer_review(task_id: str, data: QAPeerReviewDecision,
                 owner.current_task_id = task.id
         db.add(Comment(task_id=task.id, author_id=user.id,
                        body=f"Peer review requested changes: {data.summary.strip()}"))
+    else:
+        checks = record_task_quality_checks(db, task)
+        log(db, user.organization_id, user.id, "task", task.id, "task_qa_checked",
+            automated=True, passed=all(item["passed"] for item in checks),
+            checks=[{"name": item["name"], "passed": item["passed"]} for item in checks])
     log(db, user.organization_id, user.id, "task", task.id, "task_peer_review_decided",
         outcome=data.outcome, reviewer_agent_id=task.peer_review_agent_id)
     notify(db, task.assignee_id, user, f"Peer review {data.outcome.replace('_', ' ')}: {task.title}",

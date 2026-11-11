@@ -22,6 +22,8 @@ export type Project = {
   owner?: User;
   team?: string;
   due_date?: string;
+  launch_date?: string | null;
+  launch_freeze_rule?: string | null;
   documents?: Doc[];
   north_star?: { goal: string; metric: string; unit: string; baseline: number; current: number; target: number; progress: number | null } | null;
   milestones?: ProjectMilestone[];

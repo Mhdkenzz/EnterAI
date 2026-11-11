@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from .agent_workspace import repo_check
 from .models import Project, Task, User
 from .task_dependencies import unmet_dependency_ids
+from .time_utils import utcnow_naive
 
 
 def run_task_quality_checks(db: Session, task: Task) -> list[dict]:
@@ -65,4 +66,12 @@ def run_task_quality_checks(db: Session, task: Task) -> list[dict]:
             except (ValueError, OSError) as error:
                 record(check_name, False, str(error))
 
+    return checks
+
+
+def record_task_quality_checks(db: Session, task: Task) -> list[dict]:
+    """Run and persist the bounded delivery checks for a task."""
+    checks = run_task_quality_checks(db, task)
+    task.qa_checks = checks
+    task.qa_checked_at = utcnow_naive()
     return checks

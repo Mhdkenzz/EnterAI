@@ -74,11 +74,29 @@ def test_qa_gate_requires_evidence_and_passed_checks_before_human_completion():
         saved = client.patch(f"/api/tasks/{task['id']}", headers=headers,
                              json={"qa_evidence": ["Automated regression validation passed; observed output matches the acceptance criteria."]})
         assert saved.status_code == 200, saved.text
-        checks = client.post(f"/api/tasks/{task['id']}/qa/run", headers=headers)
-        assert checks.status_code == 200
-        assert all(item["passed"] for item in checks.json()["qa_checks"])
+        assert saved.json()["qa_checked_at"] is not None
+        assert all(item["passed"] for item in saved.json()["qa_checks"])
         completed = client.patch(f"/api/tasks/{task['id']}", headers=headers, json={"status": "done"})
         assert completed.status_code == 200, completed.text
+
+
+def test_high_priority_completion_preserves_passed_qa_checks():
+    with TestClient(app) as client:
+        _, headers, project = _workspace(client)
+        task = _task(client, headers, project, priority="high")
+        evidence = client.patch(f"/api/tasks/{task['id']}", headers=headers, json={
+            "qa_evidence": ["Automated release checks passed and the result was reviewed."],
+        })
+        assert evidence.status_code == 200, evidence.text
+        submitted = client.patch(f"/api/tasks/{task['id']}", headers=headers, json={"status": "review"})
+        assert submitted.status_code == 200, submitted.text
+        assert submitted.json()["qa_checked_at"] is not None
+        assert all(item["passed"] for item in submitted.json()["qa_checks"])
+
+        completed = client.patch(f"/api/tasks/{task['id']}", headers=headers, json={"status": "done"})
+        assert completed.status_code == 200, completed.text
+        assert completed.json()["qa_checked_at"] is not None
+        assert all(item["passed"] for item in completed.json()["qa_checks"])
 
 
 def test_peer_review_assigns_a_different_agent_and_human_decides_after_submission():
@@ -152,9 +170,8 @@ def test_peer_review_assigns_a_different_agent_and_human_decides_after_submissio
                                json={"outcome": "approved", "summary": "Review is complete and the evidence supports the rubric."})
         assert decision.status_code == 200, decision.text
         assert decision.json()["peer_review_status"] == "approved"
-        checks = client.post(f"/api/tasks/{task['id']}/qa/run", headers=headers)
-        assert checks.status_code == 200
-        assert all(item["passed"] for item in checks.json()["qa_checks"])
+        assert decision.json()["qa_checked_at"] is not None
+        assert all(item["passed"] for item in decision.json()["qa_checks"])
         completed = client.patch(f"/api/tasks/{task['id']}", headers=headers, json={"status": "done"})
         assert completed.status_code == 200, completed.text
 

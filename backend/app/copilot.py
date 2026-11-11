@@ -47,6 +47,7 @@ from .services import advance_project_to_completion_review, log, sync_agent_task
 from .observability import legacy_detail, provider_call, require_execution, execution_allowed, execution_run, audit, audit_context, tool_audit
 from .task_dependencies import list_dependencies, unmet_dependency_ids
 from .agent_access import allowed_agent_tools, agent_tool_allowed, record_access_denial
+from .quality import record_task_quality_checks
 
 
 class CopilotProviderError(RuntimeError):
@@ -1494,6 +1495,10 @@ class CopilotService:
                     task.completed_at = utcnow_naive() if task.status == "done" else None
                     if gated_delivery:
                         task.qa_evidence = [*(task.qa_evidence or []), call["args"]["result"].strip()[:2000]][-50:]
+                        checks = record_task_quality_checks(db, task)
+                        log(db, agent.organization_id, agent.id, "task", task.id, "task_qa_checked",
+                            automated=True, passed=all(item["passed"] for item in checks),
+                            checks=[{"name": item["name"], "passed": item["passed"]} for item in checks])
                     if is_peer_review and task.parent_id:
                         parent_task = db.get(Task, task.parent_id)
                         if parent_task and parent_task.peer_review_task_id == task.id:

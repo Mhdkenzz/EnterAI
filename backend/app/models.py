@@ -1,6 +1,6 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from uuid import uuid4
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, text
 from sqlalchemy.orm import Mapped, mapped_column
 from pgvector.sqlalchemy import Vector
 from .database import Base
@@ -102,6 +102,8 @@ class Project(Base):
     owner_id: Mapped[str | None] = mapped_column(ForeignKey("users.id", name="fk_projects_owner_id_users", use_alter=True), nullable=True)
     color: Mapped[str] = mapped_column(String(20), default="#7c3aed")
     due_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    launch_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    launch_freeze_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
 class ProjectDocument(Base):

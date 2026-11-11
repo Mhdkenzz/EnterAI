@@ -131,6 +131,7 @@ export function ProjectForm({ teams, close, create }: any) {
   const [name, setName] = useState(""),
     [code, setCode] = useState(""),
     [description, setDescription] = useState(""),
+    [freezeRule, setFreezeRule] = useState(""),
     [team, setTeam] = useState(""),
     [health, setHealth] = useState("on_track"),
     [doc, setDoc] = useState(""),
@@ -165,12 +166,15 @@ export function ProjectForm({ teams, close, create }: any) {
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
+          const form = new FormData(e.currentTarget);
           if (name.trim() && code.trim())
             run(() =>
               create({
                 name: name.trim(),
                 code: code.trim(),
                 description,
+                launch_date: String(form.get("launch_date") || "") || null,
+                launch_freeze_rule: String(form.get("launch_freeze_rule") || "").trim() || null,
                 team_id: team || null,
                 health,
                 color: "#38bdf8",
@@ -231,6 +235,16 @@ export function ProjectForm({ teams, close, create }: any) {
             onChange={(e) => setDescription(e.target.value)}
           />
         </label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block text-xs text-zinc-400">
+            Launch date
+            <input aria-label="Launch date" name="launch_date" type="date" className={field} />
+          </label>
+          <label className="block text-xs text-zinc-400 sm:col-span-2">
+            Launch freeze rule
+            <textarea aria-label="Launch freeze rule" name="launch_freeze_rule" maxLength={2000} className={cn(field, "min-h-20")} placeholder="Example: Freeze code changes 48 hours before launch; only approved fixes may ship." value={freezeRule} onChange={(e) => setFreezeRule(e.target.value)} />
+          </label>
+        </div>
         <NorthStarFields value={northStar} onChange={setNorthStar} />
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-xs text-zinc-400">
@@ -270,6 +284,7 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
   const [name, setName] = useState(project.name),
     [code, setCode] = useState(project.code),
     [description, setDescription] = useState(project.description || ""),
+    [freezeRule, setFreezeRule] = useState(project.launch_freeze_rule || ""),
     [health, setHealth] = useState(project.health),
     [team, setTeam] = useState(teams.find((t: any) => t.name === project.team)?.id || "");
   const [northStar, setNorthStar] = useState({
@@ -285,11 +300,14 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
+          const form = new FormData(e.currentTarget);
           run(() =>
             save({
               name: name.trim(),
               code: code.trim().toUpperCase(),
               description,
+              launch_date: String(form.get("launch_date") || "") || null,
+              launch_freeze_rule: String(form.get("launch_freeze_rule") || "").trim() || null,
               health,
               team_id: team || null,
               ...projectNorthStarPayload(northStar),
@@ -320,6 +338,16 @@ export function ProjectEditForm({ project, teams, close, save }: any) {
             onChange={(e) => setDescription(e.target.value)}
           />
         </label>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block text-xs text-zinc-400">
+            Launch date
+            <input aria-label="Launch date" name="launch_date" type="date" className={field} defaultValue={project.launch_date || ""} />
+          </label>
+          <label className="block text-xs text-zinc-400 sm:col-span-2">
+            Launch freeze rule
+            <textarea aria-label="Launch freeze rule" name="launch_freeze_rule" maxLength={2000} className={cn(field, "min-h-20")} placeholder="Example: Freeze code changes 48 hours before launch; only approved fixes may ship." value={freezeRule} onChange={(e) => setFreezeRule(e.target.value)} />
+          </label>
+        </div>
         <NorthStarFields value={northStar} onChange={setNorthStar} />
         <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-xs text-zinc-400">
@@ -362,7 +390,6 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
     [milestoneId, setMilestoneId] = useState(""),
     [assignee, setAssignee] = useState(currentUserId || ""),
     [assigneeSearch, setAssigneeSearch] = useState(""),
-    [dueDate, setDueDate] = useState(""),
     [qaRequired, setQaRequired] = useState(false),
     [humanApproval, setHumanApproval] = useState(false),
     [qaDetailsOpen, setQaDetailsOpen] = useState(false),
@@ -375,11 +402,12 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
         className="space-y-4"
         onSubmit={(e) => {
           e.preventDefault();
+          const form = new FormData(e.currentTarget);
           if (!agentsLoading && title.trim())
             run(() => create({
               title: title.trim(), description, priority, assignee_id: assignee || null,
               milestone_id: milestoneId || null,
-              due_date: dueDate ? dueDate + "T00:00:00" : null,
+              due_date: String(form.get("due_date") || "") ? `${String(form.get("due_date"))}T00:00:00` : null,
               qa_required: qaRequired || humanApproval,
               requires_human_approval: humanApproval,
               acceptance_criteria: criteriaText.split("\n").map((item) => item.trim()).filter(Boolean),
@@ -431,7 +459,7 @@ export function TaskForm({ project, users, agents = [], agentsLoading = false, c
         </label>}
         <label className="block text-xs text-zinc-400">
           Due date
-          <input type="date" className={field} value={dueDate} onChange={(e) => setDueDate(e.target.value)} />
+          <input name="due_date" type="date" className={field} />
         </label>
         <details open={qaDetailsOpen} onToggle={(e) => setQaDetailsOpen(e.currentTarget.open)} className="rounded-lg border border-line p-3">
           <summary className="cursor-pointer text-sm font-semibold text-ink">Delivery QA (optional)</summary>

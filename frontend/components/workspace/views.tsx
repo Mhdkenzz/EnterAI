@@ -701,7 +701,6 @@ export function ProjectView({
 }: any) {
   const [mode, setMode] = useState("board");
   const [milestoneTitle, setMilestoneTitle] = useState("");
-  const [milestoneDue, setMilestoneDue] = useState("");
   const [coordinationError, setCoordinationError] = useState("");
   const [stepSaving, setStepSaving] = useState<string | null>(null);
   const [nextSteps, setNextSteps] = useState<AgentNextStep[]>([]);
@@ -724,12 +723,15 @@ export function ProjectView({
   async function addMilestone(event: FormEvent) {
     event.preventDefault();
     if (!milestoneTitle.trim()) return;
+    const formElement = event.currentTarget as HTMLFormElement;
+    const form = new FormData(formElement);
+    const dueDate = String(form.get("milestone_due_date") || "");
     setCoordinationError("");
     try {
       await api<ProjectMilestone>(`/projects/${project.id}/milestones`, {
-        method: "POST", body: JSON.stringify({ title: milestoneTitle.trim(), due_date: milestoneDue ? `${milestoneDue}T00:00:00` : null }),
+        method: "POST", body: JSON.stringify({ title: milestoneTitle.trim(), due_date: dueDate ? `${dueDate}T00:00:00` : null }),
       });
-      setMilestoneTitle(""); setMilestoneDue("");
+      formElement.reset(); setMilestoneTitle("");
       await coordinationChanged?.();
     } catch (error: any) { setCoordinationError(error?.message || "Could not add the milestone."); }
   }
@@ -865,7 +867,7 @@ export function ProjectView({
           </div>
           {(canManage || project.owner?.id === currentUserId) && !archived && <form className="mt-3 grid gap-2 sm:grid-cols-[1fr_10rem_auto]" onSubmit={addMilestone}>
             <input aria-label="New milestone title" className={field} placeholder="Milestone title" value={milestoneTitle} onChange={(event) => setMilestoneTitle(event.target.value)} />
-            <input aria-label="Milestone due date" type="date" className={field} value={milestoneDue} onChange={(event) => setMilestoneDue(event.target.value)} />
+            <input aria-label="Milestone due date" name="milestone_due_date" type="date" className={field} />
             <Button type="submit" size="sm" disabled={!milestoneTitle.trim()}><Plus size={14} /> Add milestone</Button>
           </form>}
         </Card>
